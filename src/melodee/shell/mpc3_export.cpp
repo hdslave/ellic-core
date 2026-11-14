@@ -14,6 +14,7 @@
 // Keys), become a Keygroup track of their own, the pad's notes going with them.
 #include "melodee/shell/mpc3_export.h"
 #include "melodee/engine/dsp.h"
+#include "melodee/engine/midi_engine.h"
 #include "melodee/engine/sfz.h"
 #include "melodee/model/sampler.h"
 #include "melodee/model/song_flatten.h"
@@ -487,6 +488,35 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
                 continue;
             }
         }
+        if (track.engine == EngineKind::Midi) { // a MIDI track: MPC 3's own, on its channel, with its bank and program
+            using namespace midi_track;
+            juce::var made = field(doc, "midiTrack").clone();
+            char fallback[16];
+            std::snprintf(fallback, sizeof(fallback), "MIDI %03u", t + 1);
+            const std::string track_name = unique_name(track.name, fallback, taken);
+            put(made, "name", juce::String(track_name));
+            put(made, "mute", track.mix.mute);
+            put(field(made, "program"), "name", juce::String(track_name));
+            // The port stays MPC 3's own choice (<none> until picked there): Melodee's ports are not its ports.
+            // Channels count from 0 there (MPC 3 shows a stored 4 as channel 5).
+            put(field(made, "midiOutputRoute"), "outputChannel", whole(std::clamp<int>(track.params[Channel], 1, 16) - 1));
+            const auto& sound = field(made, "midiBankAndProgramNumber");
+            const int msb = track.params[BankMsb], lsb = track.params[BankLsb], program = track.params[Program]; // 0 Off, else n + 1
+            put(sound, "midiBankEnable", msb != 0 || lsb != 0);
+            put(sound, "midiBankMsb", whole(std::max(msb - 1, 0)));
+            put(sound, "midiBankLsb", whole(std::max(lsb - 1, 0)));
+            put(sound, "midiProgramNumberEnable", program != 0);
+            put(sound, "midiProgramNumber", whole(std::max(program - 1, 0)));
+            retarget_tracks(made, {}, juce::String(track_name));
+            Written w;
+            w.index = t;
+            w.name = track_name;
+            w.track = made;
+            w.keyed = true; // its notes are MIDI notes
+            written.push_back(std::move(w));
+            ++report.midi;
+            continue;
+        }
         if (!track.sampled()) { ++report.skipped_tracks; continue; }
         // A KEYGROUP track (model/project.h): its one sound, pad 1, a keygroup whatever it is, its notes MIDI notes.
         const bool keyed = track.engine == EngineKind::Keygroup;
@@ -631,7 +661,7 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
         }
     }
     if (written.empty()) return "Nothing to export";
-    for (const auto& w : written) report.tracks += w.pad < 0 && !w.audio;
+    for (const auto& w : written) report.tracks += w.pad < 0 && !w.audio && project.tracks[w.index].engine != EngineKind::Midi;
 
     // Every name, as MPC 3 keys its clips: sorted, the buses among them.
     std::vector<std::string> names;
