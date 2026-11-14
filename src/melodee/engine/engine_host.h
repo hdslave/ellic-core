@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #pragma once
 #include "melodee/engine/arp.h"
+#include "melodee/engine/note_repeat.h"
 #include "melodee/engine/command.h"
 #include "melodee/engine/compensation.h"
 #include "melodee/engine/looper.h"
@@ -407,6 +408,8 @@ private:
         unsigned send_pad_fed = 0;                                                // a bit a bus: something there this block
         Arp arp;
         PendingOn arp_late;
+        NoteRepeat repeat;
+        int32_t repeat_late = -1, repeat_length = 0; // a swung step of Note Repeat: frames to it, and its notes' length
         std::array<PendingHit, 32> hits {}; // ratchets' hits to come, each on its frame
         unsigned hits_waiting = 0;
         // Trig conditions (model/trig.h): how the last weighed note went, on the track and on each key (a kit's
@@ -470,6 +473,11 @@ private:
     void load_track(unsigned t, const Track& track); // a whole track's sound, kit, mix and effects
     void load_state(const Project& project, bool keep_loops = false); // all but the patterns (keep_loops: the same project at a new rate)
     void run_late(Slot& slot, unsigned frames);       // a swung arp note, when its time comes
+    void repeat_step(Slot& slot, int32_t length);     // Note Repeat: every pad held, together
+    void arp_write(unsigned t, Slot& slot, int key, int velocity, unsigned rate, unsigned gate); // Seq Record: a repeat into the pattern
+    bool clock_free(const Slot& slot) const;          // no other track repeats or arpeggiates on the shared clock
+    bool arp_live() const;                            // keys held under Note Repeat or the arp, or a swung step to come
+    unsigned next_late() const;                       // frames to the next swung step (~0u: none)
     // Ratchets: the hits due now (at block_at) play, the rest come `frames` nearer; the frames to the next one due
     // (the render loop splits there, so each lands on its frame); and every one dropped (Stop, Play).
     void run_hits(unsigned t, Slot& slot, unsigned frames);

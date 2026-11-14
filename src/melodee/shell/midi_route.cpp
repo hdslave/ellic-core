@@ -63,7 +63,7 @@ int note_key(const Track& track, int note, bool every_key) {
 }
 
 int levels_key(const Track& track, int key, bool instrument) {
-    if (track.engine != EngineKind::Sampler || !track.levels || track.arp || key < 0 || key > 127) return -1;
+    if (track.engine != EngineKind::Sampler || !track.levels || track.arp || track.repeat || key < 0 || key > 127) return -1;
     const unsigned kit = track.levels_pad % sampler_pads;
     const auto& pad = track.pads[kit];
     if (!pad.used()) return -1;

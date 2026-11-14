@@ -5,8 +5,8 @@
 #include <array>
 #include <cstdint>
 
-// The arpeggiator (and note repeat, which is the same with one key held):
-// the keys held, played in turn at a rate, across octaves. It counts its own
+// The arpeggiator: the keys held, played in turn at a rate, across octaves.
+// Note Repeat is apart (engine/note_repeat.h) and shares only the clock. It counts its own
 // clock ticks (24 a quarter), so it plays whether the song runs or not.
 // Audio thread only; no allocation.
 namespace melodee {
@@ -59,7 +59,7 @@ struct Arp {
     int sounding = -1;
     int from = -1;                             // the held key next() played last (before octaves)
     uint32_t seed = 7;
-    bool pressure_velocity = true;             // Note Repeat (roadmap P1): a held pad's pressure is its repeats' velocity (not with Full Level)
+    bool pressure_velocity = false;            // a held key's pressure as its notes' velocity
 
     // How hard the next note of `key` plays: as the pad's pressure while it reports one, else as it was struck.
     int velocity_of(int key, int struck) const {

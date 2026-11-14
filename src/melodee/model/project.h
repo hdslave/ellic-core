@@ -296,7 +296,10 @@ struct Track {
     // Chord: one pad, one chord from the scale (up to four notes).
     bool chord = false, chord_hold = false;
     uint8_t chord_type = 1, chord_voicing = 0, chord_invert = 0;
-    // Arp (note repeat on a sampler track): held notes in turn at a rate.
+    // Note Repeat: every pad held, again on each step of its rate (engine/note_repeat.h).
+    bool repeat = false;
+    uint8_t repeat_rate = 4; // engine/arp.h, 4 is 1/16
+    // Arp: held notes in turn at a rate (Stage's ARP page).
     bool arp = false, arp_latch = false;
     uint8_t arp_mode = 0, arp_rate = 4, arp_octaves = 1, arp_gate = 60; // arp_rate: engine/arp.h, 4 is 1/16
     // The fader (Shift + Pad 9, parity phase 8): its target (model/fader.h; 255

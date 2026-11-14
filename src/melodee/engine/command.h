@@ -60,6 +60,8 @@ struct Command {
         Click,       // value: on; index: level 0..100
         Arp,         // track; index = 0 on, 1 mode, 2 rate, 3 octaves, 4 gate; value
         ArpKey,      // track, index = key, value = velocity (0: let go)
+        Repeat,      // Note Repeat: track; index = 0 on, 2 rate, 5 pressure as velocity; value
+        RepeatKey,   // Note Repeat: track, index = key, value = velocity (0: let go), position = a 16 Levels cutoff + 1
         // Punch: track = the target (255 the master), index = PunchKind | pad << 8
         // (pad 1..64: that pad alone on a sampler track, 0: the whole target),
         // value = depth 0..100, pattern = snap (0 1/4 .. 3 1/32) | tail << 4 | 64 when it starts at
