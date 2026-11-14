@@ -34,6 +34,10 @@ std::map<std::string, KeygroupInstrument> mpc_project_pads(const std::vector<uin
 // (engine/keygroup.h), drum or keygroup alike. Empty on success.
 std::string read_mpc_json_program(const std::vector<uint8_t>& file, const std::string& path, KeygroupProgram& program);
 
+// A keygroup track of an MPC 3 project (its `track`, as the file lists them) as the .xpm reader's tree, its files in the
+// project's data folder: what "<project>.xpj#k<track>" plays (a KEYGROUP track's instrument). Empty on success.
+std::string mpc_project_keygroup(const std::vector<uint8_t>& file, const std::string& path, unsigned track, KeygroupProgram& program);
+
 // The sample rate of a WAV file; 0 when it cannot tell.
 unsigned mpc_wav_rate(const std::string& path);
 

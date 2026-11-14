@@ -342,6 +342,29 @@ unsigned read_notes(const juce::var& clip, const std::array<int, 128>& pad_of_no
     return added;
 }
 
+// A keygroup track's clip: its notes as MIDI notes, as a KEYGROUP track keeps them.
+unsigned read_keys(const juce::var& clip, Pattern& pattern) {
+    unsigned added = 0;
+    const auto* events = clip["eventList"]["events"].getArray();
+    if (!events) return 0;
+    for (const auto& event : *events) {
+        if (integer(event, "type") != note_event || flag(event, "muted")) continue;
+        const auto& note = event["note"];
+        int key = integer(note, "note", -1);
+        if (key < 0 || key > 127) continue;
+        uint32_t tick = uint32_t(std::lround(number(event, "time") / mpc_ticks_per_tick));
+        if (tick >= pattern.length) continue;
+        Event e;
+        e.tick = tick;
+        e.length = uint16_t(std::clamp(std::lround(number(note, "length") / mpc_ticks_per_tick), 1l, 65535l));
+        e.key = uint8_t(key);
+        e.velocity = uint8_t(std::clamp(std::lround(number(note, "velocity", 1) * 127), 1l, 127l));
+        e.chance = uint8_t(std::clamp(integer(note, "probability", 100), 0, 100));
+        added += pattern.add(e);
+    }
+    return added;
+}
+
 } // namespace
 
 bool is_mpc_project(const std::string& path) { return fs::path(path).extension() == ".xpj"; }
@@ -375,18 +398,11 @@ std::map<std::string, KeygroupInstrument> mpc_project_pads(const std::vector<uin
     return pads;
 }
 
-std::string read_mpc_json_program(const std::vector<uint8_t>& file, const std::string& path, KeygroupProgram& out) {
-    const auto data = read_document(file);
-    if (data.isVoid()) return "Unreadable";
-    const auto& program = data["program"].isObject() ? data["program"] : data;
+namespace {
+// An MPC 3 program in JSON as the .xpm reader's tree, its layers' files in `data_folder` (relative to the file).
+std::string program_tree(const juce::var& program, const std::string& data_folder, KeygroupProgram& out) {
     const auto* instruments = program["drum"]["instruments"].getArray();
     if (!instruments) return "Not an MPC program";
-    // Its samples: in "<name>_[TrackData]" (an .xty) or "<name>_[ProgramData]" beside it, else beside it.
-    const fs::path where(path);
-    std::string data_folder;
-    std::error_code error;
-    for (const char* tail : {"_[TrackData]", "_[ProgramData]"})
-        if (data_folder.empty() && fs::is_directory(where.parent_path() / (where.stem().string() + tail), error)) data_folder = where.stem().string() + tail;
     out = KeygroupProgram {};
     out.type = integer(program, "type") == 1 ? "Keygroup" : "Drum";
     out.tags["ProgramName"] = program["name"].toString().toStdString();
@@ -401,6 +417,29 @@ std::string read_mpc_json_program(const std::vector<uint8_t>& file, const std::s
     for (int n = 0; n < std::min(instruments->size(), mpc_pads); ++n)
         out.instruments.push_back(instrument_tags(instruments->getReference(n), n + 1, data_folder));
     return {};
+}
+} // namespace
+
+std::string read_mpc_json_program(const std::vector<uint8_t>& file, const std::string& path, KeygroupProgram& out) {
+    const auto data = read_document(file);
+    if (data.isVoid()) return "Unreadable";
+    const auto& program = data["program"].isObject() ? data["program"] : data;
+    // Its samples: in "<name>_[TrackData]" (an .xty) or "<name>_[ProgramData]" beside it, else beside it.
+    const fs::path where(path);
+    std::string data_folder;
+    std::error_code error;
+    for (const char* tail : {"_[TrackData]", "_[ProgramData]"})
+        if (data_folder.empty() && fs::is_directory(where.parent_path() / (where.stem().string() + tail), error)) data_folder = where.stem().string() + tail;
+    return program_tree(program, data_folder, out);
+}
+
+std::string mpc_project_keygroup(const std::vector<uint8_t>& file, const std::string& path, unsigned track, KeygroupProgram& out) {
+    const auto data = read_document(file);
+    const auto* tracks = data["tracks"].getArray();
+    if (!tracks || track >= unsigned(tracks->size())) return "Track not found";
+    const auto& program = tracks->getReference(int(track))["program"];
+    if (integer(program, "type") != 1) return "Not a keygroup";
+    return program_tree(program, fs::path(path).stem().string() + "_[ProjectData]", out);
 }
 
 std::string import_mpc_project(const std::vector<uint8_t>& file, const std::string& path, Project& project, PatternBank& patterns, MpcImport& report) {
@@ -433,6 +472,35 @@ std::string import_mpc_project(const std::vector<uint8_t>& file, const std::stri
         const auto* instruments = program["drum"]["instruments"].getArray();
         if (!instruments) continue; // submixes and outputs are tracks in the file too
         const auto name = source["name"].toString();
+        if (integer(program, "type") == 1) { // an MPC 3 keygroup track: a KEYGROUP track playing it ("<file>#k<track>")
+            const juce::var* first = nullptr;
+            for (const auto& instrument : *instruments) if (!first && !sounding_layer(instrument).isVoid()) first = &instrument;
+            if (!first) continue;
+            if (used == track_count) { ++report.over_limit; continue; }
+            int slot = samples.instrument(path + "#k" + std::to_string(raw_index), name.toStdString().substr(0, sizeof(SampleRef::name) - 1));
+            if (slot < 0) { ++report.over_limit; continue; }
+            const unsigned index = used++;
+            auto& track = project.tracks[index];
+            load_sound(track, EngineKind::Keygroup, 0);
+            track.set_name(name.toRawUTF8());
+            const auto& mix = program["mixable"];
+            track.mix.level = level_of(number(mix, "volume", 0.7079));
+            track.mix.pan = pan_of(number(mix, "pan", 0.5));
+            track.mix.mute = flag(mix, "mute") || flag(source, "mute");
+            track.mix.solo = flag(mix, "solo");
+            // its sound: the first keygroup's envelope, filter and level; its zones' own tune and regions are theirs
+            read_pad(*first, sounding_layer(*first), unsigned(slot), 1.0, track.pads[0], true);
+            track.pads[0].play = PadPlay::Gate;
+            track.pads[0].mono = flag(program["drum"], "monophonic");
+            track.last_pad = 0;
+            ++report.pads;
+            for (const auto& [n, sequence] : sequences) {
+                auto& pattern = patterns.at[index][n];
+                pattern.length = uint32_t(std::clamp<int64_t>(int64_t(number(*sequence, "lengthPulses", 3840) / mpc_ticks_per_tick), 1, project.max_length()));
+                report.notes += read_keys(clip_of(*sequence, name), pattern);
+            }
+            continue;
+        }
         bool wanted = false;
         for (const auto& instrument : *instruments) wanted = wanted || !sounding_layer(instrument).isVoid();
         for (const auto& [n, sequence] : sequences) wanted = wanted || has_notes(clip_of(*sequence, name));
