@@ -95,4 +95,66 @@ PrintAudio render_print(EngineHost& host, unsigned track, uint32_t ticks, PrintT
     return a;
 }
 
+NoteAudio render_note(EngineHost& host, unsigned track, uint8_t key, uint8_t velocity, uint64_t hold, PrintTap tap,
+                      float most_tail, const std::function<bool()>& keep_going) {
+    NoteAudio a;
+    const float rate = dsp::sample_rate();
+    const unsigned B = EngineHost::block;
+    host.set_print_tap(track, tap == PrintTap::PostFx);
+    std::vector<int32_t> out(B * 2);
+    host.send({Command::Type::NoteOn, uint8_t(track), 0, key, int16_t(std::max<uint8_t>(velocity, 1))});
+    const uint64_t quiet_frames = uint64_t(ring_quiet_seconds * rate);
+    const uint64_t most = uint64_t(std::max(0.0f, most_tail) * rate);
+    uint64_t played = 0, quiet = 0, latency = 0, loud_until = 0;
+    bool planned = false, released = false;
+    while (true) {
+        if (keep_going && !keep_going()) { a.error = "stopped"; break; }
+        // The block split where the key is let go, so the note-off lands on frame `hold`.
+        unsigned n = B;
+        if (!released && hold > played) n = unsigned(std::min<uint64_t>(B, hold - played));
+        if (!released && played >= hold) {
+            host.send({Command::Type::NoteOff, uint8_t(track), 0, key});
+            released = true;
+        }
+        host.render(out.data(), n, 1.0f);
+        drain(host);
+        if (!planned) { // the first block has the note and the track's latency in place
+            latency = tap == PrintTap::PreFx ? host.engine_latency(track) : host.track_latency(track);
+            a.left.reserve(size_t(hold + uint64_t(rate))); a.right.reserve(size_t(hold + uint64_t(rate)));
+            planned = true;
+        }
+        const float* l = host.print_left();
+        const float* r = host.print_right();
+        bool done = false;
+        for (unsigned f = 0; f < n && !done; ++f) {
+            uint64_t at = played + f;
+            if (at < latency) continue;
+            const uint64_t kept = at - latency; // frames since the note-on
+            a.left.push_back(l[f]); a.right.push_back(r[f]);
+            const bool loud = std::fabs(l[f]) >= ring_silence || std::fabs(r[f]) >= ring_silence;
+            if (loud) loud_until = kept + 1;
+            if (kept < hold) continue;
+            quiet = loud ? 0 : quiet + 1;
+            done = quiet >= quiet_frames || kept + 1 - hold >= most;
+        }
+        played += n;
+        if (dsp::sample_rate() != rate) { a.error = "the sample rate changed"; break; }
+        if (done) break;
+    }
+    host.send({Command::Type::AllNotesOff, uint8_t(track)});
+    if (!a.error.empty()) return a;
+    // Its quiet end cut off, with a few milliseconds' fade so it ends on silence.
+    size_t keep = size_t(std::max<uint64_t>(std::min<uint64_t>(loud_until, a.left.size()), std::min<uint64_t>(hold, a.left.size())));
+    keep = std::min(a.left.size(), keep + size_t(0.005f * rate));
+    a.left.resize(keep); a.right.resize(keep);
+    const size_t fade = std::min(keep, size_t(0.005f * rate));
+    for (size_t f = 0; f < fade; ++f) {
+        const float g = float(f) / float(std::max<size_t>(fade, 1));
+        a.left[keep - 1 - f] *= g; a.right[keep - 1 - f] *= g;
+    }
+    a.held = std::min<uint64_t>(hold, keep);
+    a.release = keep > a.held ? keep - a.held : 0;
+    return a;
+}
+
 } // namespace melodee

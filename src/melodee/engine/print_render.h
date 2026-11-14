@@ -38,6 +38,19 @@ struct PrintAudio {
 PrintAudio render_print(EngineHost& host, unsigned track, uint32_t ticks, PrintTap tap, PrintTail tail,
                         const std::function<bool()>& keep_going = {}, uint8_t sends = 0);
 
+// The auto sampler (shell/auto_sample.h): one note of track `track` of `host`, played with nothing else: the key
+// held `hold` device frames, then let go, and its release kept until it stays below -70 dB for 0.2 s (`most_tail`
+// seconds at most). What is kept starts on the note-on, moved back by the track's latency as a print's is (at Pre
+// FX its engine's alone), and its quiet end is cut off. The host must not be playing.
+struct NoteAudio {
+    std::vector<float> left, right; // device frames
+    uint64_t held = 0;              // the frames before the note-off
+    uint64_t release = 0;           // the frames after it that sounded, before the quiet
+    std::string error;              // empty: made
+};
+NoteAudio render_note(EngineHost& host, unsigned track, uint8_t key, uint8_t velocity, uint64_t hold, PrintTap tap,
+                      float most_tail, const std::function<bool()>& keep_going = {});
+
 // The frames of a pass at the model rate, as render_print() counts a pass at the device's (for PrintRecord::pass).
 uint32_t model_frames_of(uint64_t device_frames, float rate);
 
