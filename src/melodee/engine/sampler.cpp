@@ -66,12 +66,12 @@ void SamplerEngine::start(Voice& v, const PadSound& sound, int pad, int velocity
     ZonePart* part = zone && multi ? &multi->parts[zone->part] : nullptr;
     if (!data || (!part && !data->frames)) return;
     glide_setup();
-    // A pad in a mute group cuts the others in it; a mono pad cuts what it played before at the same pitch, so
-    // 16 Levels' notes at other pitches (a chord) sound together.
+    // A pad in a mute group cuts the others in it; a mono pad cuts what it played before, at any pitch (16 Levels
+    // plays one note at a time on a mono pad: set it to Poly for chords).
     if (sound.group)
         for (auto& o : voices) if (o.pad >= 0 && o.group == sound.group && o.pad != pad) o.choked = true;
     if (sound.mono && !zone) // an instrument's press has cut these already: its layers must not cut each other
-        for (auto& o : voices) if (o.pad == pad && o.semis == semitones && &o != &v) o.choked = true;
+        for (auto& o : voices) if (o.pad == pad && &o != &v) o.choked = true;
     end_stream(v);
     v = Voice {};
     v.pad = pad; v.trigger = trigger >= 0 ? trigger : pad; v.sample = data; v.slot = sound.sample;
@@ -434,7 +434,7 @@ void SamplerEngine::zones_on(Multisample& multi, const PadSound& sound, int pad,
 }
 
 // A press of a pad with layers (roadmap P3): every layer its velocity reaches, the next in turn, or one at random;
-// a mono pad's last hit at that pitch is cut once for all of them, so its layers never cut each other.
+// a mono pad's last hit is cut once for all of them, so its layers never cut each other.
 void SamplerEngine::layers_on(const PadSound& sound, int pad, int velocity, int semitones, int cutoff, int trigger) {
     std::array<uint8_t, pad_layers> used {};
     unsigned count = 0;
@@ -472,7 +472,7 @@ void SamplerEngine::layers_on(const PadSound& sound, int pad, int velocity, int 
     }
     }
     if (kept && chosen) *kept = int8_t(picked[0]);
-    if (sound.mono) for (auto& v : voices) if (v.pad == pad && v.semis == semitones) v.choked = true;
+    if (sound.mono) for (auto& v : voices) if (v.pad == pad) v.choked = true;
     for (unsigned k = 0; k < chosen; ++k) {
         PadSound one = layer_sound(sound, picked[k]);
         one.mono = false; // cut above, once
