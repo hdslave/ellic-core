@@ -174,17 +174,19 @@ class Files {
 public:
     explicit Files(fs::path f) : folder(std::move(f)) {}
     // The copy's name in the data folder for the file at `source` (named after `stem` when given; a print of more
-    // than two channels made stereo).
+    // than two channels made stereo); empty when the file is not there, so nothing names it (MPC 3 stops on opening
+    // a project that names a sample it cannot find).
     const std::string& name(const std::string& source, Mpc3Export& report, const std::string& own_stem = {}) {
         auto found = names.find(source);
         if (found != names.end()) return found->second;
+        std::error_code missing_error;
+        if (!fs::exists(source, missing_error)) { ++report.missing; return names[source] = std::string(); }
         auto stem = own_stem.empty() ? fs::path(source).stem().string() : own_stem;
         std::string file = stem + ".wav";
         for (unsigned n = 2; taken.count(file); ++n) file = stem + " " + std::to_string(n) + ".wav";
         taken.insert(file);
         std::error_code error;
-        if (!fs::exists(source, error)) ++report.missing;
-        else if (!stereo_print(source, (folder / file).string())) fs::copy_file(source, folder / file, fs::copy_options::overwrite_existing, error);
+        if (!stereo_print(source, (folder / file).string())) fs::copy_file(source, folder / file, fs::copy_options::overwrite_existing, error);
         infos[file] = wav_of((folder / file).string());
         ++report.samples;
         order.push_back(file);
@@ -312,6 +314,7 @@ unsigned fill_layers(const juce::var& instrument, const std::vector<Layer>& laye
     for (const auto& layer : layers) {
         if (written == unsigned(list->size()) || written == mpc_layers) { ++report.skipped_pads; continue; }
         const auto& file = files.name(layer.source, report);
+        if (file.empty()) continue; // not on the card: left out
         fill_layer(list->getReference(int(written)), layer, file, files.info(file), written == 0, keyed);
         if (std::find(used.begin(), used.end(), file) == used.end()) used.push_back(file);
         ++written;
@@ -469,7 +472,7 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
                         char stem[64];
                         std::snprintf(stem, sizeof(stem), "%s %s", track_name.c_str(), print_pattern_name(r.pattern).c_str());
                         const auto& file = files.name((fs::path(prints_dir) / r.file).string(), report, stem);
-                        if (std::find(used.begin(), used.end(), file) == used.end()) used.push_back(file);
+                        if (!file.empty() && std::find(used.begin(), used.end(), file) == used.end()) used.push_back(file);
                     }
                 put(program, "samples", samples_of(used));
                 retarget_tracks(made, {}, juce::String(track_name));
@@ -622,7 +625,7 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
             ++report.keygroups;
         }
     }
-    if (written.empty()) return "No kit tracks to export";
+    if (written.empty()) return "Nothing to export";
     for (const auto& w : written) report.tracks += w.pad < 0 && !w.audio;
 
     // Every name, as MPC 3 keys its clips: sorted, the buses among them.
@@ -683,6 +686,7 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
                 for (const auto& place : prints_of(*own)) {
                     const auto* record = place.record;
                     const auto& file = files.name((fs::path(prints_dir) / record->file).string(), report);
+                    if (file.empty()) continue;
                     const auto& wav = files.info(file);
                     const unsigned rate = wav.rate ? wav.rate : record->rate;
                     // One pass of the pattern (Loop and Cut prints are that long; a Ring print's tail is cut where it loops).
