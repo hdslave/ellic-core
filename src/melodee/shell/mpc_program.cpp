@@ -128,8 +128,13 @@ bool is_drum_program(const std::string& path) {
 
 std::string program_preview(const std::string& path) {
     const fs::path where(path);
-    auto found = found_beside(where.parent_path(), "[Previews]/" + where.filename().string() + ".mp3");
-    return found.empty() ? std::string() : found.string();
+    // Expansions name it after the program file ("Kit.xpm.mp3", "Kit.xpm.wav"); some after its name alone.
+    for (const auto& name : {where.filename().string(), where.stem().string()})
+        for (const char* kind : {".mp3", ".wav"}) {
+            auto found = found_beside(where.parent_path(), "[Previews]/" + name + kind);
+            if (!found.empty()) return found.string();
+        }
+    return {};
 }
 
 std::string import_mpc_program(const std::vector<uint8_t>& file, const std::string& path, Project& project, MpcImport& report) {

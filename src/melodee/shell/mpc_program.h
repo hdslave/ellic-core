@@ -27,7 +27,8 @@ std::string read_program(const std::string& path, const std::string& bytes, Keyg
 bool is_mpc_program(const std::string& path);
 // A drum program (a kit), by its first few kilobytes, or the whole of an MPC 3 one.
 bool is_drum_program(const std::string& path);
-// The program's preview, as MPC expansions keep one: "[Previews]/<program file>.mp3" beside it; empty when none.
+// The program's preview, as MPC expansions keep one: "[Previews]/<program file>.mp3" or .wav
+// beside it; empty when none.
 std::string program_preview(const std::string& path);
 
 // A drum program as a project of one kit track. Empty on success.
