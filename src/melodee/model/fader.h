@@ -46,19 +46,20 @@ inline unsigned fader_place(FaderTarget t) {
     return 0;
 }
 
-// Whether a track of `engine` can take `t`: pad and kit targets need a kit (a sampler track), the pitch bend a
-// track of notes (a kit's pads have no bend); the mod wheel and the mix go everywhere.
+// Whether a track of `engine` can take `t`: pad and kit targets need a kit or a keygroup (its sound is its last pad),
+// the pitch bend a track of notes (a kit's pads have no bend); the mod wheel and the mix go everywhere.
 inline bool fader_takes(EngineKind engine, FaderTarget t) {
-    if (unsigned(t) <= unsigned(FaderTarget::KitVolume)) return engine == EngineKind::Sampler;
-    if (t == FaderTarget::PitchBend) return engine == EngineKind::Plugin || engine == EngineKind::Midi;
+    if (unsigned(t) <= unsigned(FaderTarget::KitVolume)) return engine == EngineKind::Sampler || engine == EngineKind::Keygroup;
+    if (t == FaderTarget::PitchBend) return engine == EngineKind::Plugin || engine == EngineKind::Midi || engine == EngineKind::Keygroup;
     return unsigned(t) < fader_targets;
 }
 // The last pad hit's own value (its name carries the pad).
 inline bool fader_pad_target(FaderTarget t) { return unsigned(t) < unsigned(FaderTarget::KitVolume); }
 
-// The engine's default, as Kerem decided: pad volume on a kit (the MPC's), the mod wheel on a synth.
+// The engine's default, as Kerem decided: pad volume on a kit (the MPC's) and on a keygroup (its sound's), the mod
+// wheel on a synth.
 inline FaderTarget fader_default(EngineKind engine) {
-    return engine == EngineKind::Sampler ? FaderTarget::PadVolume : FaderTarget::ModWheel;
+    return engine == EngineKind::Sampler || engine == EngineKind::Keygroup ? FaderTarget::PadVolume : FaderTarget::ModWheel;
 }
 
 // The track's target as it plays: its choice, or the default where none is
