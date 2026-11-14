@@ -2989,7 +2989,7 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
         }
         out_l = std::max(out_l, std::fabs(master_l[f])); out_r = std::max(out_r, std::fabs(master_r[f])); // the mix, for the meters
         float v = park_fading ? volume_now.at(f) * park_gain.at(f) : volume_now.at(f);
-        float left = dsp::soft_clip(master_l[f] * v), right = dsp::soft_clip(master_r[f] * v);
+        float left = dsp::master_clip(master_l[f] * v), right = dsp::master_clip(master_r[f] * v);
         peak = std::max(peak, std::max(std::fabs(left), std::fabs(right)));
         out[2 * f] = int32_t(std::clamp(left, -0.999f, 0.999f) * 2147483647.0f);
         out[2 * f + 1] = int32_t(std::clamp(right, -0.999f, 0.999f) * 2147483647.0f);

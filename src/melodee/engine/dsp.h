@@ -72,6 +72,16 @@ inline float soft_clip(float x) {
     return x * (27.0f + x * x) / (27.0f + 9.0f * x * x);
 }
 
+// The master's limit before the converter: straight up to -1 dBFS, then a tanh knee that meets full scale
+// without a corner (slope 1 at the knee). A full-scale sample plays as it is; only peaks past -1 dBFS round off.
+inline float master_clip(float x) {
+    constexpr float knee = 0.891f, room = 1.0f - knee; // -1 dBFS
+    float a = std::fabs(x);
+    if (a <= knee) return x;
+    float y = knee + room * std::tanh((a - knee) / room);
+    return x < 0 ? -y : y;
+}
+
 // PolyBLEP residual for a discontinuity at phase 0, `dt` the phase step.
 inline float blep(float t, float dt) {
     if (t < dt) { t /= dt; return t + t - t * t - 1.0f; }
