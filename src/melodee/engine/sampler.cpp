@@ -446,14 +446,19 @@ void SamplerEngine::layers_on(const PadSound& sound, int pad, int velocity, int 
     if (!count) return;
     std::array<uint8_t, pad_layers> picked {};
     unsigned chosen = 0;
-    switch (sound.layer_play) {
-    case LayerPlay::Cycle: {
+    // Per hold, under Note Repeat: the layer the hold's first repeat picked, while it is still on the pad.
+    const bool per_hold = sound.layer_play == LayerPlay::CycleHold || sound.layer_play == LayerPlay::RandomHold;
+    int8_t* kept = per_hold && pad >= 0 && pad < int(sampler_pads) && held_layer[size_t(pad)] != -1 ? &held_layer[size_t(pad)] : nullptr;
+    if (kept && *kept >= 0 && std::find(used.begin(), used.begin() + count, uint8_t(*kept)) != used.begin() + count) {
+        picked[chosen++] = uint8_t(*kept);
+    } else switch (sound.layer_play) {
+    case LayerPlay::Cycle: case LayerPlay::CycleHold: {
         auto& turn = layer_turn[size_t(pad) % sampler_pads];
         picked[chosen++] = used[turn % count];
         turn = uint8_t((turn + 1) % count);
         break;
     }
-    case LayerPlay::Random:
+    case LayerPlay::Random: case LayerPlay::RandomHold:
         seed = seed * 1664525u + 1013904223u;
         picked[chosen++] = used[(seed >> 16) % count];
         break;
@@ -466,6 +471,7 @@ void SamplerEngine::layers_on(const PadSound& sound, int pad, int velocity, int 
         break;
     }
     }
+    if (kept && chosen) *kept = int8_t(picked[0]);
     if (sound.mono) for (auto& v : voices) if (v.pad == pad && v.semis == semitones) v.choked = true;
     for (unsigned k = 0; k < chosen; ++k) {
         PadSound one = layer_sound(sound, picked[k]);

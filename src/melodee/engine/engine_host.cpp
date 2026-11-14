@@ -374,7 +374,7 @@ void EngineHost::load_track(unsigned t, const Track& track) {
     a.clear(); a.sounding = -1; slot.arp_late.key = -1; slot.arp_played = slot.arp_from = -1;
     a.on = track.arp; a.mode = ArpMode(track.arp_mode % unsigned(ArpMode::Count)); a.rate = track.arp_rate % arp_rates;
     a.octaves = track.engine == EngineKind::Sampler ? 1 : std::clamp<unsigned>(track.arp_octaves, 1, 4); a.gate = std::clamp<unsigned>(track.arp_gate, 5, 100);
-    slot.repeat.clear(); slot.repeat_late = -1;
+    slot.repeat.clear(); slot.repeat_late = -1; slot.sampler.release_layers();
     slot.repeat.on = track.repeat; slot.repeat.rate = track.repeat_rate % arp_rates;
     if (slot.kind == EngineKind::Midi) midi_program(t, frame_now); // the device gets the track's sound as it loads
 }
@@ -648,7 +648,13 @@ void EngineHost::apply(const Command& c) {
     case Type::Repeat: {
         auto& r = slot.repeat;
         switch (c.index) {
-        case 0: r.on = c.value != 0; if (!r.on) { r.clear(); slot.repeat_late = -1; } break;
+        case 0:
+            r.on = c.value != 0;
+            if (!r.on) {
+                for (unsigned n = 0; n < r.count; ++n) slot.sampler.hold_layer(unsigned((r.keys[n] & 0xff) - sampler_first_note), false);
+                r.clear(); slot.repeat_late = -1;
+            }
+            break;
         case 2: r.rate = unsigned(c.value) % arp_rates; break;
         case 5: r.pressure_velocity = c.value != 0; break;
         }
@@ -660,6 +666,8 @@ void EngineHost::apply(const Command& c) {
         // Stopped, the first pad held plays at once, as on the MPC, unless another track already repeats on the clock.
         if (c.value && !running && slot.repeat.on && !slot.repeat.count && clock_free(slot)) { arp_ticks = 0; until_arp = 0; }
         if (c.value) slot.repeat.press(int(c.index) | int(c.position & 0xff) << 16, c.value); else slot.repeat.release(c.index);
+        if (slot.engine == &slot.sampler) // a kit pad held: its per-hold layer kept from the first repeat until let go
+            slot.sampler.hold_layer(unsigned((c.index & 0xff) - sampler_first_note), c.value != 0);
         break;
     case Type::RecordArm: {
         if (take.state() != TakeRecorder::State::Idle) break;

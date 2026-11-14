@@ -87,6 +87,10 @@ public:
     // A kit pad shifted by `semitones`, its filter at `cutoff` (0..100; -1 its
     // own): 16 Levels. note_off for the pad's note releases it.
     void play_pad(unsigned pad, int velocity, int semitones, int cutoff = -1);
+    // Note Repeat holds a kit pad: on a pad of Cycle hold or Random hold, every repeat plays the layer the
+    // first one picked, until the hold ends (model/sampler.h LayerPlay).
+    void hold_layer(unsigned pad, bool on) { if (pad < sampler_pads) held_layer[pad] = int8_t(on ? -2 : -1); }
+    void release_layers() { held_layer.fill(-1); }
 
     void note_on(int key, int velocity) override;
     void set_accent(float gain) override { accent = gain; }
@@ -301,6 +305,7 @@ private:
     std::array<PadSound, sampler_pads> pads {}, base {}; // as they play (motion), and as the kit holds them
     ZoneTrims trims {};
     std::array<uint8_t, sampler_pads> layer_turn {};    // Cycle: the layer each pad plays next
+    std::array<int8_t, sampler_pads> held_layer = [] { std::array<int8_t, sampler_pads> a {}; a.fill(-1); return a; }(); // -1 not held, -2 held (none picked yet), else the layer kept
     // Roadmap P3, an instrument's release samples: each key's last press, how hard and when (frames played).
     std::array<uint8_t, 128> key_velocity {};
     std::array<uint64_t, 128> key_since {};

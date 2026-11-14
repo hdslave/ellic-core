@@ -55,12 +55,14 @@ inline float volume_gain(int level) { return level <= 0 ? 0.0f : std::pow(10.0f,
 // own sample and region; layers 2-4 are each a region of another sample with
 // its tune, level and pan over the pad's. A hit plays every layer its velocity
 // reaches (Velocity, the MPC's default), the next in turn (Cycle) or one at
-// random (Random), as the MPC's layers play. Every other value of the pad
+// random (Random), as the MPC's layers play. Cycle hold and Random hold
+// pick the same way for each hit by hand, but Note Repeat keeps the layer its
+// first repeat picked until the pad is let go. Every other value of the pad
 // (envelope, filter, play, loop, warp) is the pad's and goes over each.
 constexpr unsigned pad_layers = 4;
-enum class LayerPlay : uint8_t { Velocity, Cycle, Random, Count };
+enum class LayerPlay : uint8_t { Velocity, Cycle, Random, CycleHold, RandomHold, Count }; // saved: append only
 inline const char* layer_play_name(LayerPlay l) {
-    static const char* const names[] {"VELOCITY", "CYCLE", "RANDOM"};
+    static const char* const names[] {"VELOCITY", "CYCLE", "RANDOM", "CYCLE HOLD", "RANDOM HOLD"};
     return names[unsigned(l) % unsigned(LayerPlay::Count)];
 }
 struct PadLayer {
