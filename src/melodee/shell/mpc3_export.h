@@ -10,15 +10,17 @@
 // document is a copy of a project MPC 3 saved (mpc3_template.json, made by
 // tools/mpc3_template.py) with Melodee's tracks, pads and patterns put in.
 //
-// Phase 1 writes kit tracks: each becomes a Drum track, each pad a pad of WAV
+// Kit tracks are written: each becomes a Drum track, each pad a pad of WAV
 // layers, each pattern number a sequence, the tempo and time signature with
-// them. Other tracks and pads are counted in the report and left out.
+// them. A pad of an instrument of key zones (an SFZ, a keygroup program), or a
+// WAV pad played at other pitches, becomes a Keygroup track of its own. Other
+// tracks, and sounds that are not WAV files, are counted in the report and left out.
 namespace melodee {
 
 struct Mpc3Export {
-    unsigned tracks = 0, sequences = 0, pads = 0, notes = 0, samples = 0;
+    unsigned tracks = 0, keygroups = 0, sequences = 0, pads = 0, notes = 0, samples = 0; // tracks: Drum tracks; keygroups: Keygroup tracks
     unsigned skipped_tracks = 0; // tracks that are not kits: synths, plug-ins, MIDI, audio
-    unsigned skipped_pads = 0;   // pads or layers whose sound is not a WAV file (an SFZ or MPC instrument)
+    unsigned skipped_pads = 0;   // pads, layers or zones not written: not a WAV file (an SF2's, a FLAC), past eight layers
     unsigned missing = 0;        // WAV files not where the project says
 };
 

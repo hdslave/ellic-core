@@ -80,6 +80,8 @@ struct LoadedSample {
 // keygroup program, a pad of an MPC program or project, ".exs"), its samples
 // found on the card. `error` names why where it gives nothing.
 SfzRead read_instrument(const std::string& path, std::string* error);
+// Where a zone's file of that instrument is on the card, as the library loads it (any case); empty when missing.
+std::string instrument_zone_file(const std::string& instrument, const std::string& sample);
 
 // A file Melodee makes from a slot's audio, on the service thread.
 struct SampleJob {

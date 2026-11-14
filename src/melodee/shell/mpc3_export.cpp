@@ -1,14 +1,23 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 // The MPC 3 export (shell/mpc3_export.h). The template is a project MPC 3
-// saved (mpc3_template.json), cut down by tools/mpc3_template.py to one of each thing: a drum track,
-// an empty pad, the Submix, Return and Out tracks, a sequence, a clip and a note
-// event. Each export reads it afresh and fills copies. Numbers keep the kind
-// the template gives them: MPC 3 reads 1.0 and 1 differently, and JUCE writes a
-// double as 1.0.
+// saved (mpc3_template.json), cut down by tools/mpc3_template.py to one of each
+// thing: a drum track and an empty pad, a keygroup track and an empty keygroup,
+// the Submix, Return and Out tracks, a sequence, a clip and a note event. Each
+// export reads it afresh and fills copies. Numbers keep the kind the template
+// gives them: MPC 3 reads 1.0 and 1 differently, and JUCE writes a double as 1.0.
+//
+// A kit pad stays a pad of its Drum track when the MPC's pad can play it: a WAV
+// file and its layers, or an instrument whose zones each cover every key (a pad
+// of an MPC program or project, velocity layers), at most eight. An instrument
+// of key zones, and a WAV pad its patterns play at other pitches (16 Levels,
+// Keys), become a Keygroup track of their own, the pad's notes going with them.
 #include "melodee/shell/mpc3_export.h"
 #include "melodee/engine/dsp.h"
+#include "melodee/engine/sfz.h"
 #include "melodee/model/sampler.h"
+#include "melodee/shell/mpc_program.h"
+#include "melodee/shell/sample_library.h"
 #include <juce_core/juce_core.h>
 #include <algorithm>
 #include <cmath>
@@ -38,6 +47,8 @@ namespace {
 
 constexpr unsigned mpc_ticks_per_tick = 960 / ticks_per_quarter; // the MPC counts 960 a quarter
 constexpr unsigned mpc_pads = 128;
+constexpr unsigned mpc_layers = 8;  // a pad's or a keygroup's
+constexpr int played_root = 60;     // an instrument pad's key with no pitch (engine/sampler.cpp zones_on)
 
 juce::var read_template() {
     return juce::JSON::parse(juce::String::fromUTF8(reinterpret_cast<const char*>(melodee_mpc3_template_start),
@@ -123,121 +134,174 @@ Wav wav_of(const std::string& path) {
     return out;
 }
 
-bool is_wav(const SampleRef& ref) {
-    if (!ref.used() || ref.instrument()) return false;
-    auto kind = fs::path(ref.path).extension().string();
+bool wav_named(const std::string& path) {
+    auto kind = fs::path(path).extension().string();
     for (auto& c : kind) c = char(std::tolower(static_cast<unsigned char>(c)));
     return kind == ".wav";
 }
+bool is_wav(const SampleRef& ref) { return ref.used() && !ref.instrument() && wav_named(ref.path); }
 
 // The project's WAV files, each copied once into the data folder under a name of its own.
 class Files {
 public:
-    Files(const Project& p, fs::path f) : project(p), folder(std::move(f)) {}
-    // The file's name in the data folder; empty when the slot is not a WAV file.
-    const std::string& name(unsigned slot, Mpc3Export& report) {
-        static const std::string none;
-        const auto& ref = project.samples[slot % sample_slots];
-        if (!is_wav(ref)) return none;
-        auto found = names.find(slot);
+    explicit Files(fs::path f) : folder(std::move(f)) {}
+    // The copy's name in the data folder for the file at `source`.
+    const std::string& name(const std::string& source, Mpc3Export& report) {
+        auto found = names.find(source);
         if (found != names.end()) return found->second;
-        auto stem = fs::path(ref.path).stem().string();
+        auto stem = fs::path(source).stem().string();
         std::string file = stem + ".wav";
         for (unsigned n = 2; taken.count(file); ++n) file = stem + " " + std::to_string(n) + ".wav";
         taken.insert(file);
         std::error_code error;
-        if (fs::exists(ref.path, error)) fs::copy_file(ref.path, folder / file, fs::copy_options::overwrite_existing, error);
+        if (fs::exists(source, error)) fs::copy_file(source, folder / file, fs::copy_options::overwrite_existing, error);
         else ++report.missing;
-        infos[slot] = wav_of((folder / file).string());
+        infos[file] = wav_of((folder / file).string());
         ++report.samples;
-        return names[slot] = file;
+        order.push_back(file);
+        return names[source] = file;
     }
-    // A Melodee frame (44.1 kHz) as a frame of the slot's file.
-    uint32_t frame(unsigned slot, uint32_t at) const {
-        auto found = infos.find(slot);
-        const double rate = found != infos.end() && found->second.rate ? found->second.rate : dsp::model_rate;
-        return uint32_t(std::lround(at * rate / dsp::model_rate));
-    }
-    // The region's end in the file's frames: 0 is the file's end.
-    uint32_t end(unsigned slot, uint32_t at) const {
-        if (at) return frame(slot, at);
-        auto found = infos.find(slot);
-        return found != infos.end() ? uint32_t(found->second.frames) : 0;
-    }
+    const Wav& info(const std::string& file) { return infos[file]; }
     // The MPC's entry for a file: the project's and a program's samples lists.
     static juce::var sample_entry(const std::string& file) {
         return juce::JSON::parse(juce::String("{\"version\": 1, \"name\": ") + juce::JSON::toString(juce::String(fs::path(file).stem().string())) +
                                  ", \"path\": " + juce::JSON::toString(juce::String(file)) +
                                  ", \"loadImpl\": 0, \"metadata\": {\"tempo\": 0.0, \"rootNote\": 60, \"tune\": 0.0, \"key\": \"\"}}");
     }
-    std::vector<std::string> all() const {
-        std::vector<std::string> out;
-        for (const auto& [slot, file] : names) out.push_back(file);
-        return out;
-    }
+    const std::vector<std::string>& all() const { return order; }
 private:
-    const Project& project;
     fs::path folder;
-    std::map<unsigned, std::string> names;
-    std::map<unsigned, Wav> infos;
+    std::map<std::string, std::string> names;
+    std::map<std::string, Wav> infos;
     std::set<std::string> taken;
+    std::vector<std::string> order;
 };
 
-// One layer of a pad, from a sound region of a WAV file.
-void fill_layer(const juce::var& layer, const std::string& file, uint32_t start, uint32_t end, uint32_t loop_start, bool loop, bool reverse) {
+// One layer as the MPC plays it: a region of a WAV file (its own frames), the velocities that play it, its tune
+// over what the pad or keygroup gives, its level and pan, and the key it sounds at its own pitch.
+struct Layer {
+    std::string source;              // the file on the card
+    int64_t start = 0, end = -1;     // frames of the file; end -1: its end
+    int64_t loop_start = -1;         // -1: the start
+    bool loop = false, reverse = false;
+    uint8_t low_velocity = 1, high_velocity = 127;
+    int cents = 0;                   // over the pad's or keygroup's tune
+    double gain_db = 0, pan = 0;     // pan -1..1
+    int root = played_root;          // MIDI
+};
+
+// A keygroup: keys and the layers they play.
+struct Keygroup {
+    uint8_t low_key = 0, high_key = 127;
+    bool one_shot = false;
+    std::vector<Layer> layers;
+};
+
+// A Melodee frame (44.1 kHz) as a frame of a file at `rate`.
+int64_t file_frame(uint32_t at, unsigned rate) { return std::llround(at * double(rate ? rate : dsp::model_rate) / dsp::model_rate); }
+
+// A WAV pad's layers: its own region and its layers', in the file's frames.
+std::vector<Layer> wav_layers(const Project& project, const PadSound& pad, Mpc3Export& report) {
+    std::vector<Layer> out;
+    for (unsigned l = 0; l < pad_layers; ++l) {
+        const auto sound = pad.layer(l);
+        if (!sound.used()) continue;
+        const auto& ref = project.samples[sound.sample % sample_slots];
+        if (!is_wav(ref)) { ++report.skipped_pads; continue; }
+        const unsigned rate = wav_of(ref.path).rate;
+        Layer layer;
+        layer.source = ref.path;
+        layer.start = file_frame(sound.start, rate);
+        layer.end = sound.end ? file_frame(sound.end, rate) : -1;
+        layer.loop = pad.loop;
+        layer.loop_start = file_frame(pad.loop_lock ? sound.start : pad.loop_start, rate);
+        layer.reverse = pad.reverse;
+        layer.low_velocity = l ? sound.low : 0; // the MPC's first layer starts at 0, as it saves one
+        layer.high_velocity = sound.high;
+        layer.cents = l ? sound.pitch * 100 + sound.fine : 0;
+        layer.gain_db = (l ? sound.gain : pad.gain) / 100.0;
+        layer.pan = l ? sound.pan / 50.0 : 0;
+        out.push_back(std::move(layer));
+    }
+    return out;
+}
+
+// An instrument's zones as layers: the first of each round robin, no release samples, WAV files only.
+std::vector<std::pair<SampleZone, Layer>> instrument_layers(const std::string& path, const SfzRead& read, Mpc3Export& report) {
+    std::vector<std::pair<SampleZone, Layer>> out;
+    for (const auto& region : read.regions) {
+        const auto& zone = region.zone;
+        if (zone.on_release || zone.sequence > 1) continue;
+        std::string source = fs::path(region.sample).is_absolute() ? region.sample : instrument_zone_file(path, region.sample);
+        if (source.empty() || !wav_named(source)) { ++report.skipped_pads; continue; }
+        Layer layer;
+        layer.source = source;
+        layer.start = std::max<int64_t>(region.offset, 0);
+        layer.end = region.end;
+        layer.loop = zone.loop != ZoneLoop::Off;
+        layer.loop_start = layer.loop ? int64_t(zone.loop_start) : -1;
+        layer.low_velocity = zone.low_velocity;
+        layer.high_velocity = zone.high_velocity;
+        layer.cents = zone.tune;
+        layer.gain_db = zone.gain;
+        layer.pan = zone.pan;
+        layer.root = zone.root;
+        out.emplace_back(zone, std::move(layer));
+    }
+    return out;
+}
+
+// A layer written into the MPC's layer object.
+void fill_layer(const juce::var& layer, const Layer& from, const std::string& file, const Wav& wav, bool first, bool keyed) {
     put(layer, "active", true);
     put(layer, "sampleName", juce::String(fs::path(file).stem().string()));
     put(layer, "sampleFile", juce::String(file));
-    put(layer, "direction", whole(reverse ? 1 : 0));
-    put(layer, "loopMode", whole(loop ? 1 : 0));
+    put(layer, "direction", whole(from.reverse ? 1 : 0));
+    put(layer, "loopMode", whole(from.loop ? 1 : 0));
+    if (keyed) put(layer, "rootNote", whole(std::clamp(from.root, 0, 127) + 1)); // one past the MIDI note, as the MPC writes it
+    put(layer, "velocityStart", whole(first ? 0 : from.low_velocity));
+    put(layer, "velocityEnd", whole(from.high_velocity));
+    const int semis = int(std::lround(from.cents / 100.0));
+    put(layer, "coarseTune", whole(std::clamp(semis, -36, 36)));
+    put(layer, "fineTune", whole(std::clamp(from.cents - semis * 100, -99, 99)));
+    put(layer, "pan", real(std::clamp(0.5 + from.pan / 2, 0.0, 1.0)));
+    if (from.gain_db != 0) put(field(layer, "volume"), "gainCoefficient", real(std::pow(10.0, from.gain_db / 20)));
+    const int64_t end = from.end >= 0 ? from.end : int64_t(wav.frames);
     const auto& slice = field(layer, "sliceInfo");
-    put(slice, "Start", whole(int(start)));
+    put(slice, "Start", whole(int(from.start)));
     put(slice, "End", whole(int(end)));
-    put(slice, "LoopStart", whole(int(loop_start)));
-    put(slice, "LoopMode", whole(loop ? 1 : 0));
+    put(slice, "LoopStart", whole(int(from.loop_start >= 0 ? from.loop_start : from.start)));
+    put(slice, "LoopMode", whole(from.loop ? 1 : 0));
 }
 
-// A kit pad as the MPC's pad (an "instrument"); false when none of its layers is a WAV file.
-bool fill_pad(const juce::var& instrument, const Track& track, unsigned n, Files& files, std::vector<std::string>& used, Mpc3Export& report) {
-    const auto& pad = track.pads[n];
-    const auto* layers = field(instrument, "layersv").getArray();
-    if (!layers || layers->isEmpty()) return false;
+// Writes the layers into an instrument's layer list (at most eight); how many went in.
+unsigned fill_layers(const juce::var& instrument, const std::vector<Layer>& layers, bool keyed, Files& files, std::vector<std::string>& used,
+                     Mpc3Export& report) {
+    const auto* list = field(instrument, "layersv").getArray();
+    if (!list) return 0;
     unsigned written = 0;
-    for (unsigned l = 0; l < pad_layers && l < unsigned(layers->size()); ++l) {
-        const auto layer_sound = pad.layer(l);
-        if (!layer_sound.used()) continue;
-        const auto& file = files.name(layer_sound.sample, report);
-        if (file.empty()) { ++report.skipped_pads; continue; }
-        const auto& layer = layers->getReference(int(written));
-        const unsigned slot = layer_sound.sample;
-        fill_layer(layer, file, files.frame(slot, layer_sound.start), files.end(slot, layer_sound.end),
-                   files.frame(slot, pad.loop_lock ? layer_sound.start : pad.loop_start), pad.loop, pad.reverse);
-        put(layer, "velocityStart", whole(l ? layer_sound.low : 0)); // the MPC's first layer starts at 0, as it saves one
-        put(layer, "velocityEnd", whole(layer_sound.high));
-        if (l) {
-            put(layer, "coarseTune", whole(layer_sound.pitch));
-            put(layer, "fineTune", whole(layer_sound.fine));
-            put(layer, "pan", real(mpc_pan_of(layer_sound.pan)));
-            put(field(layer, "volume"), "gainCoefficient", real(std::pow(10.0, layer_sound.gain / 2000.0)));
-        } else if (pad.gain) {
-            put(field(layer, "volume"), "gainCoefficient", real(std::pow(10.0, pad.gain / 2000.0)));
-        }
+    for (const auto& layer : layers) {
+        if (written == unsigned(list->size()) || written == mpc_layers) { ++report.skipped_pads; continue; }
+        const auto& file = files.name(layer.source, report);
+        fill_layer(list->getReference(int(written)), layer, file, files.info(file), written == 0, keyed);
         if (std::find(used.begin(), used.end(), file) == used.end()) used.push_back(file);
         ++written;
     }
-    if (!written) return false;
+    return written;
+}
 
-    put(instrument, "coarseTune", whole(pad.pitch));
+// The pad's sound as the MPC's pad or keygroup has it: level, pan, tune, envelope, filter.
+void fill_sound(const juce::var& instrument, const PadSound& pad, bool muted, int coarse, bool one_shot) {
+    put(instrument, "coarseTune", whole(std::clamp(coarse, -36, 36)));
     put(instrument, "fineTune", whole(pad.fine));
     put(instrument, "monophonic", pad.mono);
     put(instrument, "polyphony", whole(pad.mono ? 1 : 0)); // MPC 3 makes a pad of polyphony 1 mono again; poly is 0, as it saves one
     put(instrument, "whichMuteGroup", whole(pad.group));
     put(instrument, "loopLock", pad.loop_lock);
-    put(instrument, "triggerMode", whole(pad.play == PadPlay::OneShot ? 0 : 1));
     const auto& mix = field(instrument, "mixable");
     put(mix, "volume", real(mpc_volume(pad.level)));
     put(mix, "pan", real(mpc_pan_of(pad.pan)));
-    put(mix, "mute", track.pad_muted(n));
+    put(mix, "mute", muted);
     const auto& synth = field(instrument, "synthSection");
     put(synth, "velocitySensitivity", real(fraction(pad.velocity_sense)));
     const auto& amp = field(synth, "ampEnvelope");
@@ -246,7 +310,7 @@ bool fill_pad(const juce::var& instrument, const Track& track, unsigned n, Files
     put(field(amp, "Sustain"), "value0", real(fraction(pad.sustain)));
     put(field(amp, "Release"), "value0", real(fraction(pad.release)));
     put(field(amp, "DecayFromEnd"), "value0", !pad.decay_from_start);
-    put(field(amp, "OneShot"), "value0", pad.play == PadPlay::OneShot);
+    put(field(amp, "OneShot"), "value0", one_shot);
     const auto& filter = field(field(synth, "filterData"), "value0");
     put(filter, "filterType", whole(mpc_filter_type(pad.filter)));
     put(filter, "filterCutoff", real(fraction(pad.cutoff)));
@@ -257,22 +321,10 @@ bool fill_pad(const juce::var& instrument, const Track& track, unsigned n, Files
     put(field(filter_env, "Decay"), "value0", real(fraction(pad.filter_decay)));
     put(field(filter_env, "Sustain"), "value0", real(fraction(pad.filter_sustain)));
     put(field(filter_env, "Release"), "value0", real(fraction(pad.filter_release)));
-    return true;
 }
 
-// A name for each written track: its own, else "Drum NNN"; never one another track or a bus has.
-std::string unique_name(const char* own, unsigned number, std::set<std::string>& taken) {
-    char fallback[16];
-    std::snprintf(fallback, sizeof(fallback), "Drum %03u", number);
-    std::string base = own && own[0] ? own : fallback;
-    std::string name = base;
-    for (unsigned n = 2; taken.count(name); ++n) name = base + " " + std::to_string(n);
-    taken.insert(name);
-    return name;
-}
-
-// Every "track" a Q-Link or pad assignment targets (the template's own tracks' names) pointed at `first`, as MPC 3
-// does itself on loading when the name is gone.
+// Every "track" a Q-Link or pad assignment targets that is not one of `names` pointed at `first`, as MPC 3 does
+// itself on loading when the name is gone; with no names, every one.
 void retarget_tracks(const juce::var& node, const std::set<std::string>& names, const juce::String& first) {
     if (auto* object = node.getDynamicObject()) {
         bool gone = false;
@@ -289,13 +341,23 @@ void retarget_tracks(const juce::var& node, const std::set<std::string>& names, 
     }
 }
 
-bool kit_track_worth_writing(const Track& track, const PatternBank& patterns, unsigned t) {
-    for (const auto& pad : track.pads)
-        if (pad.used()) return true;
-    for (const auto& pattern : patterns.at[t])
-        if (!pattern.events.empty()) return true;
-    return false;
+// A name for each written track: its own, else the fallback; never one another track or a bus has.
+std::string unique_name(const std::string& own, const std::string& fallback, std::set<std::string>& taken) {
+    std::string base = own.empty() ? fallback : own;
+    std::string name = base;
+    for (unsigned n = 2; taken.count(name); ++n) name = base + " " + std::to_string(n);
+    taken.insert(name);
+    return name;
 }
+
+// What a written track plays of Melodee's: a kit track's pads (`pad` -1) or one pad as a keygroup track.
+struct Written {
+    unsigned index = 0;    // Melodee's track
+    int pad = -1;          // a keygroup track's pad; -1 the kit
+    bool shifted = false;  // a keygroup track's notes: 60 + the pad's pitch + the note's (an instrument), else 60 + the note's
+    std::string name;
+    juce::var track;
+};
 
 } // namespace
 
@@ -304,14 +366,14 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
     report = Mpc3Export {};
     const juce::var doc = read_template();
     const auto& data = field(doc, "data");
-    if (!data.isObject()) return "MPC 3 template unreadable";
+    if (!data.isObject() || !field(doc, "keygroupTrack").isObject()) return "MPC 3 template unreadable";
     const fs::path where(folder);
     const fs::path data_folder = where / (name + "_[ProjectData]");
     std::error_code error;
     fs::create_directories(data_folder, error);
     if (error) return "Cannot make " + data_folder.string();
 
-    Files files(project, data_folder);
+    Files files(data_folder);
     std::set<std::string> taken;
     std::vector<std::pair<std::string, juce::var>> buses; // name, track
     if (const auto* list = field(doc, "buses").getArray())
@@ -319,42 +381,159 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
             buses.emplace_back(bus["name"].toString().toStdString(), bus.clone());
             taken.insert(buses.back().first);
         }
-
-    // Kit tracks as Drum tracks.
-    struct Written { unsigned index; std::string name; juce::var track; };
-    std::vector<Written> written;
     const auto& pad_notes = field(field(field(doc, "drumTrack"), "program"), "padNoteMap")["noteForPad"];
+    auto samples_of = [](const std::vector<std::string>& used) {
+        std::vector<juce::var> list;
+        for (const auto& file : used) list.push_back(Files::sample_entry(file));
+        return array_of(std::move(list));
+    };
+    auto program_mix = [](const juce::var& program, const Mix& mix) {
+        const auto& mixable = field(program, "mixable");
+        put(mixable, "volume", real(mpc_volume(mix.level)));
+        put(mixable, "pan", real(mpc_pan_of(mix.pan)));
+        put(mixable, "mute", mix.mute);
+        put(mixable, "solo", mix.solo);
+    };
+
+    std::vector<Written> written;
     for (unsigned t = 0; t < track_count; ++t) {
         const auto& track = project.tracks[t];
         if (!track.used()) continue;
         if (track.engine != EngineKind::Sampler) { ++report.skipped_tracks; continue; }
-        if (!kit_track_worth_writing(track, patterns, t)) continue;
-        juce::var made = field(doc, "drumTrack").clone();
-        const std::string track_name = unique_name(track.name, unsigned(written.size() + 1), taken);
-        put(made, "name", juce::String(track_name));
-        put(made, "mute", track.mix.mute);
-        const auto& program = field(made, "program");
-        put(program, "name", juce::String(track_name));
-        const auto& mix = field(program, "mixable");
-        put(mix, "volume", real(mpc_volume(track.mix.level)));
-        put(mix, "pan", real(mpc_pan_of(track.mix.pan)));
-        put(mix, "mute", track.mix.mute);
-        put(mix, "solo", track.mix.solo);
-        juce::Array<juce::var> instruments;
-        std::vector<std::string> used;
-        for (unsigned n = 0; n < mpc_pads; ++n) {
-            juce::var instrument = field(doc, "drumPad").clone();
-            if (n < sampler_pads && track.pads[n].used() && fill_pad(instrument, track, n, files, used, report)) ++report.pads;
-            instruments.add(instrument);
+
+        // Which pads the kit plays and which become keygroup tracks.
+        std::array<bool, sampler_pads> pitched {};
+        std::array<bool, sampler_pads> noted {};
+        for (const auto& pattern : patterns.at[t])
+            for (const auto& e : pattern.events)
+                if (e.key >= sampler_first_note && e.key < sampler_first_note + sampler_pads) {
+                    noted[e.key - sampler_first_note] = true;
+                    pitched[e.key - sampler_first_note] = pitched[e.key - sampler_first_note] || e.pitch;
+                }
+        struct PadPlan { std::vector<Layer> drum; std::vector<Keygroup> keys; bool instrument = false; };
+        std::array<PadPlan, sampler_pads> plans;
+        for (unsigned n = 0; n < sampler_pads; ++n) {
+            const auto& pad = track.pads[n];
+            if (!pad.used()) continue;
+            const auto& ref = project.samples[pad.sample % sample_slots];
+            auto& plan = plans[n];
+            if (!ref.instrument()) {
+                auto layers = wav_layers(project, pad, report);
+                if (layers.empty()) continue;
+                if (!pitched[n]) { plan.drum = std::move(layers); continue; }
+                Keygroup all; // played at other pitches: one keygroup over every key, its own pitch at 60
+                all.one_shot = pad.play == PadPlay::OneShot;
+                all.layers = std::move(layers);
+                plan.keys.push_back(std::move(all));
+                continue;
+            }
+            std::string why, file, which;
+            const auto read = read_instrument(ref.path, &why);
+            auto zones = instrument_layers(ref.path, read, report);
+            if (zones.empty()) { ++report.skipped_pads; continue; }
+            const bool every_key = std::all_of(zones.begin(), zones.end(), [](const auto& z) { return z.first.low_key == 0 && z.first.high_key == 127; });
+            if ((split_program_pad(ref.path, file, which) || every_key) && zones.size() <= mpc_layers && !pitched[n]) {
+                for (auto& [zone, layer] : zones) { // a pad's layers: each at the pitch the pad's key plays it
+                    if (zone.keytrack) layer.cents += (played_root - zone.root) * zone.keytrack;
+                    layer.root = played_root;
+                    plan.drum.push_back(std::move(layer));
+                }
+                continue;
+            }
+            plan.instrument = true;
+            for (auto& [zone, layer] : zones) { // keygroups by their keys, in the order they come
+                auto same = std::find_if(plan.keys.begin(), plan.keys.end(), [&](const Keygroup& k) {
+                    return k.low_key == zone.low_key && k.high_key == zone.high_key;
+                });
+                if (same == plan.keys.end()) {
+                    if (plan.keys.size() == mpc_pads) { ++report.skipped_pads; continue; }
+                    Keygroup made;
+                    made.low_key = zone.low_key;
+                    made.high_key = zone.high_key;
+                    made.one_shot = zone.one_shot;
+                    plan.keys.push_back(made);
+                    same = plan.keys.end() - 1;
+                }
+                same->layers.push_back(std::move(layer));
+            }
         }
-        put(field(program, "drum"), "instruments", juce::var(instruments));
-        std::vector<juce::var> samples;
-        for (const auto& file : used) samples.push_back(Files::sample_entry(file));
-        put(program, "samples", array_of(std::move(samples)));
-        written.push_back({t, track_name, made});
+
+        // The kit: its pads, unless all of them went to keygroup tracks and no note is left for it.
+        bool kit_wanted = false;
+        for (unsigned n = 0; n < sampler_pads; ++n) kit_wanted = kit_wanted || !plans[n].drum.empty() || (noted[n] && plans[n].keys.empty());
+        if (kit_wanted) {
+            juce::var made = field(doc, "drumTrack").clone();
+            char fallback[16];
+            std::snprintf(fallback, sizeof(fallback), "Drum %03u", unsigned(written.size() + 1));
+            const std::string track_name = unique_name(track.name, fallback, taken);
+            put(made, "name", juce::String(track_name));
+            put(made, "mute", track.mix.mute);
+            const auto& program = field(made, "program");
+            put(program, "name", juce::String(track_name));
+            program_mix(program, track.mix);
+            juce::Array<juce::var> instruments;
+            std::vector<std::string> used;
+            for (unsigned n = 0; n < mpc_pads; ++n) {
+                juce::var instrument = field(doc, "drumPad").clone();
+                if (n < sampler_pads && !plans[n].drum.empty() && fill_layers(instrument, plans[n].drum, false, files, used, report)) {
+                    const auto& pad = track.pads[n];
+                    fill_sound(instrument, pad, track.pad_muted(n), pad.pitch, pad.play == PadPlay::OneShot);
+                    put(instrument, "triggerMode", whole(pad.play == PadPlay::OneShot ? 0 : 1));
+                    ++report.pads;
+                }
+                instruments.add(instrument);
+            }
+            put(field(program, "drum"), "instruments", juce::var(instruments));
+            put(program, "samples", samples_of(used));
+            retarget_tracks(made, {}, juce::String(track_name));
+            written.push_back({t, -1, false, track_name, made});
+        }
+
+        // Each keygroup pad as a Keygroup track.
+        for (unsigned n = 0; n < sampler_pads; ++n) {
+            const auto& plan = plans[n];
+            if (plan.keys.empty()) continue;
+            const auto& pad = track.pads[n];
+            juce::var made = field(doc, "keygroupTrack").clone();
+            char label[4], fallback[48];
+            pad_label(n, label);
+            std::snprintf(fallback, sizeof(fallback), "%s %s", track.name[0] ? track.name : "Keys", label);
+            const std::string own = project.samples[pad.sample % sample_slots].name;
+            const std::string track_name = unique_name(own, fallback, taken);
+            put(made, "name", juce::String(track_name));
+            put(made, "mute", track.mix.mute || track.pad_muted(n));
+            const auto& program = field(made, "program");
+            put(program, "name", juce::String(track_name));
+            program_mix(program, track.mix);
+            juce::Array<juce::var> instruments;
+            std::vector<std::string> used;
+            unsigned groups = 0;
+            for (unsigned k = 0; k < mpc_pads; ++k) {
+                juce::var instrument = field(doc, "keygroupPad").clone();
+                if (k < plan.keys.size()) {
+                    const auto& group = plan.keys[k];
+                    if (fill_layers(instrument, group.layers, true, files, used, report)) {
+                        // An instrument's notes carry the pad's pitch in their keys; a WAV pad's keygroup carries it in its tune.
+                        fill_sound(instrument, pad, false, plan.instrument ? 0 : pad.pitch, group.one_shot);
+                        put(instrument, "lowNote", whole(group.low_key));
+                        put(instrument, "highNote", whole(group.high_key));
+                        put(instrument, "triggerMode", whole(group.one_shot ? 0 : 2));
+                        ++groups;
+                    }
+                }
+                instruments.add(instrument);
+            }
+            if (!groups) continue;
+            put(field(program, "drum"), "instruments", juce::var(instruments));
+            put(field(program, "keygroup"), "numKeygroups", whole(int(groups)));
+            put(program, "samples", samples_of(used));
+            retarget_tracks(made, {}, juce::String(track_name));
+            written.push_back({t, int(n), plan.instrument, track_name, made});
+            ++report.keygroups;
+        }
     }
     if (written.empty()) return "No kit tracks to export";
-    report.tracks = unsigned(written.size());
+    for (const auto& w : written) report.tracks += w.pad < 0;
 
     // Every name, as MPC 3 keys its clips: sorted, the buses among them.
     std::vector<std::string> names;
@@ -367,6 +546,9 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
         const auto& v = pad_notes[juce::Identifier("value" + juce::String(pad))];
         return v.isVoid() ? int((sampler_first_note + pad) % 128) : int(v);
     };
+    // Which pads went to keygroup tracks, by Melodee's track: their notes leave the kit.
+    std::map<unsigned, std::set<int>> moved;
+    for (const auto& w : written) if (w.pad >= 0) moved[w.index].insert(w.pad);
 
     // Patterns as sequences: all 128, the highest first, as MPC 3 saves them.
     const TimeSignature signature = project.time_signature();
@@ -417,14 +599,24 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
             auto own = std::find_if(written.begin(), written.end(), [&](const Written& w) { return w.name == track_name; });
             if (own != written.end()) {
                 const auto& pattern = patterns.at[own->index][size_t(p)];
+                const auto& pads = project.tracks[own->index].pads;
                 if (!pattern.events.empty()) clip_pulses = int(pattern.length * mpc_ticks_per_tick);
                 for (const auto& e : pattern.events) {
                     if (e.key < sampler_first_note || e.key >= sampler_first_note + mpc_pads || e.tick >= pattern.length) continue;
+                    const int pad = e.key - int(sampler_first_note);
+                    int key;
+                    if (own->pad < 0) {
+                        if (moved[own->index].count(pad)) continue;
+                        key = note_of_pad(unsigned(pad));
+                    } else {
+                        if (pad != own->pad) continue;
+                        key = std::clamp(played_root + (own->shifted ? pads[size_t(pad)].pitch : 0) + e.pitch, 0, 127);
+                    }
                     juce::var event = field(doc, "noteEvent").clone();
                     put(event, "time", whole(int(e.tick * mpc_ticks_per_tick)));
                     put(event, "muted", false);
                     const auto& note = field(event, "note");
-                    put(note, "note", whole(note_of_pad(e.key - sampler_first_note)));
+                    put(note, "note", whole(key));
                     put(note, "velocity", real(std::clamp<int>(e.velocity, 1, 127) / 127.0));
                     put(note, "length", whole(int(std::max<unsigned>(e.length, 1) * mpc_ticks_per_tick)));
                     put(note, "probability", whole(std::clamp<int>(e.chance, 0, 100)));
@@ -449,9 +641,7 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
     for (const auto& b : buses) tracks.add(b.second);
     put(data, "tracks", juce::var(tracks));
     put(data, "sequences", juce::var(sequences));
-    std::vector<juce::var> samples;
-    for (const auto& file : files.all()) samples.push_back(Files::sample_entry(file));
-    put(data, "samples", array_of(std::move(samples)));
+    put(data, "samples", samples_of(files.all()));
     put(data, "masterTempoEnabled", !project.seq_tempo);
     put(data, "masterTempo", real(project.tempo / 10.0));
     put(data, "currentSequence", whole(project.tracks[written.front().index].pattern % pattern_count));
