@@ -404,6 +404,7 @@ struct Written {
     std::string name;
     juce::var track;
     bool audio = false;    // the track's prints
+    bool keyed = false;    // a KEYGROUP track's: its notes MIDI notes (60 + the tune's semitones on an instrument)
 };
 
 } // namespace
@@ -486,20 +487,24 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
                 continue;
             }
         }
-        if (track.engine != EngineKind::Sampler) { ++report.skipped_tracks; continue; }
+        if (!track.sampled()) { ++report.skipped_tracks; continue; }
+        // A KEYGROUP track (model/project.h): its one sound, pad 1, a keygroup whatever it is, its notes MIDI notes.
+        const bool keyed = track.engine == EngineKind::Keygroup;
 
         // Which pads the kit plays and which become keygroup tracks.
         std::array<bool, sampler_pads> pitched {};
         std::array<bool, sampler_pads> noted {};
-        for (const auto& pattern : patterns.at[t])
-            for (const auto& e : pattern.events)
-                if (e.key >= sampler_first_note && e.key < sampler_first_note + sampler_pads) {
-                    noted[e.key - sampler_first_note] = true;
-                    pitched[e.key - sampler_first_note] = pitched[e.key - sampler_first_note] || e.pitch;
-                }
+        if (keyed) pitched[0] = noted[0] = true;
+        else
+            for (const auto& pattern : patterns.at[t])
+                for (const auto& e : pattern.events)
+                    if (e.key >= sampler_first_note && e.key < sampler_first_note + sampler_pads) {
+                        noted[e.key - sampler_first_note] = true;
+                        pitched[e.key - sampler_first_note] = pitched[e.key - sampler_first_note] || e.pitch;
+                    }
         struct PadPlan { std::vector<Layer> drum; std::vector<Keygroup> keys; bool instrument = false; };
         std::array<PadPlan, sampler_pads> plans;
-        for (unsigned n = 0; n < sampler_pads; ++n) {
+        for (unsigned n = 0; n < (keyed ? 1u : sampler_pads); ++n) {
             const auto& pad = track.pads[n];
             if (!pad.used()) continue;
             const auto& ref = project.samples[pad.sample % sample_slots];
@@ -519,7 +524,7 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
             auto zones = instrument_layers(ref.path, read, report);
             if (zones.empty()) { ++report.skipped_pads; continue; }
             const bool every_key = std::all_of(zones.begin(), zones.end(), [](const auto& z) { return z.first.low_key == 0 && z.first.high_key == 127; });
-            if ((split_program_pad(ref.path, file, which) || every_key) && zones.size() <= mpc_layers && !pitched[n]) {
+            if (!keyed && (split_program_pad(ref.path, file, which) || every_key) && zones.size() <= mpc_layers && !pitched[n]) {
                 for (auto& [zone, layer] : zones) { // a pad's layers: each at the pitch the pad's key plays it
                     if (zone.keytrack) layer.cents += (played_root - zone.root) * zone.keytrack;
                     layer.root = played_root;
@@ -587,7 +592,7 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
             char label[4], fallback[48];
             pad_label(n, label);
             std::snprintf(fallback, sizeof(fallback), "%s %s", track.name[0] ? track.name : "Keys", label);
-            const std::string own = project.samples[pad.sample % sample_slots].name;
+            const std::string own = keyed ? std::string(track.name) : std::string(project.samples[pad.sample % sample_slots].name);
             const std::string track_name = unique_name(own, fallback, taken);
             put(made, "name", juce::String(track_name));
             put(made, "mute", track.mix.mute || track.pad_muted(n));
@@ -621,7 +626,7 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
             put(field(program, "keygroup"), "numKeygroups", whole(int(groups)));
             put(program, "samples", samples_of(used));
             retarget_tracks(made, {}, juce::String(track_name));
-            written.push_back({t, int(n), plan.instrument, track_name, made, false});
+            written.push_back({t, int(n), plan.instrument, track_name, made, false, keyed});
             ++report.keygroups;
         }
     }
@@ -712,11 +717,14 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
                 const int pass_pulses = int(std::max<uint32_t>(pattern.length, 1) * mpc_ticks_per_tick);
                 for (int round = 0; round < pulses; round += pass_pulses)
                 for (const auto& e : pattern.events) {
-                    if (e.key < sampler_first_note || e.key >= sampler_first_note + mpc_pads || e.tick >= pattern.length) continue;
+                    if (e.tick >= pattern.length) continue;
+                    if (!own->keyed && (e.key < sampler_first_note || e.key >= sampler_first_note + mpc_pads)) continue;
                     if (round + int(e.tick * mpc_ticks_per_tick) >= pulses) break;
                     const int pad = e.key - int(sampler_first_note);
                     int note_key;
-                    if (own->pad < 0) {
+                    if (own->keyed) { // the note itself; an instrument's tune moves its keys, a WAV's is in its keygroup
+                        note_key = std::clamp(int(e.key) + (own->shifted ? pads[0].pitch : 0), 0, 127);
+                    } else if (own->pad < 0) {
                         if (moved[own->index].count(pad)) continue;
                         note_key = note_of_pad(unsigned(pad));
                     } else {

@@ -1302,7 +1302,7 @@ void EngineHost::mod_write(unsigned t, unsigned param, unsigned pad, int value) 
     if (param == motion_wheel) { if (slot.engine) engine_wheel(slot, std::clamp(value / 127.0f, 0.0f, 1.0f)); return; }
     if (param == motion_bend) { if (slot.engine) engine_bend(slot, std::clamp(value / 64.0f, -1.0f, 1.0f)); return; }
     if (int which = pad_param_of(param); which >= 0) {
-        if (slot.kind == EngineKind::Sampler) slot.sampler.move_pad(pad % sampler_pads, PadParam(which), value);
+        if (slot.kind == EngineKind::Sampler || slot.kind == EngineKind::Keygroup) slot.sampler.move_pad(pad % sampler_pads, PadParam(which), value);
         return;
     }
     if (param >= motion_fx_base) {
@@ -1476,7 +1476,7 @@ void EngineHost::restore(Slot& slot) {
             for (unsigned q = 0; q < effect_params; ++q) fx[t][k].set_param(q, slot.fx_base[k][q]);
         slot.fx_moved = false;
     }
-    if (slot.kind == EngineKind::Sampler) { // a kit pad's own values, if motion moved them
+    if (slot.kind == EngineKind::Sampler || slot.kind == EngineKind::Keygroup) { // a kit pad's own values (a keygroup's sound's), if motion moved them
         EngineCall call;
         call.op = EngineCall::Op::RestorePads;
         if (!keep_call(slot, call)) slot.sampler.restore_pads();
@@ -1577,8 +1577,8 @@ void EngineHost::move_lane(unsigned t, Slot& slot, unsigned param, unsigned pad,
         if (slot.engine) { engine_bend(slot, std::clamp(value / 64.0f, -1.0f, 1.0f)); slot.bend_moved = true; }
         return;
     }
-    if (param >= motion_pad_base) { // a kit pad's own value
-        if (slot.kind == EngineKind::Sampler) {
+    if (param >= motion_pad_base) { // a kit pad's own value (a keygroup's sound's)
+        if (slot.kind == EngineKind::Sampler || slot.kind == EngineKind::Keygroup) {
             EngineCall call;
             call.op = EngineCall::Op::MovePad; call.a = int32_t(pad); call.b = int32_t(param - motion_pad_base); call.c = value;
             if (!keep_call(slot, call)) slot.sampler.move_pad(pad, PadParam(param - motion_pad_base), value);
@@ -1602,7 +1602,7 @@ void EngineHost::restore_lane(unsigned t, Slot& slot, unsigned param, unsigned p
     if (param == motion_wheel) { engine_wheel(slot, slot.wheel); return; }
     if (param == motion_bend) { engine_bend(slot, slot.bend); return; }
     if (param >= motion_pad_base) {
-        if (slot.kind == EngineKind::Sampler) {
+        if (slot.kind == EngineKind::Sampler || slot.kind == EngineKind::Keygroup) {
             EngineCall call;
             call.op = EngineCall::Op::RestorePad; call.a = int32_t(pad); call.b = int32_t(param - motion_pad_base);
             if (!keep_call(slot, call)) slot.sampler.restore_pad(pad, PadParam(param - motion_pad_base));

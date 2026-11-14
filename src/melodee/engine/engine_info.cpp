@@ -136,6 +136,14 @@ const StageGroups& stage_groups(EngineKind kind) {
         {{{stage_arp, stage_chord}}, 2},
         {{{{"EDIT", K::OpenEdit, P::Bars}}}, 1},
     }}};
+    // A keygroup, on its one sound: B1 the sound (TRIM, or ZONES on an instrument), its tune, envelopes and filter;
+    // B2 how it plays (one shot or held, mono or poly), the arp and chord; B3 the track's mix, sends and effects.
+    static const StageGroups keygroup {{{
+        {{{{"TRIM", K::Trim, P::Wave}, {"TUNE", K::Tune, P::Wave}, {"AMP ENV", K::AmpEnv, P::Wave}, {"FILTER", K::Filter, P::Wave},
+           {"FILT ENV", K::FiltEnv, P::Wave}}}, 5},
+        {{{{"PLAY", K::Play, P::Wave}, stage_arp, stage_chord}}, 3},
+        {{{stage_mix, stage_sends, stage_fx}}, 3},
+    }}};
     // An empty track: what it becomes.
     static const StageGroups empty {{{
         {{{{"SYNTH", K::NewSynth, P::Engines}, {}, {}}}, 1},
@@ -147,6 +155,7 @@ const StageGroups& stage_groups(EngineKind kind) {
     case EngineKind::None: return empty;
     case EngineKind::Sampler: return kit;
     case EngineKind::Midi: return midi;
+    case EngineKind::Keygroup: return keygroup;
     default: {
         const auto* own = engine_info(kind).stage;
         return own ? *own : nothing;

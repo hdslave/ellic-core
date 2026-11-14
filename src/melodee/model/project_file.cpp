@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #include "melodee/model/project_file.h"
+#include "melodee/model/keygroup_track.h"
 #include "melodee/model/fader.h"
 #include "melodee/model/pad_params.h"
 #include "melodee/model/scales.h"
@@ -237,6 +238,9 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
     w.end(at);
     at = w.begin("PVER"); // which engine parameters TRAK's values cover
     w.u8(params_version);
+    w.end(at);
+    at = w.begin("KGVR"); // saved with keygroup tracks: an instrument on a kit pad is one on purpose (no migration)
+    w.u8(1);
     w.end(at);
     for (unsigned t = 0; t < track_count; ++t) {
         const auto& tr = project.tracks[t];
@@ -742,6 +746,7 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
     std::array<std::vector<uint8_t>, max_plugins> plugin_states;
     PrintTable prints;
     unsigned file_version = 0;
+    bool keygroups_known = false; // KGVR: saved since keygroup tracks
     if (data.size() < 8 || std::memcmp(data.data(), magic, 8)) return "not a Melodee project";
     auto project = std::make_unique<Project>();
     auto patterns = std::make_unique<PatternBank>();
@@ -790,6 +795,8 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
             for (unsigned k = 0; k < used && r.ok; ++k) read_pad(r, tr.pads.data(), sampler_pads);
         } else if (name == "PVER") {
             file_version = r.u8();
+        } else if (name == "KGVR") {
+            keygroups_known = r.u8() >= 1;
         } else if (name == "KITX") {
             unsigned t = r.u8();
             if (t >= track_count) continue;
@@ -1386,6 +1393,8 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
         m.tick = sixteenth * sixteenth_ticks; m.param = e.param; m.pad = e.pad; m.value = e.value;
         pattern.write_motion(m);
     }
+    // From before keygroup tracks: each kit's instrument pad its own keygroup track (model/keygroup_track.h).
+    if (!keygroups_known) migrate_instrument_pads(*project, *patterns);
     target = *project;
     target_patterns = *patterns;
     if (version) *version = file_version;

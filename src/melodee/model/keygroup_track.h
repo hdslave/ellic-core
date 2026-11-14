@@ -3,22 +3,34 @@
 #pragma once
 #include "melodee/model/project.h"
 #include <algorithm>
+#include <cstring>
 
 // KEYGROUP tracks (model/project.h EngineKind::Keygroup) out of kits' instrument pads. Before keygroup tracks an
 // instrument (an .sfz, an MPC keygroup or drum pad, an .exs, a DecentSampler or .sf2 preset) sat on a kit pad and
-// played its key 60 + the pad's pitch + each note's semitones (engine/sampler.cpp zones_on()). Each such pad becomes
+// played its key 60 + the pad's pitch + each note's semitones (engine/sampler.cpp zones_on()). A pad of an MPC drum
+// program or project ("<file>#<pad>": velocity layers of one drum) stays a kit pad. Each other such pad becomes
 // a keygroup track: its sound on pad 1 (its pitch its tune), its notes MIDI notes 60 + their semitones, which the
 // keyed sampler plays at the same keys. A kit with nothing else (no other pad, no note of another) turns into the
-// keygroup track itself and keeps everything; otherwise the pad and its notes go to the first empty track, with the
-// kit's name, mix, effects, sound parameters, pattern, chain and song clips, and the kit keeps the rest. With no
+// keygroup track itself and keeps everything; otherwise the pad and its notes go to the first empty track, named
+// after its sound (the kit's name when it has none), with the kit's mix, effects, sound parameters, pattern, chain
+// and song clips, and the kit keeps the rest. With no
 // empty track the pad stays on its kit (counted as left).
 namespace melodee {
 
 struct KeygroupMove { unsigned moved = 0, left = 0; };
 
 namespace keygroup_detail {
+// An MPC drum program's or project's pad, "<file>.xpm#<pad>" (.xty, .xpj too): a drum's layers, not keys.
+inline bool drum_program_pad(const char* path) {
+    const char* mark = std::strrchr(path, '#');
+    if (!mark || mark - path < 4) return false;
+    const char kind[3] = {char(mark[-3] | 32), char(mark[-2] | 32), char(mark[-1] | 32)};
+    return mark[-4] == '.' && kind[0] == 'x' && ((kind[1] == 'p' && (kind[2] == 'm' || kind[2] == 'j')) || (kind[1] == 't' && kind[2] == 'y'));
+}
 inline bool instrument_pad(const Project& p, const PadSound& pad) {
-    return pad.used() && p.samples[pad.sample % sample_slots].instrument();
+    if (!pad.used()) return false;
+    const auto& ref = p.samples[pad.sample % sample_slots];
+    return ref.instrument() && !drum_program_pad(ref.path);
 }
 // A kit pattern's notes of `pad` as a keygroup's: MIDI notes, ordered as a pattern keeps them.
 inline Pattern keyed_pattern(const Pattern& kit, unsigned pad) {
@@ -67,8 +79,9 @@ inline KeygroupMove migrate_instrument_pads(Project& project, PatternBank& bank)
             if (target < 0) { ++out.left; continue; }
 
             Track made = alone ? kit : Track {};
-            if (!alone) { // what the kit's sound went through, and how it played
-                made.set_name(kit.name);
+            if (!alone) { // what the kit's sound went through, and how it played; named after the sound
+                const char* sound = project.samples[kit.pads[n].sample % sample_slots].name;
+                made.set_name(sound[0] ? sound : kit.name);
                 made.params = kit.params;
                 made.mix = kit.mix;
                 made.fx = kit.fx;

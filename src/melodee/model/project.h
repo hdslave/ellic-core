@@ -326,6 +326,9 @@ struct Track {
     uint8_t speed = speed_normal; // its patterns' playback speed (roadmap P1), an index into speeds: x1/2 .. x2
     MidiDevice midi;              // a MIDI track's device name, drum map and SysEx file (roadmap P4, MIDT v3)
     bool used() const { return engine != EngineKind::None; }
+    // Plays samples off its pads: a kit, or a keygroup (its one sound on pad 1, always its last pad), whose sound
+    // pages (trim or zones, tune, envelopes, filter, play) are the same.
+    bool sampled() const { return engine == EngineKind::Sampler || engine == EngineKind::Keygroup; }
     // The note a new step gets on Steps: on a kit the pad hit last, else the last note played.
     uint8_t step_note() const { return engine == EngineKind::Sampler ? uint8_t(sampler_first_note + last_pad % sampler_pads) : last_note; }
     void set_name(const char* text) {
