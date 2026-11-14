@@ -2315,6 +2315,9 @@ void EngineHost::tick() {
         count_rest.store(count_left, std::memory_order_relaxed);
         if (!count_left) count_beat.store(0, std::memory_order_relaxed);
         until_tick += tick_length();
+        // The arps' and Note Repeat's clock ran through the count-in: it starts again with the take's first tick, so
+        // Seq Record writes their notes from the pattern's start, not a bar on.
+        if (!count_left) { arp_ticks = 0; until_arp = until_tick; arp_origin = tick_now; }
         return;
     }
     // The song's clocks start with its first tick, after any count-in: Start from the top, else Song Position and Continue.
