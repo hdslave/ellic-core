@@ -241,9 +241,9 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
     for (unsigned t = 0; t < track_count; ++t) {
         const auto& tr = project.tracks[t];
         at = w.begin("TRAK");
-        // A MIDI or PLUGIN track is None here and itself in MIDT / PLGT, so older builds load it empty (not as the engine
-        // after their last).
-        bool own_section = tr.engine == EngineKind::Midi || tr.engine == EngineKind::Plugin;
+        // A MIDI, PLUGIN or KEYGROUP track is None here and itself in MIDT / PLGT / KGRP, so older builds load it empty
+        // (not as the engine after their last). A keygroup's instrument is its pad 1, kept with the pads as a kit's.
+        bool own_section = tr.engine == EngineKind::Midi || tr.engine == EngineKind::Plugin || tr.engine == EngineKind::Keygroup;
         w.u8(t); w.u8(own_section ? 0u : unsigned(tr.engine)); w.u16(tr.preset); w.text(tr.name);
         auto values = tr.params;
         if (tr.engine == EngineKind::Midi) // P1-P16's own programs where older builds kept them (Pattern::program now)
@@ -652,6 +652,12 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
         w.text(midi.device);
         for (auto n : midi.drum_note) w.u8(n);
         w.text(midi.sysex);
+        w.end(at);
+    }
+    for (unsigned t = 0; t < track_count; ++t) { // a KEYGROUP track (model/project.h); TRAK said None
+        if (project.tracks[t].engine != EngineKind::Keygroup) continue;
+        at = w.begin("KGRP");
+        w.u8(t); w.u8(1); // the section's version
         w.end(at);
     }
     for (unsigned t = 0; t < track_count; ++t) { // a PLUGIN track and the entry of PLUG it plays; TRAK said None
@@ -1167,6 +1173,9 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
                     r.text(tr.midi.sysex, sizeof(tr.midi.sysex));
                 }
             }
+        } else if (name == "KGRP") { // a KEYGROUP track; TRAK, before it, said None
+            unsigned t = r.u8(), version = r.u8();
+            if (r.ok && t < track_count && version >= 1) project->tracks[t].engine = EngineKind::Keygroup;
         } else if (name == "PLGT") { // a PLUGIN track; TRAK, before it, said None
             unsigned t = r.u8(), entry = r.u8();
             if (r.ok && t < track_count) {

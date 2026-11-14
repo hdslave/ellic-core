@@ -92,6 +92,10 @@ public:
     void hold_layer(unsigned pad, bool on) { if (pad < sampler_pads) held_layer[pad] = int8_t(on ? -2 : -1); }
     void release_layers() { held_layer.fill(-1); }
 
+    // A KEYGROUP track's sampler (model/project.h): note k plays pad 1 at k - 60 semitones from its root, as a kit's
+    // instrument pad plays key 60 + its pitch + those (zones_on()); a kit's notes are pads (pad_note()).
+    void set_keyed(bool on) { keyed = on; }
+    bool is_keyed() const { return keyed; }
     void note_on(int key, int velocity) override;
     void set_accent(float gain) override { accent = gain; }
     void note_off(int key) override;
@@ -318,6 +322,8 @@ private:
     float accent = 1; // the sequencer's, for the voices started next (set_accent)
     float bend = 0;   // semitones, set_bend
     bool pedal = false;
+    bool keyed = false; // set_keyed()
+    void release_key(int key); // note_off() in the kit's encoding
     std::array<int32_t, max_voices> pedal_offs {}; // the note offs the sustain pedal holds back, in order
     unsigned pedal_count = 0;
     float g = 1, k = 2, s1[2] {}, s2[2] {};

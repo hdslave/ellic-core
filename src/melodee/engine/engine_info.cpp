@@ -30,6 +30,11 @@ const EngineInfo& engine_info(EngineKind kind) {
     static const Sound kits[] {{"NEW KIT", {{{-1, 0}}}}};
     static const EngineInfo sampler {EngineKind::Sampler, "SAMPLER", true, kit_params, sampler::Count, nullptr, 0,
                                      {sampler::Tune, sampler::Filter, sampler::Decay}, kits, 1};
+    // KEYGROUP: the sampler with one sound, an instrument or a WAV, played by MIDI notes; its parameters the kit's.
+    // Not offered among the engines yet (round K2 gives it its new-track choice and Stage pages).
+    static const Sound keygroups[] {{"NEW KEYGROUP", {{{-1, 0}}}}};
+    static const EngineInfo keygroup {EngineKind::Keygroup, "KEYGROUP", false, kit_params, sampler::Count, nullptr, 0,
+                                      {sampler::Tune, sampler::Filter, sampler::Decay}, keygroups, 1};
     // MIDI (docs/MIDI_TRACKS.md): where the track's notes go out; bank and program (Off sends none); 24 knob slots
     // (the first three on Stage's CC page), each slot's address; pressure, bend, delay, pads, an input as its sound,
     // SysEx on load, each pattern's own program (roadmap P4, M2-M5).
@@ -105,6 +110,7 @@ const EngineInfo& engine_info(EngineKind kind) {
     case EngineKind::Midi: return midi;
     case EngineKind::Plugin: return plugin;
     case EngineKind::Sampler: return sampler;
+    case EngineKind::Keygroup: return keygroup;
     default: return none;
     }
 }

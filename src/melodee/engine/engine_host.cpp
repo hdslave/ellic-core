@@ -382,12 +382,13 @@ void EngineHost::load_track(unsigned t, const Track& track) {
 void EngineHost::select_engine(Slot& slot, EngineKind kind) {
     if (slot.engine) slot.engine->silence();
     slot.kind = kind;
-    slot.engine = kind == EngineKind::Sampler ? static_cast<Engine*>(&slot.sampler)
+    slot.engine = kind == EngineKind::Sampler || kind == EngineKind::Keygroup ? static_cast<Engine*>(&slot.sampler)
                 : kind == EngineKind::Midi ? static_cast<Engine*>(&slot.midi)
                 : kind == EngineKind::Plugin ? static_cast<Engine*>(&slot.plugin) : nullptr;
     slot.plugin.attach(kind == EngineKind::Plugin ? runner_of(slot.plugin_entry) : nullptr);
     if (kind != EngineKind::Plugin) slot.plugin.release_macros();
     slot.sampler.set_samples(&samples);
+    slot.sampler.set_keyed(kind == EngineKind::Keygroup); // its notes MIDI notes on pad 1
     slot.arp.top = kind == EngineKind::Sampler ? int(sampler_last_key) : 127; // a kit's notes run past 127
     for (auto& off : slot.offs) off.key = -1;
     slot.held = {};

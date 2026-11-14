@@ -516,7 +516,11 @@ void SamplerEngine::hit(int pad, int velocity, int semitones, int cutoff) {
 
 // A note is a pad's key, and over it the semitones from the pad's root it plays at (an instrument's), and over those a
 // 16 Levels cutoff a pattern kept (roadmap P3: model/sampler.h pad_note).
+// A keyed sampler's note as the kit's encoding: pad 1 at the note's semitones from 60, any cutoff above dropped.
+static int keyed_note(int key) { return pad_note(int(sampler_first_note), std::clamp(key & 0xff, 0, 127) - 60); }
+
 void SamplerEngine::note_on(int key, int velocity) {
+    if (keyed) key = keyed_note(key);
     if (pedal) { // pressed again under the pedal: its earlier off is not owed any more
         unsigned kept = 0;
         for (unsigned n = 0; n < pedal_count; ++n) if ((pedal_offs[n] & 0xffff) != (key & 0xffff)) pedal_offs[kept++] = pedal_offs[n];
@@ -554,10 +558,13 @@ void SamplerEngine::control(int cc, int value) {
     if (down) return;
     const unsigned count = pedal_count;
     pedal_count = 0;
-    for (unsigned n = 0; n < count; ++n) note_off(pedal_offs[n]);
+    for (unsigned n = 0; n < count; ++n) release_key(pedal_offs[n]);
 }
 
-void SamplerEngine::note_off(int key) {
+void SamplerEngine::note_off(int key) { release_key(keyed ? keyed_note(key) : key); }
+
+// A note let go, in the kit's encoding (what the pedal keeps, so a keyed note is not turned twice).
+void SamplerEngine::release_key(int key) {
     if (pedal) { // held on by the sustain pedal; the oldest goes now when too many wait
         for (unsigned n = 0; n < pedal_count; ++n) if (pedal_offs[n] == key) return;
         if (pedal_count < pedal_offs.size()) { pedal_offs[pedal_count++] = key; return; }

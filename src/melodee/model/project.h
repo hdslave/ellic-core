@@ -32,7 +32,11 @@ namespace melodee {
 // drum kit (PROPHET, FM6, CZ, SID, the 909), gone since the synths became
 // plug-ins of their own: a file's track of one opens as that plug-in or empty
 // (legacy_engine below, model/project_file.cpp).
-enum class EngineKind : uint8_t { None = 0, Sampler = 6, Midi = 7, Plugin = 8, Count = 9 };
+// Keygroup: one sampled instrument (an .sfz, an MPC keygroup, an .exs, a
+// DecentSampler preset, an .sf2 preset, or one WAV across the keys) on pad 1 of
+// the sampler, its notes MIDI notes (engine/sampler.h keyed); files keep it in
+// KGRP, TRAK says None, so older builds load the track empty.
+enum class EngineKind : uint8_t { None = 0, Sampler = 6, Midi = 7, Plugin = 8, Keygroup = 9, Count = 10 };
 
 // What TRAK's engine number meant before the synths left Melodee. PROPHET,
 // CZ and SID tracks open as PLUGIN tracks on Melodee Poly, PD and Chip (the
