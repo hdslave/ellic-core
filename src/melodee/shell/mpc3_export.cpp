@@ -16,6 +16,7 @@
 #include "melodee/engine/dsp.h"
 #include "melodee/engine/sfz.h"
 #include "melodee/model/sampler.h"
+#include "melodee/model/song_flatten.h"
 #include "melodee/shell/mpc_program.h"
 #include "melodee/shell/sample_library.h"
 #include <juce_core/juce_core.h>
@@ -25,6 +26,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <set>
 #include <vector>
@@ -638,27 +640,19 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
     std::map<unsigned, std::set<int>> moved;
     for (const auto& w : written) if (w.pad >= 0 && !w.audio) moved[w.index].insert(w.pad);
 
-    // Patterns as sequences: all 128, the highest first, as MPC 3 saves them.
+    // A sequence: each written track's pattern (a track's numbered pattern, or its lane of the song laid out) and, for
+    // an Audio track, where its prints play. `whole_length`: every clip the sequence's length (the song), else a clip
+    // of notes is as long as its pattern, looping inside the sequence.
     const TimeSignature signature = project.time_signature();
     const int beat_pulses = int(3840 / signature.unit);
     const int bar_pulses = beat_pulses * signature.beats;
-    juce::Array<juce::var> sequences;
-    for (int p = int(pattern_count) - 1; p >= 0; --p) {
-        uint32_t longest = 0;
-        bool any = false;
-        for (const auto& w : written) {
-            const auto& pattern = patterns.at[w.index][size_t(p)];
-            longest = std::max(longest, pattern.length);
-            any = any || !pattern.events.empty();
-        }
-        report.sequences += any;
-        const int pulses = int(std::max<uint32_t>(longest, 1) * mpc_ticks_per_tick);
+    struct Placement { int at = 0, length = 0; const PrintRecord* record = nullptr; };
+    auto make_sequence = [&](int key, const std::string& title, unsigned tempo, int pulses, bool whole_length,
+                             const std::function<const Pattern&(const Written&)>& pattern_of,
+                             const std::function<std::vector<Placement>(const Written&)>& prints_of) {
         const int bars = std::max(1, (pulses + bar_pulses - 1) / bar_pulses);
         juce::var sequence = field(doc, "sequence").clone();
-        char title[24];
-        std::snprintf(title, sizeof(title), "Sequence %02d", p + 1);
         put(sequence, "name", juce::String(title));
-        const unsigned tempo = project.seq_tempo && project.pattern_tempo[size_t(p)] ? project.pattern_tempo[size_t(p)] : project.tempo;
         put(sequence, "bpm", real(tempo / 10.0));
         put(sequence, "lengthBars", whole(bars));
         put(sequence, "loopStartBar", whole(0));
@@ -685,56 +679,48 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
             int clip_pulses = pulses;
             juce::Array<juce::var> events;
             auto own = std::find_if(written.begin(), written.end(), [&](const Written& w) { return w.name == track_name; });
-            if (own != written.end() && own->audio) { // the pattern's print, from the sequence's start
-                const auto* record = prints->find(own->index, unsigned(p));
-                const auto& pattern = patterns.at[own->index][size_t(p)];
-                if (record && !record->file.empty()) {
+            if (own != written.end() && own->audio) { // its prints: the clip spans the sequence, as MPC 3 saves an audio clip
+                for (const auto& place : prints_of(*own)) {
+                    const auto* record = place.record;
                     const auto& file = files.name((fs::path(prints_dir) / record->file).string(), report);
                     const auto& wav = files.info(file);
                     const unsigned rate = wav.rate ? wav.rate : record->rate;
-                    // One pass of the pattern (Loop and Cut prints are that long; a Ring print's tail is cut where the clip loops).
+                    // One pass of the pattern (Loop and Cut prints are that long; a Ring print's tail is cut where it loops).
                     const int64_t pass = std::llround(record->pass * double(rate) / dsp::model_rate);
                     const int64_t end = std::min<int64_t>(int64_t(wav.frames ? wav.frames : record->frames), pass > 0 ? pass : INT64_MAX);
-                    // The clip spans the sequence (as MPC 3 saves an audio clip), the print again each time the pattern loops.
-                    const int pass_pulses = int(std::max<uint32_t>(pattern.length, 1) * mpc_ticks_per_tick);
-                    for (int at = 0; at < clip_pulses; at += pass_pulses) {
-                        juce::var event = field(doc, "audioEvent").clone();
-                        put(event, "time", whole(at));
-                        put(event, "muted", false);
-                        const auto& audio = field(event, "audio");
-                        const auto entry_of = Files::sample_entry(file);
-                        put(audio, "sample", entry_of);
-                        put(audio, "name", juce::String(fs::path(file).stem().string()));
-                        const unsigned tempo = project.seq_tempo && project.pattern_tempo[size_t(p)] ? project.pattern_tempo[size_t(p)] : project.tempo;
-                        put(audio, "tempo", real(tempo / 10.0));
-                        put(audio, "sliceStart", whole(0));
-                        put(audio, "sliceEnd", whole(int(end)));
-                        put(audio, "warpEnable", false); // printed at the pattern's tempo
-                        put(audio, "length", whole(std::min(pass_pulses, clip_pulses - at)));
-                        events.add(event);
-                    }
-                    ++report.regions;
+                    juce::var event = field(doc, "audioEvent").clone();
+                    put(event, "time", whole(place.at));
+                    put(event, "muted", false);
+                    const auto& audio = field(event, "audio");
+                    put(audio, "sample", Files::sample_entry(file));
+                    put(audio, "name", juce::String(fs::path(file).stem().string()));
+                    put(audio, "tempo", real(tempo / 10.0));
+                    put(audio, "sliceStart", whole(0));
+                    put(audio, "sliceEnd", whole(int(end)));
+                    put(audio, "warpEnable", false); // printed at the pattern's tempo
+                    put(audio, "length", whole(place.length));
+                    events.add(event);
                 }
             } else if (own != written.end()) {
-                const auto& pattern = patterns.at[own->index][size_t(p)];
+                const auto& pattern = pattern_of(*own);
                 const auto& pads = project.tracks[own->index].pads;
-                if (!pattern.events.empty()) clip_pulses = int(pattern.length * mpc_ticks_per_tick);
+                if (!pattern.events.empty() && !whole_length) clip_pulses = int(pattern.length * mpc_ticks_per_tick);
                 for (const auto& e : pattern.events) {
                     if (e.key < sampler_first_note || e.key >= sampler_first_note + mpc_pads || e.tick >= pattern.length) continue;
                     const int pad = e.key - int(sampler_first_note);
-                    int key;
+                    int note_key;
                     if (own->pad < 0) {
                         if (moved[own->index].count(pad)) continue;
-                        key = note_of_pad(unsigned(pad));
+                        note_key = note_of_pad(unsigned(pad));
                     } else {
                         if (pad != own->pad) continue;
-                        key = std::clamp(played_root + (own->shifted ? pads[size_t(pad)].pitch : 0) + e.pitch, 0, 127);
+                        note_key = std::clamp(played_root + (own->shifted ? pads[size_t(pad)].pitch : 0) + e.pitch, 0, 127);
                     }
                     juce::var event = field(doc, "noteEvent").clone();
                     put(event, "time", whole(int(e.tick * mpc_ticks_per_tick)));
                     put(event, "muted", false);
                     const auto& note = field(event, "note");
-                    put(note, "note", whole(key));
+                    put(note, "note", whole(note_key));
                     put(note, "velocity", real(std::clamp<int>(e.velocity, 1, 127) / 127.0));
                     put(note, "length", whole(int(std::max<unsigned>(e.length, 1) * mpc_ticks_per_tick)));
                     put(note, "probability", whole(std::clamp<int>(e.chance, 0, 100)));
@@ -750,8 +736,78 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
             clips.push_back(entry(juce::String(track_name), clip));
         }
         put(sequence, "trackClipMaps", array_of({array_of(std::move(clips))}));
-        sequences.add(entry(whole(p), sequence));
+        return entry(whole(key), sequence);
+    };
+    // A print of `pattern` from `from` to `to` (pulses), again each time the pattern loops.
+    auto loops_of = [&](const Written& w, unsigned pattern, int from, int to, std::vector<Placement>& out) {
+        const auto* record = prints->find(w.index, pattern);
+        if (!record || record->file.empty()) return false;
+        const int pass_pulses = int(std::max<uint32_t>(patterns.at[w.index][pattern % pattern_count].length, 1) * mpc_ticks_per_tick);
+        for (int at = from; at < to; at += pass_pulses) out.push_back({at, std::min(pass_pulses, to - at), record});
+        return true;
+    };
+
+    // Patterns as sequences: all 128, the highest first, as MPC 3 saves them.
+    std::vector<juce::var> numbered(pattern_count);
+    for (int p = int(pattern_count) - 1; p >= 0; --p) {
+        uint32_t longest = 0;
+        bool any = false;
+        for (const auto& w : written) {
+            const auto& pattern = patterns.at[w.index][size_t(p)];
+            longest = std::max(longest, pattern.length);
+            any = any || !pattern.events.empty() || (w.audio && prints->find(w.index, unsigned(p)));
+        }
+        report.sequences += any;
+        const int pulses = int(std::max<uint32_t>(longest, 1) * mpc_ticks_per_tick);
+        char title[24];
+        std::snprintf(title, sizeof(title), "Sequence %02d", p + 1);
+        const unsigned tempo = project.seq_tempo && project.pattern_tempo[size_t(p)] ? project.pattern_tempo[size_t(p)] : project.tempo;
+        numbered[size_t(p)] = make_sequence(p, title, tempo, pulses, false,
+            [&](const Written& w) -> const Pattern& { return patterns.at[w.index][size_t(p)]; },
+            [&](const Written& w) {
+                std::vector<Placement> out;
+                if (loops_of(w, unsigned(p), 0, pulses, out)) ++report.regions;
+                return out;
+            });
     }
+
+    // The song, laid out as one sequence in the first pattern number nothing uses (as Song -> new pattern does,
+    // shell/song_export.cpp): each track's lane its clips' patterns end to end, each Audio track its clips' prints.
+    const Song& song = project.song;
+    int song_key = -1;
+    const unsigned song_bars = song.length();
+    if (song_bars) {
+        for (unsigned p = 0; p < pattern_count && song_key < 0; ++p) {
+            bool free = true;
+            for (const auto& w : written) free = free && patterns.at[w.index][p].empty() && !(w.audio && prints->find(w.index, p));
+            for (unsigned n = 0; n < song.count && free; ++n) free = song.clips[n].pattern != p;
+            if (free) song_key = int(p);
+        }
+        if (song_key < 0) report.song_left_out = true;
+    }
+    if (song_key >= 0) {
+        const uint32_t bar_ticks = project.bar_ticks();
+        std::map<unsigned, Pattern> lanes;
+        bool full = false;
+        for (const auto& w : written)
+            if (!w.audio && !lanes.count(w.index)) flatten_lane(song, w.index, patterns.at[w.index], bar_ticks, song_bars, lanes[w.index], full);
+        report.song_bars = song_bars;
+        report.song_full = full;
+        report.song_tempo_left_out = !song.tempo.empty();
+        numbered[size_t(song_key)] = make_sequence(song_key, "Song", project.tempo, int(song_bars * bar_ticks * mpc_ticks_per_tick), true,
+            [&](const Written& w) -> const Pattern& { return lanes[w.index]; },
+            [&](const Written& w) {
+                std::vector<Placement> out;
+                for (unsigned n = 0; n < song.count; ++n) {
+                    const auto& clip = song.clips[n];
+                    if (clip.track != w.index || clip.muted) continue;
+                    loops_of(w, clip.pattern, int(clip.bar * bar_ticks * mpc_ticks_per_tick), int(clip.end() * bar_ticks * mpc_ticks_per_tick), out);
+                }
+                return out;
+            });
+    }
+    juce::Array<juce::var> sequences;
+    for (int p = int(pattern_count) - 1; p >= 0; --p) sequences.add(numbered[size_t(p)]);
 
     // The project: its tracks, the buses after them, sequences, samples and tempo.
     juce::Array<juce::var> tracks;
@@ -762,7 +818,8 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
     put(data, "samples", samples_of(files.all()));
     put(data, "masterTempoEnabled", !project.seq_tempo);
     put(data, "masterTempo", real(project.tempo / 10.0));
-    put(data, "currentSequence", whole(project.tracks[written.front().index].pattern % pattern_count));
+    // The song is what plays first when there is one, else the pattern the first track plays.
+    put(data, "currentSequence", whole(song_key >= 0 ? song_key : int(project.tracks[written.front().index].pattern % pattern_count)));
     put(data, "currentTrackIndex", whole(0));
     std::vector<juce::var> transport;
     for (const auto& track_name : names) {

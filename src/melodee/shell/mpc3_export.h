@@ -18,12 +18,17 @@
 // pads keep their warp. A plug-in track becomes an Audio track of its prints
 // (model/print.h), each printed pattern a region at its sequence's start; one
 // without prints, a MIDI track, and sounds that are not WAV files are counted
-// in the report and left out.
+// in the report and left out. The song becomes one sequence, "Song", in the
+// first pattern number nothing uses, and plays first.
 namespace melodee {
 
 struct Mpc3Export {
     unsigned tracks = 0, keygroups = 0, sequences = 0, pads = 0, notes = 0, samples = 0; // tracks: Drum tracks; keygroups: Keygroup tracks
     unsigned audio = 0, regions = 0; // Audio tracks of prints, and the printed patterns on them
+    unsigned song_bars = 0;          // the song, as the sequence "Song" (0: no song)
+    bool song_left_out = false;      // no free pattern number for it
+    bool song_full = false;          // a lane had more notes than a pattern holds
+    bool song_tempo_left_out = false; // its tempo changes: the sequence keeps the project's tempo
     unsigned skipped_tracks = 0; // tracks not written: MIDI tracks, plug-in tracks with no prints
     unsigned skipped_pads = 0;   // pads, layers or zones not written: not a WAV file (an SF2's, a FLAC), past eight layers
     unsigned missing = 0;        // WAV files not where the project says
