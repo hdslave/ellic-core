@@ -46,8 +46,8 @@ uint8_t probe_accent(const std::vector<uint8_t>& velocities, const std::vector<f
 // pitched instrument does (an octave up twice the frequency).
 bool probe_drums(const std::vector<uint8_t>& keys, const std::vector<float>& hz);
 
-// The same key hit a few times: whether the hits differ (a level envelope or brightness apart by more than a
-// plug-in's own noise), so each key wants takes of its own. Phase alone does not count.
+// The same key hit a few times: whether the hits differ (their level over 300 ms apart by 1.5 dB on average, or their
+// brightness by 8 %), so each key wants takes of its own. Phase alone does not count.
 bool probe_varies(const std::vector<std::vector<float>>& hits, float rate);
 
 } // namespace melodee

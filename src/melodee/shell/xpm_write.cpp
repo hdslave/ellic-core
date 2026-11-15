@@ -162,7 +162,7 @@ void instrument_text(std::string& s, unsigned number_, const XpmKeygroup* k, dou
     t("MuteGroup", 0);
     for (const char* mute : {"MuteTarget1", "MuteTarget2", "MuteTarget3", "MuteTarget4"}) t(mute, 0);
     for (const char* simult : {"SimultTarget1", "SimultTarget2", "SimultTarget3", "SimultTarget4"}) t(simult, 0);
-    t("TriggerMode", 2); // held while the key is
+    t("TriggerMode", k && k->one_shot ? 0 : 2); // one shot (a drum), else held while the key is
     t("WarpTempo", 120.0);
     t.flag("BpmLock", true);
     t.flag("WarpEnable", false);

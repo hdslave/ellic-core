@@ -156,10 +156,12 @@ bool probe_drums(const std::vector<uint8_t>& keys, const std::vector<float>& hz)
 
 bool probe_varies(const std::vector<std::vector<float>>& hits, float rate) {
     if (hits.size() < 2) return false;
-    const size_t frame = size_t(0.01f * rate), frames = 30; // 300 ms, 10 ms at a time
+    // The level over 300 ms, every 10 ms, each over 50 ms: several periods even of a low note, so where its waveform
+    // happens to start (an oscillator's free phase) does not move it.
+    const size_t hop = size_t(0.01f * rate), span = size_t(0.05f * rate), frames = 26;
     auto envelope = [&](const std::vector<float>& x) {
         std::vector<float> e;
-        for (size_t f = 0; f < frames; ++f) e.push_back(probe_db(x, f * frame, frame));
+        for (size_t f = 0; f < frames; ++f) e.push_back(probe_db(x, f * hop, span));
         return e;
     };
     const auto first = envelope(hits[0]);
@@ -173,9 +175,9 @@ bool probe_varies(const std::vector<std::vector<float>>& hits, float rate) {
             apart += std::fabs(first[f] - other[f]);
             ++counted;
         }
-        if (counted && apart / counted > 1.0) return true;
+        if (counted && apart / counted > 1.5) return true;
         const float b = probe_brightness(hits[h], 0, size_t(0.1f * rate), rate);
-        if (bright > 0 && b > 0 && std::fabs(b / bright - 1.0f) > 0.06f) return true;
+        if (bright > 0 && b > 0 && std::fabs(b / bright - 1.0f) > 0.08f) return true;
     }
     return false;
 }

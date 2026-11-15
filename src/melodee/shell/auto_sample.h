@@ -99,6 +99,7 @@ struct AutoSampleResult {
     std::string error;   // empty: made
     unsigned samples = 0;
     unsigned loops = 0;  // samples given a loop
+    unsigned centred = 0; // samples whose DC offset was taken out
     float gain_db = 0;   // the program's gain (normalize)
     bool post_fx = false;
     double seconds = 0;

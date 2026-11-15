@@ -157,6 +157,44 @@ NoteAudio render_note(EngineHost& host, unsigned track, uint8_t key, uint8_t vel
     return a;
 }
 
+void trim_silence(NoteAudio& note, float rate) {
+    size_t last = std::min(note.left.size(), note.right.size());
+    while (last > 0 && std::fabs(note.left[last - 1]) < ring_silence && std::fabs(note.right[last - 1]) < ring_silence) --last;
+    const size_t keep = std::min(std::min(note.left.size(), note.right.size()), last + size_t(0.005f * rate));
+    if (keep >= note.left.size()) return;
+    note.left.resize(keep); note.right.resize(keep);
+    const size_t fade = std::min(keep, size_t(0.005f * rate));
+    for (size_t f = 0; f < fade; ++f) {
+        const float g = float(f) / float(std::max<size_t>(fade, 1));
+        note.left[keep - 1 - f] *= g; note.right[keep - 1 - f] *= g;
+    }
+    note.held = std::min<uint64_t>(note.held, keep);
+    note.release = keep - note.held;
+}
+
+bool remove_dc(std::vector<float>& left, std::vector<float>& right, uint64_t held, float rate) {
+    const size_t n = std::min(left.size(), right.size()), h = size_t(std::min<uint64_t>(held, n));
+    if (!h || rate <= 0) return false;
+    double sum = 0, peak = 0;
+    for (size_t f = 0; f < h; ++f) {
+        const double m = 0.5 * (double(left[f]) + right[f]);
+        sum += m; peak = std::max(peak, std::fabs(m));
+    }
+    // Off zero by more than 2 % of the note's own peak (a quiet plug-in's offset counts as much as a loud one's).
+    if (std::fabs(sum / double(h)) < std::max(0.0002, 0.02 * peak)) return false;
+    const double r = 1.0 - 2.0 * 3.14159265358979 * 5.0 / rate;
+    for (auto* x : {&left, &right}) {
+        double before = 0, out = 0;
+        for (size_t f = 0; f < n; ++f) {
+            const double in = (*x)[f];
+            out = in - before + r * out;
+            before = in;
+            (*x)[f] = float(out);
+        }
+    }
+    return true;
+}
+
 std::vector<float> render_notes(EngineHost& host, unsigned track, std::vector<ProbeNote> notes, uint64_t frames, PrintTap tap,
                                 const std::function<bool()>& keep_going) {
     const unsigned B = EngineHost::block;
