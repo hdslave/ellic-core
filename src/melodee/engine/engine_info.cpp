@@ -109,7 +109,13 @@ const EngineInfo& engine_info(EngineKind kind) {
     // AUDIO (freeze plan F3, model/audio_track.h): records into the song and plays its regions; no values of its own.
     // Its Stage pages are the regions' (stage_groups()); offered by the new-track picker, not among the engines.
     static const Sound audio_sounds[] {{"AUDIO", {{{-1, 0}}}}};
-    static const EngineInfo audio {EngineKind::Audio, "AUDIO", false, nullptr, 0, nullptr, 0, {-1, -1, -1}, audio_sounds, 1};
+    // B1 the region (CLIP, FADES), B2 how it follows the tempo (WARP, MODE), B3 the track's mix, sends and effects.
+    static const StageGroups audio_stage {{{
+        {{{{"CLIP", StageKind::Clip, StagePicture::Region}, {"FADES", StageKind::Fades, StagePicture::Region}}}, 2},
+        {{{{"WARP", StageKind::Warp, StagePicture::Region}, {"MODE", StageKind::WarpMode, StagePicture::Region}}}, 2},
+        {{{stage_mix, stage_sends, stage_fx}}, 3},
+    }}};
+    static const EngineInfo audio {EngineKind::Audio, "AUDIO", false, nullptr, 0, nullptr, 0, {-1, -1, -1}, audio_sounds, 1, nullptr, 0, false, &audio_stage};
     switch (kind) {
     case EngineKind::Audio: return audio;
     case EngineKind::Midi: return midi;

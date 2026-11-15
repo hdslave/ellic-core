@@ -6,7 +6,10 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <map>
+#include <memory>
 #include <string>
+#include <vector>
 
 // Freeze plan F3, audio tracks: an AUDIO track, as on the MPC 3, records its
 // input into the song and plays it back from there. What it recorded sits on
@@ -119,6 +122,23 @@ inline std::string audio_take_name(unsigned take) {
     std::snprintf(name, sizeof(name), "Take %03u.wav", take);
     return name;
 }
+// A take's overview for the screen: its loudest frame in each hundredth of a second (0..255, a column every
+// take_peak_frames frames at 44.1 kHz), kept beside the take as "Take NNN.peaks". Every take's, by take number.
+constexpr uint32_t take_peak_frames = 441;
+using TakePeaks = std::map<unsigned, std::vector<uint8_t>>;
+inline std::string audio_peaks_name(unsigned take) {
+    char name[24];
+    std::snprintf(name, sizeof(name), "Take %03u.peaks", take);
+    return name;
+}
+// The loudest column of `peaks` over a region's frames [from, to) (44.1 kHz), 0..1.
+inline float peak_over(const std::vector<uint8_t>& peaks, uint32_t from, uint32_t to) {
+    uint32_t a = from / take_peak_frames, b = std::max(a + 1, (to + take_peak_frames - 1) / take_peak_frames);
+    uint8_t most = 0;
+    for (uint32_t n = a; n < b && n < peaks.size(); ++n) most = std::max(most, peaks[n]);
+    return most / 255.0f;
+}
+
 // The take a file name holds ("Take 012.wav": 12), or 0.
 inline unsigned audio_take_of(const std::string& name) {
     unsigned take = 0;

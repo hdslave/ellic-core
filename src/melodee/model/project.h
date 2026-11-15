@@ -199,6 +199,11 @@ struct Song {
         }
         return best;
     }
+    // The region Stage edits: the one sounding at `at`, else the next one on, else -1.
+    int region_near(unsigned track, uint32_t at, unsigned bar_ticks) const {
+        int here = region_at(track, at, bar_ticks);
+        return here >= 0 ? here : region_after(track, at, bar_ticks);
+    }
     void erase_region(unsigned index) {
         if (index >= region_count) return;
         for (unsigned n = index + 1; n < region_count; ++n) regions[n - 1] = regions[n];
@@ -238,6 +243,13 @@ struct Song {
     // Every region of `track` gone (the track emptied or made another kind).
     void drop_regions(unsigned track) {
         for (unsigned n = 0; n < region_count;) if (regions[n].track == track) erase_region(n); else ++n;
+    }
+    // The regions of `track`'s lane by where they start (indices into `regions`); how many.
+    unsigned lane_regions(unsigned track, unsigned bar_ticks, std::array<uint16_t, song_regions>& out) const {
+        unsigned n = 0;
+        for (unsigned k = 0; k < region_count; ++k) if (regions[k].track == track) out[n++] = uint16_t(k);
+        std::sort(out.begin(), out.begin() + n, [&](uint16_t a, uint16_t b) { return region_start(regions[a], bar_ticks) < region_start(regions[b], bar_ticks); });
+        return n;
     }
     // The highest take number a region plays (0: none).
     unsigned last_take() const {
