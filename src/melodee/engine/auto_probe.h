@@ -33,6 +33,11 @@ ProbeGlide probe_glide(const std::vector<float>& x, const std::vector<float>& al
 // (a portamento that is not legato).
 bool probe_slides_apart(const std::vector<float>& x, size_t onset, float from_hz, float to_hz, float rate);
 
+// A key held (x[from, to): the held part, past its attack): whether it sustains, so a loop there plays on for as long
+// as the key is held: its level at the end within 4 dB of its level at the start (a tremolo's swings averaged out),
+// and not silent. A pluck or a 303 fading as it is held does not.
+bool probe_sustains(const std::vector<float>& x, size_t from, size_t to, float rate);
+
 // One key at rising velocities (`velocities`, each with its level in dB and brightness): the velocity a step up starts
 // the accent at, where the sound jumps far more than between any other two; 0 for none.
 uint8_t probe_accent(const std::vector<uint8_t>& velocities, const std::vector<float>& db, const std::vector<float>& bright);

@@ -21,7 +21,8 @@ namespace melodee {
 // new key, `legato` only when the keys overlap (the program is written Mono with that Portamento). Drums: each key a
 // sound of its own, sampled once each, not stretched over its neighbours; `keys` those of the range that sound.
 // `accent`: the velocity the sound jumps at (the layers split there), 0 none. `takes`: hits of one key differ, so each
-// key is taken this many times and the program plays them in turn.
+// key is taken this many times and the program plays them in turn. `sustains`: a held key keeps its level, so LOOP
+// (at Auto) loops each note's held part and it plays on for as long as the key is held.
 enum class AutoKind : uint8_t { Keys, Mono, Drums };
 struct AutoFindings {
     bool heard = false;
@@ -30,6 +31,7 @@ struct AutoFindings {
     bool legato = true;
     uint8_t accent = 0;
     uint8_t takes = 1;
+    bool sustains = false;
     std::array<uint64_t, 2> keys {};
     uint8_t scan_low = 0, scan_high = 127; // drums: the keys the check tried (outside them nothing is known)
     bool sounds(unsigned key) const {
@@ -47,9 +49,11 @@ struct AutoSampleSettings {
     float hold = 2.0f;           // seconds each key is held
     float tail = 8.0f;           // seconds of release kept at most
     bool post_fx = false;        // taken after the track's chain (its effects in the samples), else before it
-    bool loop = false;           // each sample a loop where the key was held (engine/loop_find.h)
+    bool loop = false;           // each sample a loop where the key was held (engine/loop_find.h), when not at Auto
+    bool loop_auto = true;       // LOOP at Auto: a loop when the check heard the sound sustain (AutoFindings::sustains)
     bool normalize = true;       // one gain for the whole program, its loudest sample at -1 dB (layers keep their balance)
     AutoFindings found;          // what the check heard
+    bool looping() const { return loop_auto ? found.sustains && found.kind != AutoKind::Drums : loop; }
     // The velocity layers taken: as asked, two at least where the check heard an accent.
     unsigned layer_count() const { return std::clamp<unsigned>(found.accent && layers < 2 ? 2 : layers, 1, 4); }
     // Takes of each key: the check's, with one velocity layer (MPC plays a keygroup's layers in turn or by velocity, not both).

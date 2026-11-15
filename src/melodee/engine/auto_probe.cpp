@@ -104,6 +104,14 @@ bool probe_slides_apart(const std::vector<float>& x, size_t onset, float from_hz
     return hz > 0 && std::fabs(semitones(hz, to_hz)) > 1.0f && std::fabs(semitones(hz, from_hz)) < std::fabs(semitones(hz, to_hz));
 }
 
+bool probe_sustains(const std::vector<float>& x, size_t from, size_t to, float rate) {
+    to = std::min(to, x.size());
+    if (to <= from + size_t(0.4f * rate)) return false;
+    const size_t quarter = (to - from) / 4;
+    const float start = probe_db(x, from, quarter), end = probe_db(x, to - quarter, quarter);
+    return end > -55.0f && start - end < 4.0f;
+}
+
 uint8_t probe_accent(const std::vector<uint8_t>& velocities, const std::vector<float>& db, const std::vector<float>& bright) {
     const size_t n = std::min({velocities.size(), db.size(), bright.size()});
     if (n < 4) return 0;

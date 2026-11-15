@@ -28,6 +28,13 @@ float alike(const std::vector<float>& m, uint32_t a, uint32_t b, unsigned w) {
     if (aa <= 0 || bb <= 0) return 0;
     return float(std::max(0.0, ab / std::sqrt(aa * bb)));
 }
+
+// The level of the `w` frames before `at`, dB.
+float level_before(const std::vector<float>& m, uint32_t at, unsigned w) {
+    double sum = 0;
+    for (unsigned i = 1; i <= w; ++i) sum += double(m[at - i]) * m[at - i];
+    return sum > 1e-14 * w ? float(10 * std::log10(sum / w)) : -140.0f;
+}
 } // namespace
 
 LoopPoints find_loop(std::vector<float>& left, std::vector<float>& right, uint64_t held, float rate) {
@@ -51,13 +58,28 @@ LoopPoints find_loop(std::vector<float>& left, std::vector<float>& right, uint64
     auto starts = rising(m, earliest, end - shortest);
     // Many crossings (noise): every one compared would be slow; an even spread of 400 is enough.
     const size_t stride = std::max<size_t>(1, starts.size() / 400);
-    float best = -1;
+    // Alike in shape and in level: a note fading as it is held is joined where the two places are nearest in level
+    // (a shorter loop), each dB apart counting as much as 0.1 of the match.
+    const float end_db = level_before(m, end, window);
+    float best = -1, best_shape = 0;
     uint32_t start = 0;
     for (size_t i = 0; i < starts.size(); i += stride) {
-        float a = alike(m, starts[i], end, window);
-        if (a > best) { best = a; start = starts[i]; }
+        const float shape = alike(m, starts[i], end, window);
+        const float score = shape - 0.1f * std::fabs(level_before(m, starts[i], window) - end_db);
+        if (score > best) { best = score; best_shape = shape; start = starts[i]; }
     }
-    if (best < good_enough || !start) return out;
+    if (best_shape < good_enough || !start) return out;
+    // What it faded by over the loop, made up: a gain rising across the loop to that much at its end, and the frames
+    // after it (the release) raised the same, so the loop goes round at one level and nothing after it jumps.
+    const float faded = std::clamp(level_before(m, start, window) - end_db, 0.0f, 6.0f);
+    if (faded > 0.05f) {
+        const double span = double(end - start), top = std::pow(10.0, faded / 20.0);
+        for (size_t f = start; f < frames; ++f) {
+            const double g = f < end ? std::pow(10.0, faded * (double(f - start) / span) / 20.0) : top;
+            left[f] = float(left[f] * g); right[f] = float(right[f] * g);
+            if (f < m.size()) m[f] = float(m[f] * g);
+        }
+    }
     // The crossfade: the frames before the end turn into those before the start.
     const unsigned fade = unsigned(std::min<uint64_t>({uint64_t((end - start) / 4), uint64_t(0.05f * rate), start}));
     for (unsigned i = 0; i < fade; ++i) {
@@ -69,7 +91,7 @@ LoopPoints find_loop(std::vector<float>& left, std::vector<float>& right, uint64
     }
     out.start = start;
     out.end = end;
-    out.match = best;
+    out.match = best_shape;
     return out;
 }
 
