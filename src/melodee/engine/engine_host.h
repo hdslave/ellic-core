@@ -10,6 +10,7 @@
 #include "melodee/engine/midi_engine.h"
 #include "melodee/engine/plugin_engine.h"
 #include "melodee/engine/print_player.h"
+#include "melodee/engine/audio_player.h"
 #include "melodee/engine/effects.h"
 #include "melodee/engine/pad_fx_info.h"
 #include "melodee/engine/punch.h"
@@ -320,6 +321,15 @@ public:
     // print plays now, and those whose engine sleeps (a bit each); print runs that met frames not pinned yet, and
     // waits after a jump to where nothing was held.
     bool take_done_freeze(FreezePack*& pack) { return done_freezes.pop(pack); }
+    // Freeze plan F3 (engine/audio_player.h). MIDI thread: an AudioPack the audio thread has finished with, to free once
+    // the pager has seen its streams closed. Any thread: audio tracks' runs that met frames not pinned yet, and waits
+    // after a jump. The service thread drains audio_take() (Command::AudioRecord) into the take's file as it comes.
+    bool take_done_audio(AudioPack*& pack) { return done_audio.pop(pack); }
+    uint32_t audio_underruns() const { return audio_under.load(std::memory_order_relaxed); }
+    uint32_t audio_waits() const { return audio_waited.load(std::memory_order_relaxed); }
+    Bounce& audio_take() { return audio_in; }
+    const Bounce& audio_take() const { return audio_in; }
+    int audio_take_track() const { return audio_track.load(std::memory_order_relaxed); } // -1: none
     uint32_t frozen_tracks() const { return frozen_now.load(std::memory_order_relaxed); }
     uint32_t printing_tracks() const { return printing_now.load(std::memory_order_relaxed); }
     uint32_t sleeping_tracks() const { return sleeping_now.load(std::memory_order_relaxed); }
@@ -449,6 +459,12 @@ private:
         float* print_r = nullptr;
         bool print_fed = false;
         Ease print_mix_l, print_mix_r;
+        // Freeze plan F3: an AUDIO track's engine (its regions' voices), its regions, ones replaced whose voices still
+        // fade, and the song tick it followed last (a jump when the next is not the one after).
+        AudioTrackEngine audio;
+        AudioPack* audio_pack = nullptr;
+        AudioPack* audio_leaving = nullptr;
+        uint32_t audio_last = UINT32_MAX;
     };
     // The sequencing pass's calls to a track's engine: straight in at the block's first frame (nothing of it rendered
     // yet) or the old way (every track rendered up to each tick), else kept for its job, at block_at (roadmap P2).
@@ -507,6 +523,17 @@ private:
     static constexpr float sleep_floor = 3.16e-5f; // -90 dB: a frozen track's engine below it a second sleeps
     float pan_centre = 0.7071f;                    // set_pan()'s sides at the centre, as a print was made at
     MidiQueue<64, FreezePack*> done_freezes;
+    // Freeze plan F3: audio tracks.
+    void set_audio(unsigned t, AudioPack* pack);
+    void retire_audio(AudioPack* pack);
+    void audio_follow(Slot& slot);
+    unsigned song_end_bar() const;
+    MidiQueue<64, AudioPack*> done_audio;
+    std::array<AudioPack*, 16> audio_limbo {};
+    std::atomic<uint32_t> audio_under {0}, audio_waited {0};
+    unsigned audio_from = 0, audio_to = 0; // its bars (audio_to 0: until Stop)
+    std::atomic<int> audio_track {-1};
+    bool audio_recording = false;     // a take armed or running: the song runs past its end
     std::array<FreezePack*, 16> freeze_limbo {};
     std::atomic<uint32_t> frozen_now {0}, printing_now {0}, sleeping_now {0}, print_under {0}, print_waited {0};
     // Roadmap P5: track t's follow action planned from where its pattern started (dice rolled now), and brought.
@@ -679,6 +706,7 @@ private:
     TakeRecorder take;
     RecallRing recall_ring; // Audio Recall: the source, always
     Bounce render_out;      // Resample and the song's mixdown
+    Bounce audio_in;        // freeze plan F3: an audio track's take, from the input as Sample Record hears it
     std::atomic<StemRing*> stem_ring {nullptr}; // roadmap P4: stems beside it (each track as it joins the mix, the returns)
     void take_stems(unsigned frames);
     std::atomic<unsigned> source_now {1};

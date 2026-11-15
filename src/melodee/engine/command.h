@@ -138,7 +138,15 @@ struct Command {
         Freeze,
         // A controller from MIDI in on a kit or PLUGIN track (a MIDI track's goes out as MidiEcho): track, index = the
         // CC number, value 0..127. Not CC 1: the mod wheel is Wheel.
-        Control
+        Control,
+        // Freeze plan F3: track, audio = its regions (engine/audio_player.h) to play from now; the pack it replaces
+        // goes back to be freed (EngineHost::take_done_audio). None: it plays nothing.
+        AudioRegions,
+        // Freeze plan F3: a take for audio track `track` (EngineHost::audio_take()), recorded while the song plays
+        // from bar `index` to bar `value` (0: until Stop); value -1 cancels one armed.
+        AudioRecord,
+        // Freeze plan F3: audio track `track`'s regions heard (value 0) or not (1: its monitor hears the input instead).
+        AudioQuiet
 
     };
     Command() = default;
@@ -158,6 +166,7 @@ struct Command {
     union { // Reload's, or Freeze's (freeze plan F2b): one pointer, so a Command (thousands queued) stays as small
         struct ProjectPack* pack = nullptr;
         struct FreezePack* freeze;
+        struct AudioPack* audio; // AudioRegions (freeze plan F3)
     };
     struct TrackPack* track_pack = nullptr;
     // A note played by hand or by MIDI in (EngineHost::send_at): it plays at frame `at` (the low 32 bits of the

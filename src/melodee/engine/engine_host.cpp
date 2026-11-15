@@ -45,7 +45,7 @@ EngineHost::EngineHost() : EngineHost(false, DelayPool::blocks) {}
 EngineHost::EngineHost(Lean lean) : EngineHost(true, lean.delay_blocks) {}
 
 EngineHost::EngineHost(bool lean, unsigned delay_blocks)
-    : is_lean(lean), fx_clock(lean ? &own_clock : &effect_clock), take(!lean), recall_ring(!lean), render_out(!lean),
+    : is_lean(lean), fx_clock(lean ? &own_clock : &effect_clock), take(!lean), recall_ring(!lean), render_out(!lean), audio_in(!lean),
       punch(!lean), live {Live(!lean), Live(!lean), Live(!lean), Live(!lean)}, flex(!lean),
       kept {Kept(!lean), Kept(!lean), Kept(!lean), Kept(!lean)}, pool(delay_blocks), lines(!lean) {
     static_assert(live_slots == 4, "one Live and one Kept a slot above");
@@ -56,6 +56,7 @@ EngineHost::EngineHost(bool lean, unsigned delay_blocks)
     for (unsigned t = 0; t < track_count; ++t) {
         slots[t].sampler.set_pad_effects(&(*pad_fx)[t]); slots[t].sampler.set_pager(&pager);
         slots[t].print.set_pager(&pager); // freeze plan F2b
+        slots[t].audio.player.set_pager(&pager); // freeze plan F3
         slots[t].plugin.set_pool(&pool);   // its performance knobs' echo and reverb (engine/macros.h)
         slots[t].print_l = print_frames->data() + 2 * block * t;
         slots[t].print_r = slots[t].print_l + block;
@@ -76,7 +77,12 @@ EngineHost::~EngineHost() {
     for (auto& slot : slots) {
         slot.print.cut_all();
         delete slot.freeze; delete slot.freeze_leaving;
+        slot.audio.player.cut_all();
+        delete slot.audio_pack; delete slot.audio_leaving;
     }
+    for (auto* pack : audio_limbo) delete pack;
+    AudioPack* audio_done = nullptr;
+    while (done_audio.pop(audio_done)) delete audio_done;
     for (auto* pack : freeze_next) delete pack;
     for (auto* pack : freeze_limbo) delete pack;
     FreezePack* done = nullptr;
@@ -105,6 +111,9 @@ void EngineHost::reload(ProjectPack& pack, bool keep_loops) {
         retire_freeze(slot.freeze); retire_freeze(slot.freeze_leaving); retire_freeze(freeze_next[t]);
         slot.freeze = slot.freeze_leaving = freeze_next[t] = nullptr;
         slot.print_on = false; slot.hand.reset(); wake(slot);
+        slot.audio.player.cut_all(); // freeze plan F3: another project's regions; the shell sends its own
+        retire_audio(slot.audio_pack); retire_audio(slot.audio_leaving);
+        slot.audio_pack = slot.audio_leaving = nullptr; slot.audio_last = UINT32_MAX;
     }
     for (auto& s : slots) if (s.engine) s.engine->silence();
     pending.waiting = false; punch.clear(); punch_target = 255;
@@ -205,7 +214,7 @@ void EngineHost::set_audio_format(double frames_a_second, uint64_t latency_frame
     if (rate == dsp::sample_rate()) return;
     if (is_lean) { reformatting = true; return; } // the rate is the live host's to set: silent, its print dropped
     dsp::device_rate.store(rate, std::memory_order_relaxed);
-    take.set_rate(rate); recall_ring.set_rate(rate); render_out.set_rate(rate);
+    take.set_rate(rate); recall_ring.set_rate(rate); render_out.set_rate(rate); audio_in.set_rate(rate);
     reformatting = true;
     format_serial.fetch_add(1, std::memory_order_release);
 }
@@ -384,7 +393,8 @@ void EngineHost::select_engine(Slot& slot, EngineKind kind) {
     slot.kind = kind;
     slot.engine = kind == EngineKind::Sampler || kind == EngineKind::Keygroup ? static_cast<Engine*>(&slot.sampler)
                 : kind == EngineKind::Midi ? static_cast<Engine*>(&slot.midi)
-                : kind == EngineKind::Plugin ? static_cast<Engine*>(&slot.plugin) : nullptr;
+                : kind == EngineKind::Plugin ? static_cast<Engine*>(&slot.plugin)
+                : kind == EngineKind::Audio ? static_cast<Engine*>(&slot.audio) : nullptr;
     slot.plugin.attach(kind == EngineKind::Plugin ? runner_of(slot.plugin_entry) : nullptr);
     if (kind != EngineKind::Plugin) slot.plugin.release_macros();
     slot.sampler.set_samples(&samples);
@@ -553,6 +563,9 @@ void EngineHost::apply(const Command& c) {
                 retire_freeze(target.freeze); retire_freeze(target.freeze_leaving); retire_freeze(freeze_next[t]);
                 target.freeze = target.freeze_leaving = freeze_next[t] = nullptr;
                 target.print_on = false; target.hand.reset(); wake(target);
+                target.audio.player.cut_all(); // freeze plan F3: the shell sends an audio track's regions again
+                retire_audio(target.audio_pack); retire_audio(target.audio_leaving);
+                target.audio_pack = target.audio_leaving = nullptr; target.audio_last = UINT32_MAX;
             }
             load_track(pack.track, pack.value);
             std::swap(patterns[pack.track % track_count], c.track_pack->patterns); // the pack takes the old ones back to be freed
@@ -933,6 +946,11 @@ void EngineHost::apply(const Command& c) {
         sync_stop(frame_now);
         midi_all_off(255, frame_now);
         render_out.cancel(); // a render stopped by hand is dropped; one in its tail ends there
+        if (audio_in.running()) audio_in.finish(0); // freeze plan F3: a take ends here, kept
+        else if (audio_in.cued()) audio_in.cancel();
+        audio_recording = false;
+        audio_track.store(-1, std::memory_order_relaxed);
+        for (auto& s : slots) if (s.kind == EngineKind::Audio) { s.audio.player.release(dsp::sample_rate()); s.audio_last = UINT32_MAX; }
         if (take.state() == TakeRecorder::State::Cued) take.stop();
         cue_track = -1;
         count_left = 0; count_beat.store(0, std::memory_order_relaxed); count_rest.store(0, std::memory_order_relaxed);
@@ -995,6 +1013,23 @@ void EngineHost::apply(const Command& c) {
     case Type::Swing: swing = uint8_t(std::clamp<int>(c.value, 50, 75)); break;
     case Type::Fill: fill = c.value != 0; fill_now.store(fill, std::memory_order_relaxed); break;
     case Type::TrackSpeed: speeds_now[c.track % track_count].store(uint8_t(std::clamp<int>(c.value, 0, int(speed_count) - 1)), std::memory_order_relaxed); break;
+    case Type::AudioRegions: // freeze plan F3
+        if (c.track >= track_count) retire_audio(c.audio);
+        else set_audio(c.track, c.audio);
+        break;
+    case Type::AudioQuiet: slots[c.track % track_count].audio.player.quiet = c.value != 0; break; // freeze plan F3
+    case Type::AudioRecord: // freeze plan F3
+        if (c.value < 0) {
+            if (audio_in.cued()) audio_in.cancel();
+            if (!audio_in.running()) { audio_recording = false; audio_track.store(-1, std::memory_order_relaxed); }
+            break;
+        }
+        if (audio_in.state() != Bounce::State::Idle) break;
+        audio_in.cue();
+        audio_from = c.index; audio_to = unsigned(c.value);
+        audio_track.store(int(c.track % track_count), std::memory_order_relaxed);
+        audio_recording = true;
+        break;
     case Type::Freeze: { // freeze plan F2b
         if (c.track >= track_count) { retire_freeze(c.freeze); break; }
         retire_freeze(freeze_next[c.track]); // a later one wins over one still waiting for its bar
@@ -1052,6 +1087,58 @@ void EngineHost::print_tick(unsigned, Slot& slot, uint32_t at, uint32_t length) 
     slot.print_on = clip != nullptr;
     if (!clip && !slot.freeze->deep) wake(slot); // freeze plan F2d: a deep freeze stays asleep (its plug-ins are gone)
     slot.print.follow(clip, at, pattern_frames(at), tick_samples(tick_now), rate);
+}
+
+// --- Freeze plan F3: audio tracks' regions (engine/audio_player.h) ---
+
+// The song's bars: to its last clip, or the last region of an audio track (freeze plan F3).
+unsigned EngineHost::song_end_bar() const {
+    unsigned end = song.length(bar);
+    const unsigned b = std::max(bar, 1u);
+    for (const auto& slot : slots)
+        if (slot.audio_pack && !slot.audio_pack->regions.empty()) end = std::max(end, (slot.audio_pack->regions.back().end + b - 1) / b);
+    return end;
+}
+
+void EngineHost::retire_audio(AudioPack* pack) {
+    if (!pack) return;
+    if (done_audio.push(pack)) return;
+    for (auto& q : audio_limbo) if (!q) { q = pack; return; }
+    // limbo full too: kept (a leak) rather than freed here
+}
+
+// The track's regions from now: the voices of the last ones fade out (their pack freed once they have); the next
+// tick finds the new ones.
+void EngineHost::set_audio(unsigned t, AudioPack* pack) {
+    auto& slot = slots[t % track_count];
+    if (slot.audio_pack == pack) return;
+    auto& player = slot.audio.player;
+    if (slot.audio_leaving) { player.cut_all(); retire_audio(slot.audio_leaving); slot.audio_leaving = nullptr; }
+    if (player.sounding()) {
+        player.fade_all(dsp::sample_rate());
+        slot.audio_leaving = slot.audio_pack;
+    } else {
+        retire_audio(slot.audio_pack);
+    }
+    slot.audio_pack = pack;
+    slot.audio_last = UINT32_MAX; // found afresh on the next tick
+}
+
+// On a tick: in the song, the region sounding where the song is, and how far into it; else (patterns, or stopped)
+// nothing. The song's ticks count from bar 1, as the regions' do.
+void EngineHost::audio_follow(Slot& slot) {
+    const float rate = dsp::sample_rate();
+    if (!song_mode || !slot.audio_pack) {
+        if (slot.audio.player.playing()) slot.audio.player.release(rate);
+        slot.audio_last = UINT32_MAX;
+        return;
+    }
+    const uint32_t at = song_bar_now * bar + tick_now % std::max(bar, 1u);
+    const bool jumped = slot.audio_last == UINT32_MAX || at != slot.audio_last + 1;
+    slot.audio_last = at;
+    const RegionClip* clip = slot.audio_pack->at(at);
+    const double into = clip ? std::max(0.0, pattern_frames(at) - pattern_frames(clip->start)) : 0.0;
+    slot.audio.player.follow(clip, into, jumped, rate);
 }
 
 // --- One dispatch a block (roadmap P2) ---
@@ -1655,9 +1742,16 @@ void EngineHost::bar_start() {
         return;
     }
     if (tick_now) ++song_bar_now;
+    // Freeze plan F3: an audio take ends on its last bar's line (before the loop goes round), and starts on its first.
+    if (audio_in.running() && audio_to && song_bar_now >= audio_to) {
+        audio_in.finish(block_at);
+        audio_recording = false;
+        audio_track.store(-1, std::memory_order_relaxed);
+    }
     bool rendering = bounce_song && render_out.running(); // the mixdown plays the song once, loop or not
     if (!rendering && song.looping() && song_bar_now == song.loop_end) song_bar_now = song.loop_start;
-    if ((rendering || !song.looping()) && !song_recording && song_bar_now >= std::max(song.length(bar), 1u)) { // the end of the song
+    if (audio_in.cued() && song_bar_now == audio_from) audio_in.begin(block_at);
+    if ((rendering || !song.looping()) && !song_recording && !audio_recording && song_bar_now >= std::max(song_end_bar(), 1u)) { // the end of the song
         running = false;
         if (rendering) render_out.tail(); // on until the mix falls silent
         for (auto& s : slots) { for (auto& off : s.offs) if (off.key >= 0) { engine_note_off(s, off.key); off.key = -1; } s.held = {}; }
@@ -1756,7 +1850,7 @@ void EngineHost::mtc_place(double seconds) {
         for (auto& s : slots) s.clip = -1; // every clip from the new place
         if (offset == 0) {
             song_bar_now = b ? b - 1 : 0; // the first tick's bar_start() moves it on to b (and finds its end)
-        } else if (!song.looping() && !song_recording && b >= std::max(song.length(bar), 1u)) {
+        } else if (!song.looping() && !song_recording && !audio_recording && b >= std::max(song_end_bar(), 1u)) {
             running = false; // past the song's end
             for (auto& s : slots) { for (auto& off : s.offs) if (off.key >= 0) { engine_note_off(s, off.key); off.key = -1; } s.held = {}; }
         } else {
@@ -2361,6 +2455,7 @@ void EngineHost::tick() {
     }
     for (unsigned t = 0; t < track_count; ++t) {
         auto& slot = slots[t];
+        if (slot.kind == EngineKind::Audio) { audio_follow(slot); continue; } // freeze plan F3: its regions, no patterns
         bool sound = slot.engine != nullptr, midi = out_channel[t] && out_mode[t]; // an empty track may still play MIDI out
         if ((!sound && !midi) || slot.silent) {
             if (slot.print_on || slot.print.playing()) { slot.print.release(dsp::sample_rate()); slot.print_on = false; } // a STOP, no clip
@@ -2629,6 +2724,8 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
             slot.print.render(slot.print_l + done, slot.print_r + done, n, to_l, to_r);
             slot.send_pad_fed |= slot.print.sends_fed();
         }
+        for (auto& slot : slots) // freeze plan F3: audio tracks' regions, each where the song is (into the track's own buffers)
+            if (slot.kind == EngineKind::Audio && slot.audio.player.sounding()) slot.audio.player.render(slot.left + done, slot.right + done, n);
         sync.run(frame_now + done, n, quarter_samples(), [&](const MidiOutEvent& e) { emit(e); });
         until_arp -= n;
         if (running && !held) {
@@ -2958,6 +3055,7 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
     punch_on.store(punch.on() || sounding, std::memory_order_relaxed);
     if (resampling) take_input(); // the mix itself, before main volume
     take.process(record_l, record_r, frames);
+    audio_in.process(record_l, record_r, frames); // freeze plan F3: an audio track's take, between its bars
     // The meters' fall over this block: meter_fall_db a second at the device's rate.
     float meter_fall = std::pow(10.0f, -meter_fall_db / 20 * float(frames) / float(dsp::sample_rate()));
     auto meter = [&](std::atomic<float>& held, float peak) {
@@ -3025,6 +3123,7 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
         for (unsigned t = 0; t < track_count; ++t) {
             auto& slot = slots[t];
             if (slot.freeze_leaving && !slot.print.leaving()) { retire_freeze(slot.freeze_leaving); slot.freeze_leaving = nullptr; }
+            if (slot.audio_leaving && !slot.audio.player.leaving()) { retire_audio(slot.audio_leaving); slot.audio_leaving = nullptr; }
             frozen_bits |= uint32_t(slot.freeze != nullptr) << t;
             playing_bits |= uint32_t(slot.print.playing()) << t;
             sleeping_bits |= uint32_t(slot.freeze && !slot.awake) << t;
@@ -3035,6 +3134,10 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
         sleeping_now.store(sleeping_bits, std::memory_order_relaxed);
         print_under.store(under, std::memory_order_relaxed);
         print_waited.store(waited, std::memory_order_relaxed);
+        uint32_t audio_u = 0, audio_w = 0; // freeze plan F3
+        for (auto& slot : slots) { audio_u += slot.audio.player.underruns; audio_w += slot.audio.player.waits; }
+        audio_under.store(audio_u, std::memory_order_relaxed);
+        audio_waited.store(audio_w, std::memory_order_relaxed);
     }
     // Last of all: a Park whose fade has gone silent hands the state to the loader, nothing touched after it.
     if (park_wanted && park_gain.silent()) go_parked();

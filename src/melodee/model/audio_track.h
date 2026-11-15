@@ -29,6 +29,25 @@ inline const char* track_monitor_name(TrackMonitor m) {
     return names[unsigned(m) % unsigned(TrackMonitor::Count)];
 }
 
+// The sources an audio track records from, in the order K1 turns through them: the inputs and USB-C (Melodee's own
+// mix and tracks are Resample's and the Track source's, on Sample Record).
+constexpr InputSource audio_sources[] {InputSource::Rear, InputSource::RearL, InputSource::RearR, InputSource::Mic,
+                                       InputSource::Usb, InputSource::UsbL, InputSource::UsbR};
+constexpr unsigned audio_source_count = sizeof(audio_sources) / sizeof(audio_sources[0]);
+inline unsigned audio_source_index(InputSource s) {
+    for (unsigned n = 0; n < audio_source_count; ++n) if (audio_sources[n] == s) return n;
+    return 0;
+}
+
+// A source as the audio track's cards and chips name it.
+inline const char* audio_source_label(InputSource s) {
+    switch (s) {
+    case InputSource::Rear: return "Rear L+R";
+    case InputSource::Usb: return "USB L+R";
+    default: return input_source_name(s);
+    }
+}
+
 // An audio track's own settings (AUDT): where it records from and what it monitors.
 struct AudioTrackSettings {
     InputSource source = InputSource::Rear;
