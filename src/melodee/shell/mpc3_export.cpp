@@ -263,6 +263,8 @@ struct Keygroup {
     bool one_shot = false;
     int attack = 0, release = 0;      // its zones' envelope over the pad's, in the pad's steps (keygroups over the
                                       // same keys with a release each: a fall of two stages, engine/release_fit.h)
+    int velocity = 0;                 // its zones' Velocity over the pad's, percent
+    bool mono = false;                // on the mono side of a split: Mono, in the side's mute group
     std::vector<Layer> layers;
 };
 
@@ -452,6 +454,7 @@ struct PadPlan {
     std::vector<Layer> drum;
     std::vector<Keygroup> keys;
     bool instrument = false, mono = false, legato = false, tied = false;
+    bool mono_all = false; // Mono on every key (else on one side of a split: its keygroups carry it)
     double glide = 0;
 };
 
@@ -459,9 +462,11 @@ struct PadPlan {
 void plan_keygroups(std::vector<std::pair<SampleZone, Layer>>& zones, const SfzRead& read, PadPlan& plan, Mpc3Export& report) {
     plan.instrument = true;
     plan.mono = read.mono; plan.legato = read.legato; plan.tied = read.tied; plan.glide = read.glide;
+    plan.mono_all = read.mono && read.mono_low == 0 && read.mono_high == 127;
     for (auto& [zone, layer] : zones) {
         auto same = std::find_if(plan.keys.begin(), plan.keys.end(), [&](const Keygroup& k) {
-            return k.low_key == zone.low_key && k.high_key == zone.high_key && k.attack == zone.attack && k.release == zone.release;
+            return k.low_key == zone.low_key && k.high_key == zone.high_key && k.attack == zone.attack && k.release == zone.release
+                && k.velocity == zone.velocity;
         });
         if (same == plan.keys.end()) {
             if (plan.keys.size() == mpc_pads) { ++report.skipped_pads; continue; }
@@ -470,6 +475,8 @@ void plan_keygroups(std::vector<std::pair<SampleZone, Layer>>& zones, const SfzR
             made.high_key = zone.high_key;
             made.one_shot = zone.one_shot;
             made.attack = zone.attack; made.release = zone.release;
+            made.velocity = zone.velocity;
+            made.mono = read.mono && !plan.mono_all && zone.low_key >= read.mono_low && zone.high_key <= read.mono_high;
             plan.keys.push_back(made);
             same = plan.keys.end() - 1;
         }
@@ -513,6 +520,16 @@ juce::var keygroup_track(const juce::var& doc, const PadPlan& plan, const PadSou
                     const float release = time_seconds(std::clamp(pad.release + group.release, 0, 100)) * 0.5f + 0.003f;
                     put(field(amp, "Attack"), "value0", real(xpm_envelope_value(attack)));
                     put(field(amp, "Release"), "value0", real(xpm_envelope_value(release)));
+                    // Its own Velocity (a split's sides follow velocity each their own way).
+                    if (group.velocity)
+                        put(field(instrument, "synthSection"), "velocitySensitivity", real(fraction(uint8_t(std::clamp(int(pad.velocity_sense) + group.velocity, 0, 100)))));
+                    // A split's mono side: MPC 3's program is mono or poly as a whole, so each of the side's
+                    // keygroups is Mono and they share a mute group: a note there cuts the last.
+                    if (group.mono) {
+                        put(instrument, "monophonic", true);
+                        put(instrument, "polyphony", whole(1));
+                        put(instrument, "whichMuteGroup", whole(1));
+                    }
                 }
                 if (!plan.instrument) {
                     const auto& first = group.layers.front();
@@ -526,7 +543,7 @@ juce::var keygroup_track(const juce::var& doc, const PadPlan& plan, const PadSou
     if (!groups) return juce::var();
     put(field(program, "drum"), "instruments", juce::var(instruments));
     put(field(program, "keygroup"), "numKeygroups", whole(int(groups)));
-    if (plan.mono) { // MPC 3's Mono and Portamento, as the program read had them
+    if (plan.mono && plan.mono_all) { // MPC 3's Mono and Portamento, as the program read had them
         const auto& voices = field(program, "drum");
         put(voices, "monophonic", true);
         put(voices, "portamentoTime", real(mpc_portamento_value(plan.glide)));
@@ -1019,6 +1036,7 @@ std::string write_mpc3_track(const std::string& program, const std::string& file
     if (e.decay) pad.decay = uint8_t(sfz_decay_step(*e.decay));
     if (e.sustain) pad.sustain = uint8_t(sfz_percent_step(*e.sustain));
     if (e.release) pad.release = uint8_t(sfz_release_step(*e.release));
+    pad.velocity_sense = uint8_t(std::clamp(read.velocity, 0.0, 100.0)); // its first keygroup's (the rest are over it)
     Files files(data, true);
     const juce::var made = keygroup_track(doc, plan, pad, out.stem().string(), 120.0, files, report);
     if (made.isVoid()) return "No keygroups";

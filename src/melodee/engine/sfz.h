@@ -41,6 +41,7 @@ struct SfzRead {
     // seconds (0: it jumps); with `legato` only from a key still held. `tied`: a key pressed while another is held
     // carries that note on without a new attack (else it starts again).
     bool mono = false, legato = false, tied = false;
+    uint8_t mono_low = 0, mono_high = 127; // the keys Mono holds for: all, or one side of a split
     double glide = 0;
 };
 

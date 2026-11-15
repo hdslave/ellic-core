@@ -27,6 +27,17 @@ namespace melodee {
 // Auto) holds each key: 2 for a steady sound, 8 for one that moves, and for one that fades as long as it is heard
 // (1 to 8).
 enum class AutoKind : uint8_t { Keys, Mono, Drums };
+// How one side of a split plays (AutoFindings::upper; the lower side's, or the whole instrument's, are AutoFindings'
+// own fields of the same names).
+struct AutoZone {
+    AutoKind kind = AutoKind::Keys; // Keys or Mono
+    float glide = 0;
+    bool legato = true, tied = true;
+    bool sustains = false, moves = false;
+    float hold = 0;
+    float release = 0, release_slow = 0, release_share = 0;
+    float velocity = 1;
+};
 struct AutoFindings {
     bool heard = false;
     AutoKind kind = AutoKind::Keys;
@@ -43,6 +54,18 @@ struct AutoFindings {
     // How it falls let go after half a second, while it is loud (engine/release_fit.h): the release for a sound whose
     // sampled notes are held until they have died away, and so tell nothing of it. Seconds; 0: not heard.
     float release = 0, release_slow = 0, release_share = 0;
+    // How far its level follows velocity, 0..1 as a pad's Velocity has it (1: half the velocity, half the level;
+    // 0: every note as loud), fitted to one key played at sixteen velocities. The program's keygroups get it, so a
+    // soft press is as soft as the plug-in's and no softer.
+    float velocity = 1;
+    // A split: two sounds side by side on the keyboard (a bass under a lead), each with its own way of playing.
+    // `split`: the first key of the upper one, 0 none. The fields above are then the lower side's, `upper` the other's.
+    uint8_t split = 0;
+    AutoZone upper;
+    AutoZone zone(unsigned key) const {
+        if (split && key >= split) return upper;
+        return {kind, glide, legato, tied, sustains, moves, hold, release, release_slow, release_share, velocity};
+    }
     std::array<uint64_t, 2> keys {};
     uint8_t scan_low = 0, scan_high = 127; // drums: the keys the check tried (outside them nothing is known)
     bool sounds(unsigned key) const {
@@ -65,13 +88,21 @@ struct AutoSampleSettings {
     bool loop_auto = true;       // LOOP at Auto: a loop when the check heard the sound sustain (AutoFindings::sustains)
     bool normalize = true;       // one gain for the whole program, its loudest sample at -1 dB (layers keep their balance)
     AutoFindings found;          // what the check heard
-    bool looping() const { return loop_auto ? found.sustains && found.kind != AutoKind::Drums : loop; }
-    float hold_seconds() const {
-        if (!hold_auto) return hold;
-        if (!found.heard || found.hold <= 0) return 2.0f;
-        if (!loop_auto && loop && !found.sustains) return 2.0f; // LOOP put on a sound that fades: looped early, while it sounds
-        return found.hold;
+    // For the key `key` (its side of a split), and without one for the lower side or the whole instrument.
+    bool looping(unsigned key = 0) const {
+        if (!loop_auto) return loop;
+        return found.kind != AutoKind::Drums && found.zone(key).sustains;
     }
+    float hold_seconds(unsigned key = 0) const {
+        if (!hold_auto) return hold;
+        const AutoZone z = found.zone(key);
+        if (!found.heard || z.hold <= 0) return 2.0f;
+        if (!loop_auto && loop && !z.sustains) return 2.0f; // LOOP put on a sound that fades: looped early, while it sounds
+        return z.hold;
+    }
+    // The longest any key is held, and whether any key loops (the card's room, the sheet).
+    float hold_most() const { return found.split ? std::max(hold_seconds(0), hold_seconds(found.split)) : hold_seconds(0); }
+    bool loops_any() const { return looping(0) || (found.split && looping(found.split)); }
     // The velocity layers taken: as asked, two at least where the check heard an accent.
     unsigned layer_count() const { return std::clamp<unsigned>(found.accent && layers < 2 ? 2 : layers, 1, 4); }
     // Takes of each key: the check's, with one velocity layer (MPC plays a keygroup's layers in turn or by velocity, not both).

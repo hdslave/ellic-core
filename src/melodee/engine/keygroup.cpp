@@ -140,6 +140,9 @@ void add_layers(const KeygroupInstrument& instrument, int low, int high, bool dr
         // 0 is none at all (an organ's): every press full
         if (auto amount = number_at(t, "VelocitySensitivity")) read.velocity = std::clamp(*amount, 0.0, 1.0) * 100;
     }
+    // A keygroup that follows velocity its own way (a split's other side): over the first's, which is the pad's.
+    int velocity_over = 0;
+    if (!drum) if (auto amount = number_at(t, "VelocitySensitivity")) velocity_over = int(std::lround(std::clamp(*amount, 0.0, 1.0) * 100 - read.velocity));
     const size_t count = layers.size();
     for (size_t n = 0; n < count; ++n) {
         if (read.regions.size() >= max_zones) { ++read.left; continue; }
@@ -149,6 +152,7 @@ void add_layers(const KeygroupInstrument& instrument, int low, int high, bool dr
         auto& z = made.zone;
         z.low_key = uint8_t(low);
         z.high_key = uint8_t(high);
+        z.velocity = int8_t(std::clamp(velocity_over, -100, 100));
         // RootNote is one past the MIDI note; a drum pad's layers sit at the pad's note.
         z.root = drum ? 60 : clamped<uint8_t>(int_at(l, "RootNote").value_or(61) - 1, 0, 127);
         // velocity 0 is a release: the lowest that plays is 1
@@ -281,6 +285,19 @@ SfzRead read_keygroup(const KeygroupProgram& program) {
         const int low = std::clamp(int_at(instrument.tags, "LowNote").value_or(0), 0, 127);
         const int high = std::clamp(int_at(instrument.tags, "HighNote").value_or(127), 0, 127);
         add_layers(instrument, low, high, false, read, envelopes, velocity_taken, cents, db);
+        // A split's mono side: a program that is not Mono whose keygroups there are each Mono and share a mute
+        // group (an MPC program is mono or poly as a whole). Their keys play as a mono program's; the rest poly.
+        if (!flag_at(p, "Mono").value_or(false) && flag_at(instrument.tags, "Mono").value_or(false)
+            && int_at(instrument.tags, "MuteGroup").value_or(0) > 0 && !keygroup_layers(instrument).empty() && low <= high) {
+            read.mono_low = uint8_t(read.mono ? std::min<int>(read.mono_low, low) : low);
+            read.mono_high = uint8_t(read.mono ? std::max<int>(read.mono_high, high) : high);
+            read.mono = true;
+        }
+    }
+    if (read.mono && !flag_at(p, "Mono").value_or(false)) { // a mono side: its glide is kept apart from the program's
+        read.glide = mpc_portamento_seconds(number_at(p, "MonoSidePortamentoTime").value_or(0));
+        read.legato = flag_at(p, "MonoSidePortamentoLegato").value_or(false);
+        read.tied = !flag_at(p, "MonoRetrigger").value_or(false);
     }
     sfz_share_envelopes(envelopes, read);
     return read;

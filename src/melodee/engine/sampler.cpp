@@ -190,7 +190,7 @@ void SamplerEngine::aim(Voice& v, const PadSound& sound, const SampleZone* zone,
     v.aim.beats = p[FollowHow] == 0 && !(keep_length && shifted);     // a note held to length wants overlapped windows
     // Volume (dB, as the MPC shows it), Normalize, and velocity by the pad's sensitivity: at 100 the gain follows
     // the velocity (64 is -6 dB, 20 is -16 dB), at 0 every hit is full.
-    const float sense = sound.velocity_sense / 100.0f, curve = v.velocity / 127.0f;
+    const float sense = std::clamp(int(sound.velocity_sense) + (zone ? int(zone->velocity) : 0), 0, 100) / 100.0f, curve = v.velocity / 127.0f;
     const float velocity_gain = 1.0f - sense * (1.0f - curve);
     v.aim.gain = volume_gain(sound.level) * volume_gain(p[Level]) * velocity_gain * std::pow(10.0f, sound.gain / 2000.0f) * v.accent * v.fall;
     if (zone) v.aim.gain *= std::pow(10.0f, (zone->gain + (trim ? trim->level / 10.0f : 0.0f)) / 20.0f)
@@ -417,7 +417,8 @@ void SamplerEngine::zones_on(Multisample& multi, const PadSound& sound, int pad,
     // A mono program (an MPC keygroup's Mono and Portamento). Tied: a key pressed while one is held carries that note
     // on to it, no new attack, sliding there. Else the press starts afresh, its pitch sliding from the last key: with
     // Legato only from a key still held (one let go before starts at its own pitch), without it always.
-    const bool mono = multi.mono && pad >= 0 && pad < int(sampler_pads);
+    // (On one side of a split only: its keys, and the notes sounding on them.)
+    const bool mono = multi.mono_at(key) && pad >= 0 && pad < int(sampler_pads);
     if (mono && trigger < 0) hold_key(pad, semitones, vel);
     if (mono && multi.tied && trigger < 0 && carry(pad, semitones, multi.glide)) {
         key_velocity[size_t(key)] = uint8_t(vel); key_since[size_t(key)] = played_frames;
@@ -428,13 +429,15 @@ void SamplerEngine::zones_on(Multisample& multi, const PadSound& sound, int pad,
     if (mono && multi.glide > 0) {
         bool held = !multi.legato;
         for (const auto& v : voices)
-            held = held || (v.zone && v.pad == pad && v.trigger == owner && v.held && !v.choked && v.env.stage != dsp::Envelope::Stage::Release);
+            held = held || (v.zone && v.pad == pad && v.trigger == owner && multi.mono_at(v.key) && v.held && !v.choked
+                            && v.env.stage != dsp::Envelope::Stage::Release);
         if (held) glide_from = mono_key[size_t(pad)];
     }
     if (mono) mono_key[size_t(pad)] = int8_t(key);
     for (auto& v : voices)
         if (v.zone && v.pad == pad && v.trigger == owner && v.key == key && v.held) { v.held = false; if (v.gate) { v.env.gate(false); v.filter_env.gate(false); } }
-    if (sound.mono || mono) for (auto& v : voices) if (v.pad == pad) v.choked = true;
+    for (auto& v : voices) // a mono pad: all it sounds; a mono program: what sounds on its mono keys
+        if (v.pad == pad && (sound.mono || (mono && (!v.zone || multi.mono_at(v.key))))) v.choked = true;
     const int articulation = multi.switched >= 0 ? multi.switched : multi.switch_default;
     key_velocity[size_t(key)] = uint8_t(vel); key_since[size_t(key)] = played_frames; // for its release samples
     seed = seed * 1664525u + 1013904223u;
@@ -487,8 +490,10 @@ bool SamplerEngine::carry(int pad, int semitones, float seconds) {
     const auto& sound = pads[size_t(pad) % sampler_pads];
     const int key = std::clamp(60 + int(sound.pitch) + semitones, 0, 127);
     bool carried = false;
+    const Multisample* multi = multi_of(sound);
     for (auto& v : voices) {
         if (!v.zone || v.pad != pad || v.trigger != pad || !v.held || v.choked || v.env.stage == dsp::Envelope::Stage::Release) continue;
+        if (multi && multi->mono && !multi->mono_at(v.key)) continue; // a split's poly side plays on where it is
         // Where its pitch is now, from the new key: the slide starts there.
         const float now = float(v.key) + v.porta - float(key);
         v.key = key; v.semis = semitones;
@@ -678,7 +683,7 @@ void SamplerEngine::release_key(int key) {
     if (pad >= 0 && pad < int(sampler_pads) && mono_held_count) {
         const auto& sound = pads[size_t(pad)];
         Multisample* multi = multi_of(sound);
-        if (multi && multi->mono) {
+        if (multi && multi->mono_at(std::clamp(60 + int(sound.pitch) + semis, 0, 127))) {
             drop_key(pad, semis);
             const HeldKey* back = mono_key[size_t(pad)] == std::clamp(60 + int(sound.pitch) + semis, 0, 127) ? newest_held(pad) : nullptr;
             if (back && !pad_muted(unsigned(pad))) {

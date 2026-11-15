@@ -92,7 +92,7 @@ void layer_text(std::string& s, unsigned number_, const XpmLayer* l, uint8_t roo
     s += "            </Layer>\n";
 }
 
-void instrument_text(std::string& s, unsigned number_, const XpmKeygroup* k, double release, bool layered) {
+void instrument_text(std::string& s, unsigned number_, const XpmKeygroup* k, double release, bool layered, bool mono_side) {
     s += "      <Instrument number=\"" + std::to_string(number_) + "\">\n";
     Tags t {s, 8};
     t.flag("CueBusEnable", false);
@@ -145,21 +145,23 @@ void instrument_text(std::string& s, unsigned number_, const XpmKeygroup* k, dou
     t("PitchEnvAmount", 0.5);
     t("VelocityToPitch", 0.0);
     t("VelocityToVolumeAttack", 0.0);
-    t("VelocitySensitivity", layered ? 0.0 : 1.0); // layered: the layers hold the dynamics, as the plug-in played them
+    // As the plug-in's level followed velocity; not heard: fully, or with velocity layers not at all (the layers
+    // hold the dynamics).
+    t("VelocitySensitivity", k && k->velocity >= 0 ? std::clamp(k->velocity, 0.0, 1.0) : layered ? 0.0 : 1.0);
     t("VelocityToPan", 0.0);
     t("RandomizationScale", 1.0);
     for (const char* random : {"AttackRandom", "DecayRandom", "CutoffRandom", "ResonanceRandom"}) t(random, 0.0);
     t("TuneCoarse", 0);
     t("TuneFine", 0);
-    t.flag("Mono", false);
-    t("Polyphony", 0);
+    t.flag("Mono", mono_side); // a split's mono side: each keygroup Mono, all in one mute group
+    t("Polyphony", mono_side ? 1 : 0);
     // An unused instrument, past the program's count, sits on one key as the MPC leaves them.
     const uint8_t root = k && !k->layers.empty() ? k->layers.front().root : 0;
     t("LowNote", k ? int(k->low) : 24);
     t("HighNote", k ? int(k->high) : 24);
     t.flag("IgnoreBaseNote", false);
     t("ZonePlay", k && k->cycle ? 0 : 1); // in turn (takes), else the layers its velocity reaches
-    t("MuteGroup", 0);
+    t("MuteGroup", mono_side ? 1 : 0);
     for (const char* mute : {"MuteTarget1", "MuteTarget2", "MuteTarget3", "MuteTarget4"}) t(mute, 0);
     for (const char* simult : {"SimultTarget1", "SimultTarget2", "SimultTarget3", "SimultTarget4"}) t(simult, 0);
     t("TriggerMode", k && k->one_shot ? 0 : 2); // one shot (a drum), else held while the key is
@@ -170,7 +172,7 @@ void instrument_text(std::string& s, unsigned number_, const XpmKeygroup* k, dou
     s += "        <Layers>\n";
     for (unsigned l = 0; l < 4; ++l) {
         const XpmLayer* layer = k && l < k->layers.size() ? &k->layers[l] : nullptr;
-        layer_text(s, l + 1, layer, layer ? layer->root : k ? root : 0, layer && k ? k->gain : 1.0);
+        layer_text(s, l + 1, layer, layer ? layer->root : k ? root : 0, layer && k ? k->gain * layer->gain : 1.0);
     }
     s += "        </Layers>\n";
     s += "      </Instrument>\n";
@@ -210,7 +212,7 @@ std::string xpm_text(const XpmProgram& program) {
     r.flag("InsertsEnabled", true);
     s += "    </AudioRoute>\n";
     for (const char* send : {"Send1", "Send2", "Send3", "Send4"}) t(send, 0.0);
-    t("Volume", 0.707946); // 0 dB on the MPC's curve
+    t("Volume", std::clamp(std::pow(10.0, (program.volume_db - 6.0) / 40.0), 0.0, 1.0)); // the MPC's curve: 0.707946 is 0 dB
     t.flag("Mute", false);
     t.flag("Solo", false);
     t("Pan", 0.5);
@@ -218,12 +220,18 @@ std::string xpm_text(const XpmProgram& program) {
     t("Pitch", 0.0);
     t("TuneCoarse", 0);
     t("TuneFine", 0);
-    t.flag("Mono", program.mono);
+    t.flag("Mono", program.mono_all());
     t("Program_Polyphony", 0);
-    t("PortamentoTime", program.glide > 0 ? mpc_portamento_value(program.glide) : 0.0);
-    t.flag("PortamentoLegato", program.legato);
+    // The program's portamento is its Mono's. A mono side's is kept apart, for Melodee (an MPC would slide the poly
+    // side's notes with it): its own tags, which an MPC passes over.
+    t("PortamentoTime", program.mono_all() && program.glide > 0 ? mpc_portamento_value(program.glide) : 0.0);
+    t.flag("PortamentoLegato", program.mono_all() && program.legato);
     t.flag("PortamentoQuantized", false);
     t.flag("MonoRetrigger", program.mono && !program.tied);
+    if (program.mono && !program.mono_all()) {
+        t("MonoSidePortamentoTime", program.glide > 0 ? mpc_portamento_value(program.glide) : 0.0);
+        t.flag("MonoSidePortamentoLegato", program.legato);
+    }
     t("Program.Xfader.Route", 0);
     t("KeygroupMasterTranspose", 0.5);
     t("KeygroupNumKeygroups", int(count));
@@ -231,7 +239,8 @@ std::string xpm_text(const XpmProgram& program) {
     t("KeygroupWheelToLfo", 0.0);
     t("KeygroupAftertouchToFilter", 0.0);
     s += "    <Instruments>\n";
-    for (unsigned n = 0; n < 128; ++n) instrument_text(s, n + 1, n < count ? &program.keygroups[n] : nullptr, program.release, layered);
+    for (unsigned n = 0; n < 128; ++n) instrument_text(s, n + 1, n < count ? &program.keygroups[n] : nullptr, program.release, layered,
+                                                         n < count && program.mono_side(program.keygroups[n]));
     s += "    </Instruments>\n";
     s += "    <PadNoteMap>\n";
     for (unsigned n = 0; n < 128; ++n)

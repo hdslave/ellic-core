@@ -140,6 +140,41 @@ int probe_retriggers(const std::vector<float>& both, const std::vector<float>& a
     return back > 0.5 * moved ? 1 : 0;
 }
 
+ProbeCharacter probe_character(const std::vector<float>& x, float hz, float rate) {
+    ProbeCharacter c;
+    const size_t early = size_t(0.02f * rate), span_of = size_t(0.2f * rate);
+    if (x.size() < size_t(1.15f * rate) || hz <= 0) return c;
+    c.level = std::max(probe_db(x, early, span_of), -100.0f);
+    c.fade = c.level - std::max(probe_db(x, size_t(0.925f * rate), size_t(0.225f * rate)), -100.0f);
+    const float bright = c.level > -80.0f ? probe_brightness(x, early, span_of, rate) : 0.0f;
+    c.bright = bright > 0 ? 20.0f * std::log10(bright / hz) : 0.0f;
+    return c;
+}
+
+float probe_apart(const ProbeCharacter& a, const ProbeCharacter& b) {
+    return std::fabs(a.level - b.level) + std::fabs(a.fade - b.fade) + std::fabs(a.bright - b.bright);
+}
+
+float probe_velocity(const std::vector<uint8_t>& velocities, const std::vector<float>& db) {
+    if (velocities.size() < 2 || velocities.size() != db.size()) return 1.0f;
+    size_t top = 0;
+    for (size_t i = 1; i < velocities.size(); ++i) if (velocities[i] > velocities[top]) top = i;
+    if (db[top] < -90.0f) return 1.0f;
+    // Least squares of level = 1 - amount x (1 - velocity / 127), against the loudest velocity's.
+    double with = 0, over = 0;
+    for (size_t i = 0; i < velocities.size(); ++i) {
+        if (i == top) continue;
+        const double level = std::pow(10.0, double(db[i] - db[top]) / 20.0), short_of = 1.0 - velocities[i] / 127.0;
+        with += (1.0 - level) * short_of;
+        over += short_of * short_of;
+    }
+    if (over <= 0) return 1.0f;
+    // Under a fifth (2 dB from the softest press to the hardest) it is the sound's own wobble from hit to hit, not
+    // velocity: none.
+    const double amount = std::clamp(with / over, 0.0, 1.0);
+    return amount < 0.2 ? 0.0f : float(amount);
+}
+
 bool probe_sustains(const std::vector<float>& x, size_t from, size_t to, float rate, float most) {
     to = std::min(to, x.size());
     if (to <= from + size_t(0.4f * rate)) return false;
@@ -178,7 +213,20 @@ uint8_t probe_accent(const std::vector<uint8_t>& velocities, const std::vector<f
     // A jump of its own: well over the usual step and over the steps either side (a velocity curve's first steps are
     // big too, but so are their neighbours).
     const float beside = std::max(at > 0 ? step[at - 1] : 0.0f, at + 1 < step.size() ? step[at + 1] : 0.0f);
-    return step[at] >= 1.0f && step[at] >= 4.0f * std::max(usual, 0.25f) && step[at] >= 3.0f * std::max(beside, 0.25f) ? velocities[at + 1] : 0;
+    if (!(step[at] >= 1.0f && step[at] >= 4.0f * std::max(usual, 0.25f) && step[at] >= 3.0f * std::max(beside, 0.25f))) return 0;
+    // And it stays: the velocities over it are, on average, that far from those under it. A sound that differs a
+    // little from hit to hit (a random phase, a free LFO) has a big step somewhere and is back the hit after.
+    auto mean = [&](const std::vector<float>& v, size_t from, size_t to) {
+        double sum = 0;
+        unsigned counted = 0;
+        for (size_t i = from; i < to; ++i) if (v[i] > 0 || &v == &db) { sum += v[i]; ++counted; }
+        return counted ? float(sum / counted) : 0.0f;
+    };
+    const float under_db = mean(db, 0, at + 1), over_db = mean(db, at + 1, n);
+    const float under_bright = mean(bright, 0, at + 1), over_bright = mean(bright, at + 1, n);
+    const float shift = std::fabs(over_db - under_db)
+                      + (under_bright > 0 && over_bright > 0 ? 0.5f * std::fabs(semitones(over_bright, under_bright)) : 0.0f);
+    return shift >= 0.6f * step[at] ? velocities[at + 1] : 0;
 }
 
 bool probe_drums(const std::vector<uint8_t>& keys, const std::vector<float>& hz) {
@@ -211,21 +259,29 @@ bool probe_varies(const std::vector<std::vector<float>>& hits, float rate) {
         for (size_t f = 0; f < frames; ++f) e.push_back(probe_db(x, f * hop, span));
         return e;
     };
-    const auto first = envelope(hits[0]);
-    const float bright = probe_brightness(hits[0], 0, size_t(0.1f * rate), rate);
-    for (size_t h = 1; h < hits.size(); ++h) {
-        const auto other = envelope(hits[h]);
-        double apart = 0;
-        unsigned counted = 0;
-        for (size_t f = 0; f < frames; ++f) {
-            if (first[f] < -40 || other[f] < -40) continue; // the quiet ends, where noise is all there is
-            apart += std::fabs(first[f] - other[f]);
-            ++counted;
-        }
-        if (counted && apart / counted > 1.5) return true;
-        const float b = probe_brightness(hits[h], 0, size_t(0.1f * rate), rate);
-        if (bright > 0 && b > 0 && std::fabs(b / bright - 1.0f) > 0.08f) return true;
+    // Any two of them apart in level, or the brightest and the dullest in brightness: with more hits the answer for a
+    // sound near the line is the same from one check to the next.
+    std::vector<std::vector<float>> envelopes;
+    float dull = 0, bright = 0;
+    for (const auto& hit : hits) {
+        envelopes.push_back(envelope(hit));
+        const float b = probe_brightness(hit, 0, size_t(0.1f * rate), rate);
+        if (b <= 0) continue;
+        dull = dull > 0 ? std::min(dull, b) : b;
+        bright = std::max(bright, b);
     }
+    if (dull > 0 && bright / dull - 1.0f > 0.08f) return true;
+    for (size_t a = 0; a < envelopes.size(); ++a)
+        for (size_t b = a + 1; b < envelopes.size(); ++b) {
+            double apart = 0;
+            unsigned counted = 0;
+            for (size_t f = 0; f < frames; ++f) {
+                if (envelopes[a][f] < -40 || envelopes[b][f] < -40) continue; // the quiet ends, where noise is all there is
+                apart += std::fabs(envelopes[a][f] - envelopes[b][f]);
+                ++counted;
+            }
+            if (counted && apart / counted > 1.5) return true;
+        }
     return false;
 }
 

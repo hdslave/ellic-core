@@ -48,6 +48,7 @@ struct SampleZone {
     uint8_t cutoff_center = 60;
     // Its own envelope: each stage off the pad's, in the pad's 0..100 steps.
     int16_t attack = 0, decay = 0, sustain = 0, release = 0;
+    int8_t velocity = 0;              // its Velocity over the pad's, percent (the sides of a split follow velocity each their own way)
     // Roadmap P3. A release sample (SFZ trigger=release): it plays when its key is let go, at the press's
     // velocity, `rt_decay` dB quieter a second the key was held, and is not played by the press itself.
     bool on_release = false;
@@ -121,6 +122,8 @@ struct Multisample {
     // Its program's Mono and Portamento (SfzRead): the sampler slides the pitch to a new key and, `tied`, carries a
     // held note on to it.
     bool mono = false, legato = false, tied = false;
+    uint8_t mono_low = 0, mono_high = 127; // the keys Mono holds for (one side of a split; the rest plays poly)
+    bool mono_at(int key) const { return mono && key >= mono_low && key <= mono_high; }
     float glide = 0;                  // seconds
 };
 

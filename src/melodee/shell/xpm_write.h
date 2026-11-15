@@ -22,6 +22,9 @@ struct XpmLayer {
     // A loop while the key is held: from loop_end back to loop_start (0, 0: none).
     uint32_t loop_start = 0, loop_end = 0;
     bool looped() const { return loop_end > loop_start; }
+    // Its level over its keygroup's: a velocity layer is recorded at its loudest velocity, and the keygroup's
+    // Velocity would make it quieter still there, so it is raised by as much.
+    double gain = 1;
 };
 struct XpmKeygroup {
     uint8_t low = 0, high = 127;
@@ -32,11 +35,17 @@ struct XpmKeygroup {
     // and layers, this one's share of the level and how long it takes to fall once the key is let go.
     double release = -1;          // seconds; below 0 the program's
     double gain = 1;              // each layer's Volume
+    // How far its level follows velocity, 0..1 (VelocitySensitivity), as the check heard the plug-in's. Below 0, not
+    // heard: fully with one layer, not at all with velocity layers.
+    double velocity = -1;
 };
 struct XpmProgram {
     std::string name;
     std::vector<XpmKeygroup> keygroups; // 128 at most, in key order
     double release = 0.05;              // seconds after the key is let go (the samples hold their own release)
+    // The program's Volume, dB. A sample in the centre plays 3 dB down a side (constant power pan, Melodee's sampler
+    // and the MPC's): an auto sampled program takes those 3 dB back, so it is as loud as what was sampled.
+    double volume_db = 0;
     // Mono and Portamento (engine/keygroup.h mpc_portamento_value()): one note at a time, the pitch sliding to a new
     // key over `glide` seconds (0: none); with `legato` only a key pressed while another is held slides. `tied`: such
     // a key carries the held note on, no new attack; else it starts again. That is MPC 3's Mono Retrig
@@ -44,6 +53,14 @@ struct XpmProgram {
     // them); an MPC 2 has no such setting, passes the tag over and always starts the note again.
     bool mono = false, legato = false, tied = false;
     double glide = 0;
+    // The keys Mono holds for. All of them: the program's Mono. One side of a split: the program is not Mono (an MPC
+    // program is mono or poly as a whole); the keygroups on that side are each Mono and share mute group 1, so on an
+    // MPC a note there cuts the last (no glide: its portamento is the program's Mono's, and would slide the poly
+    // side too). Melodee reads the side back from them and plays it as a mono program on those keys, with the glide
+    // kept in tags of its own (MonoSidePortamentoTime, MonoSidePortamentoLegato).
+    uint8_t mono_low = 0, mono_high = 127;
+    bool mono_all() const { return mono && mono_low == 0 && mono_high == 127; }
+    bool mono_side(const XpmKeygroup& k) const { return mono && !mono_all() && k.low >= mono_low && k.high <= mono_high; }
 };
 
 // The program as .xpm text.

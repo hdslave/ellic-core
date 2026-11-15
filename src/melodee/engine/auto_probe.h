@@ -41,6 +41,22 @@ bool probe_slides_apart(const std::vector<float>& x, size_t onset, float from_hz
 // within 2 dB of how it starts (either way sounds the same).
 int probe_retriggers(const std::vector<float>& both, const std::vector<float>& alone, const std::vector<float>& fresh, size_t onset, float rate);
 
+// A key held alone for 1.2 s or more (`x`, sounding `hz`): how it sounds, to tell one sound from another along the
+// keyboard: its level over its first 0.2 s, how much quieter it is a second in, and its brightness against its pitch,
+// each in dB (a brightness doubled is 6). A key next to it of the same sound reads all but the same.
+struct ProbeCharacter {
+    float level = -120.0f, fade = 0, bright = 0;
+};
+ProbeCharacter probe_character(const std::vector<float>& x, float hz, float rate);
+// How unlike two keys sound: their three differences added, dB.
+float probe_apart(const ProbeCharacter& a, const ProbeCharacter& b);
+
+// One key played at rising velocities (each with its level in dB): how far its level follows velocity, 0..1 as a
+// pad's Velocity plays it (level 1 - amount x (1 - velocity / 127)): 0 for a sound as loud at every velocity, 1 for
+// one half as loud at half the velocity (or steeper still). Under 0.2 it reads 0: that little is the sound's own
+// difference from hit to hit.
+float probe_velocity(const std::vector<uint8_t>& velocities, const std::vector<float>& db);
+
 // A key held (x[from, to): the held part, past its attack): whether it sustains, so a loop there plays on for as long
 // as the key is held: its level over the last quarter within `most` dB of its level over the first (a tremolo's
 // swings averaged out), and not silent. A pluck or a 303 fading as it is held does not.
@@ -58,8 +74,8 @@ uint8_t probe_accent(const std::vector<uint8_t>& velocities, const std::vector<f
 // pitched instrument does (an octave up twice the frequency).
 bool probe_drums(const std::vector<uint8_t>& keys, const std::vector<float>& hz);
 
-// The same key hit a few times: whether the hits differ (their level over 300 ms apart by 1.5 dB on average, or their
-// brightness by 8 %), so each key wants takes of its own. Phase alone does not count.
+// The same key hit a few times: whether the hits differ (any two apart in level over 300 ms by 1.5 dB on average, or
+// the brightest 8 % over the dullest), so each key wants takes of its own. Phase alone does not count.
 bool probe_varies(const std::vector<std::vector<float>>& hits, float rate);
 
 } // namespace melodee
