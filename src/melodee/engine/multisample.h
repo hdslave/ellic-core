@@ -100,6 +100,9 @@ struct Multisample {
     // whose switch_key it is and sounds nothing of itself; -1 none. `switched`: the last pressed, audio thread only.
     int16_t switch_low = -1, switch_high = -1, switch_default = -1, switched = -1;
     bool has_release = false;         // a zone plays on a key let go
+    // Its program's Mono and Portamento (SfzRead): the sampler carries a held note to a new key and slides its pitch.
+    bool mono = false, legato = false;
+    float glide = 0;                  // seconds
 };
 
 } // namespace melodee

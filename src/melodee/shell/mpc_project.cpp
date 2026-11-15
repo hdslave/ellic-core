@@ -415,6 +415,11 @@ std::string program_tree(const juce::var& program, const std::string& data_folde
         out.tags["KeygroupNumKeygroups"] = std::to_string(integer(program["keygroup"], "numKeygroups", 128));
         out.tags["KeygroupTranspose"] = std::to_string(integer(program["keygroup"], "transpose"));
     }
+    // Mono and Portamento, an .xpm's program tags (engine/keygroup.cpp read_keygroup()).
+    const auto& voices = program["drum"];
+    out.tags["Mono"] = flag(voices, "monophonic") ? "True" : "False";
+    out.tags["PortamentoTime"] = std::to_string(number(voices, "portamentoTime", 0));
+    out.tags["PortamentoLegato"] = flag(voices, "portamentoLegato") ? "True" : "False";
     for (int n = 0; n < std::min(instruments->size(), mpc_pads); ++n)
         out.instruments.push_back(instrument_tags(instruments->getReference(n), n + 1, data_folder));
     return {};

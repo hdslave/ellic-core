@@ -180,6 +180,11 @@ void SamplerEngine::aim(Voice& v, const PadSound& sound, const SampleZone* zone,
         v.aim.step *= bent;
         if (!v.stretch) v.aim.advance *= bent;
     }
+    if (v.porta != 0.0f) { // a portamento on its way to the key
+        const double sliding = std::exp2(double(v.porta) / 12.0);
+        v.aim.step *= sliding;
+        v.aim.advance *= sliding;
+    }
     v.aim.beats = p[FollowHow] == 0 && !(keep_length && shifted);     // a note held to length wants overlapped windows
     // Volume (dB, as the MPC shows it), Normalize, and velocity by the pad's sensitivity: at 100 the gain follows
     // the velocity (64 is -6 dB, 20 is -16 dB), at 0 every hit is full.
@@ -407,9 +412,19 @@ void SamplerEngine::zones_on(Multisample& multi, const PadSound& sound, int pad,
     const int owner = trigger >= 0 ? trigger : pad;
     // Roadmap P3: a keyswitch picks the zones that play from now on and sounds nothing of itself (nor cuts what sounds).
     if (multi.switch_low >= 0 && key >= multi.switch_low && key <= multi.switch_high) { multi.switched = int16_t(key); return; }
+    // A mono program (an MPC keygroup's Mono and Portamento): with Legato, a key pressed while one is held carries that
+    // note on to it, no new attack, sliding there; else the press starts afresh, sliding from the last key.
+    const bool mono = multi.mono && pad >= 0 && pad < int(sampler_pads);
+    if (mono && multi.legato && trigger < 0 && carry(pad, semitones, multi.glide)) {
+        key_velocity[size_t(key)] = uint8_t(vel); key_since[size_t(key)] = played_frames;
+        mono_key[size_t(pad)] = int8_t(key);
+        return;
+    }
+    const int glide_from = mono && multi.glide > 0 ? mono_key[size_t(pad)] : -1;
+    if (mono) mono_key[size_t(pad)] = int8_t(key);
     for (auto& v : voices)
         if (v.zone && v.pad == pad && v.trigger == owner && v.key == key && v.held) { v.held = false; if (v.gate) { v.env.gate(false); v.filter_env.gate(false); } }
-    if (sound.mono) for (auto& v : voices) if (v.pad == pad) v.choked = true;
+    if (sound.mono || mono) for (auto& v : voices) if (v.pad == pad) v.choked = true;
     const int articulation = multi.switched >= 0 ? multi.switched : multi.switch_default;
     key_velocity[size_t(key)] = uint8_t(vel); key_since[size_t(key)] = played_frames; // for its release samples
     seed = seed * 1664525u + 1013904223u;
@@ -430,7 +445,58 @@ void SamplerEngine::zones_on(Multisample& multi, const PadSound& sound, int pad,
         uint32_t group = multi.zones[reached[r]].group;
         if (group) for (auto& v : voices) if (v.pad >= 0 && v.off_by == group) v.choked = true;
     }
-    for (unsigned r = 0; r < count; ++r) start(free_voice(), sound, pad, velocity, semitones, cutoff, trigger, &multi.zones[reached[r]], &multi, key);
+    for (unsigned r = 0; r < count; ++r) {
+        Voice& v = free_voice();
+        start(v, sound, pad, velocity, semitones, cutoff, trigger, &multi.zones[reached[r]], &multi, key);
+        if (v.pad >= 0 && glide_from >= 0 && glide_from != key) porta_from(v, glide_from, multi.glide);
+    }
+}
+
+bool SamplerEngine::carry(int pad, int semitones, float seconds) {
+    const auto& sound = pads[size_t(pad) % sampler_pads];
+    const int key = std::clamp(60 + int(sound.pitch) + semitones, 0, 127);
+    bool carried = false;
+    for (auto& v : voices) {
+        if (!v.zone || v.pad != pad || v.trigger != pad || !v.held || v.choked || v.env.stage == dsp::Envelope::Stage::Release) continue;
+        // Where its pitch is now, from the new key: the slide starts there.
+        const float now = float(v.key) + v.porta - float(key);
+        v.key = key; v.semis = semitones;
+        v.porta = seconds > 0 ? now : 0.0f;
+        v.porta_rate = seconds > 0 ? std::fabs(now) / std::max(1.0f, seconds * dsp::sample_rate()) : 0.0f;
+        refresh(v);
+        carried = true;
+    }
+    return carried;
+}
+
+void SamplerEngine::porta_from(Voice& v, int from_key, float seconds) {
+    v.porta = float(from_key - v.key);
+    v.porta_rate = std::fabs(v.porta) / std::max(1.0f, seconds * dsp::sample_rate());
+    PadSound own = pads[size_t(v.pad) % sampler_pads];
+    if (v.multi && v.zone_index < v.multi->zones.size()) aim(v, own, &v.multi->zones[v.zone_index], v.multi, v.key);
+    settle(v);
+}
+
+void SamplerEngine::slide(int from, int to, int velocity, bool glide) {
+    if (from == to) return;
+    if (keyed) {
+        const int pad = 0, semis = std::clamp(to & 0xff, 0, 127) - 60, was = std::clamp(from & 0xff, 0, 127) - 60;
+        const Multisample* multi = multi_of(pads[0]);
+        bool held = false;
+        for (const auto& v : voices) held |= v.zone && v.pad == pad && v.held && !v.choked && v.semis == was;
+        if (multi && held) {
+            // Only the voices of the note slid from: another held key of a chord stays where it is.
+            for (auto& v : voices) if (v.zone && v.pad == pad && v.semis != was) v.trigger = -2 - v.trigger; // set aside
+            const float seconds = glide ? (multi->glide > 0 ? multi->glide : slide_seconds) : 0.0f;
+            carry(pad, semis, seconds);
+            for (auto& v : voices) if (v.zone && v.pad == pad && v.trigger <= -2) v.trigger = -2 - v.trigger;
+            const int key = std::clamp(60 + int(pads[0].pitch) + semis, 0, 127);
+            key_velocity[size_t(key)] = uint8_t(std::clamp(velocity, 1, 127)); key_since[size_t(key)] = played_frames;
+            mono_key[0] = int8_t(key);
+            return;
+        }
+    }
+    Engine::slide(from, to, velocity, glide);
 }
 
 // A press of a pad with layers (roadmap P3): every layer its velocity reaches, the next in turn, or one at random;
@@ -634,6 +700,7 @@ void SamplerEngine::silence() {
     for (auto& v : voices) { end_stream(v); v = Voice {}; }
     for (auto& g : grains) g.sample = nullptr;
     s1[0] = s1[1] = s2[0] = s2[1] = 0;
+    mono_key.fill(-1);
 }
 bool SamplerEngine::sounding() const {
     for (auto& v : voices) if (v.pad >= 0) return true;
@@ -1427,6 +1494,13 @@ void SamplerEngine::render_stereo(float* left, float* right, unsigned frames) {
     played_frames += frames;
     glide_setup();
     retune_voices();
+    // Portamento: each sliding voice a block nearer its key (its usual 8 ms glide smooths the steps between blocks).
+    for (auto& v : voices) {
+        if (v.porta == 0.0f || v.pad < 0 || v.pad >= int(sampler_pads) || v.choked) continue;
+        const float by = v.porta_rate * float(frames);
+        v.porta = std::fabs(v.porta) <= by ? 0.0f : v.porta - std::copysign(by, v.porta);
+        refresh(v);
+    }
     // Clouds: their voices only place grains; the grains play.
     for (auto& v : voices) {
         if (v.pad < 0 || !v.cloud) continue;

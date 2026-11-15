@@ -99,6 +99,10 @@ public:
     void note_on(int key, int velocity) override;
     void set_accent(float gain) override { accent = gain; }
     void note_off(int key) override;
+    // A Slide (`glide`) or Tie step on a KEYGROUP track: the held note goes on at `to` without a new attack, its pitch
+    // sliding there over the program's portamento (else slide_seconds) or, tied, at once.
+    static constexpr float slide_seconds = 0.06f;
+    void slide(int from, int to, int velocity, bool glide) override;
     void all_notes_off() override;
     // A keyboard's pitch wheel: every voice of the kit bent up to `bend_range` semitones either way, its speed with it
     // (a stretched voice its pitch only), gliding there as any change does. New hits start bent.
@@ -236,6 +240,9 @@ private:
         bool follows = false;               // its speed comes from the tempo (Warp's Seq, Follow)
         Multisample* multi = nullptr;       // a zone's instrument, and the zone's place in it
         uint32_t zone_index = 0;
+        // Portamento (a mono instrument's glide, a Slide step): the pitch sits `porta` semitones from its key and
+        // moves `porta_rate` of them a frame back to it.
+        float porta = 0, porta_rate = 0;
     };
     // Each pad whose sound changed since the last render (a bit a pad); `retune_all` for the kit's values.
     std::array<uint64_t, (sampler_pads + 63) / 64> retune {};
@@ -261,6 +268,11 @@ private:
     void zones_on(Multisample& multi, const PadSound& sound, int pad, int velocity, int semitones, int cutoff, int trigger);
     void layers_on(const PadSound& sound, int pad, int velocity, int semitones, int cutoff, int trigger);
     void release_zones(int pad, int semitones); // roadmap P3: an instrument's release samples for the key let go
+    // A mono instrument's held note on `pad` carried to `semitones` (a new key), its pitch sliding there over `seconds`
+    // (0: at once). False when no note of the pad is held.
+    bool carry(int pad, int semitones, float seconds);
+    void porta_from(Voice& v, int from_key, float seconds); // a new voice's pitch starting at `from_key`, sliding to its own
+    std::array<int8_t, sampler_pads> mono_key = [] { std::array<int8_t, sampler_pads> a {}; a.fill(-1); return a; }(); // a mono instrument pad's last key
     Multisample* multi_of(const PadSound& sound) const;
     void end_stream(Voice& v);
     void came_round(Voice& v);          // a zone's loop went back to its start

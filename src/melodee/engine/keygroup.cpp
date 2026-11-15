@@ -247,6 +247,16 @@ PadFilter mpc_filter(int type) {
     }
 }
 
+double mpc_portamento_seconds(double value) {
+    if (!(value > 0)) return 0;
+    return 30.0 * std::exp(7.0 * (std::min(value, 1.0) - 1.0));
+}
+
+double mpc_portamento_value(double seconds) {
+    if (!(seconds > 0)) return 0;
+    return std::clamp(1.0 + std::log(seconds / 30.0) / 7.0, 1e-6, 1.0); // under 27 ms: the shortest the MPC has
+}
+
 SfzRead read_keygroup(const KeygroupProgram& program) {
     SfzRead read;
     std::vector<SfzEnvelope> envelopes;
@@ -258,6 +268,9 @@ SfzRead read_keygroup(const KeygroupProgram& program) {
     double db = 0;
     if (auto volume = number_at(p, "Volume"); volume && *volume > 0) db = 40 * std::log10(*volume) + 6;
     if (auto transpose = number_at(p, "KeygroupMasterTranspose"); transpose && std::fabs(*transpose - 0.5) > 1e-6) read.ignored.insert("KeygroupMasterTranspose");
+    read.mono = flag_at(p, "Mono").value_or(false);
+    read.legato = flag_at(p, "PortamentoLegato").value_or(false);
+    read.glide = mpc_portamento_seconds(number_at(p, "PortamentoTime").value_or(0));
     bool velocity_taken = false;
     for (const auto& instrument : program.instruments) {
         if (instrument.number > keygroups) continue; // past the program's count: left over from a longer one

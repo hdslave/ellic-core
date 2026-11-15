@@ -59,6 +59,10 @@ bool keygroup_pad_layers(const KeygroupInstrument& instrument, const std::array<
 
 // An envelope stage's 0..1 as seconds: 1 ms to 100 s, logarithmically.
 double keygroup_seconds(double value);
+// A program's PortamentoTime (an .xpm's, an MPC 3 program's portamentoTime) as seconds, as MPC 3 shows it:
+// 30 s x e^(7 (value - 1)), 27 ms to 30 s; 0 is off. And seconds back to that value (0: off).
+double mpc_portamento_seconds(double value);
+double mpc_portamento_value(double seconds);
 // A layer's Volume as dB: its gain coefficient (1 is 0 dB).
 double keygroup_decibels(double value);
 

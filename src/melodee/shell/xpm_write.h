@@ -31,6 +31,10 @@ struct XpmProgram {
     std::string name;
     std::vector<XpmKeygroup> keygroups; // 128 at most, in key order
     double release = 0.05;              // seconds after the key is let go (the samples hold their own release)
+    // Mono and Portamento (engine/keygroup.h mpc_portamento_value()): one note at a time, the pitch sliding to a new
+    // key over `glide` seconds (0: none); with `legato` only a key pressed while another is held slides, no new attack.
+    bool mono = false, legato = false;
+    double glide = 0;
 };
 
 // The program as .xpm text.

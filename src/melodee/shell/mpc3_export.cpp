@@ -14,6 +14,7 @@
 // Keys), become a Keygroup track of their own, the pad's notes going with them.
 #include "melodee/shell/mpc3_export.h"
 #include "melodee/engine/dsp.h"
+#include "melodee/engine/keygroup.h"
 #include "melodee/engine/midi_engine.h"
 #include "melodee/engine/sfz.h"
 #include "melodee/model/sampler.h"
@@ -538,7 +539,8 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
                         noted[e.key - sampler_first_note] = true;
                         pitched[e.key - sampler_first_note] = pitched[e.key - sampler_first_note] || e.pitch;
                     }
-        struct PadPlan { std::vector<Layer> drum; std::vector<Keygroup> keys; bool instrument = false; };
+        // An instrument's program keeps its Mono and Portamento (engine/sfz.h SfzRead) on the keygroup track it becomes.
+        struct PadPlan { std::vector<Layer> drum; std::vector<Keygroup> keys; bool instrument = false, mono = false, legato = false; double glide = 0; };
         std::array<PadPlan, sampler_pads> plans;
         for (unsigned n = 0; n < (keyed ? 1u : sampler_pads); ++n) {
             const auto& pad = track.pads[n];
@@ -569,6 +571,7 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
                 continue;
             }
             plan.instrument = true;
+            plan.mono = read.mono; plan.legato = read.legato; plan.glide = read.glide;
             for (auto& [zone, layer] : zones) { // keygroups by their keys, in the order they come
                 auto same = std::find_if(plan.keys.begin(), plan.keys.end(), [&](const Keygroup& k) {
                     return k.low_key == zone.low_key && k.high_key == zone.high_key;
@@ -660,6 +663,12 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
             if (!groups) continue;
             put(field(program, "drum"), "instruments", juce::var(instruments));
             put(field(program, "keygroup"), "numKeygroups", whole(int(groups)));
+            if (plan.mono) { // MPC 3's Mono and Portamento, as the program read had them
+                const auto& voices = field(program, "drum");
+                put(voices, "monophonic", true);
+                put(voices, "portamentoTime", real(mpc_portamento_value(plan.glide)));
+                put(voices, "portamentoLegato", plan.legato);
+            }
             put(program, "samples", samples_of(used));
             retarget_tracks(made, {}, juce::String(track_name));
             written.push_back({t, int(n), plan.instrument, track_name, made, false, keyed});

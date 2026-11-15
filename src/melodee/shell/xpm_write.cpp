@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #include "melodee/shell/xpm_write.h"
+#include "melodee/engine/keygroup.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -217,10 +218,10 @@ std::string xpm_text(const XpmProgram& program) {
     t("Pitch", 0.0);
     t("TuneCoarse", 0);
     t("TuneFine", 0);
-    t.flag("Mono", false);
+    t.flag("Mono", program.mono);
     t("Program_Polyphony", 0);
-    t("PortamentoTime", 0.0);
-    t.flag("PortamentoLegato", false);
+    t("PortamentoTime", program.glide > 0 ? mpc_portamento_value(program.glide) : 0.0);
+    t.flag("PortamentoLegato", program.legato);
     t.flag("PortamentoQuantized", false);
     t("Program.Xfader.Route", 0);
     t("KeygroupMasterTranspose", 0.5);
