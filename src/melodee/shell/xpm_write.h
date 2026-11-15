@@ -26,6 +26,7 @@ struct XpmLayer {
 struct XpmKeygroup {
     uint8_t low = 0, high = 127;
     std::vector<XpmLayer> layers; // four at most, lowest velocity first
+    bool cycle = false;           // the layers are takes of one hit, played in turn (ZonePlay Cycle), not by velocity
 };
 struct XpmProgram {
     std::string name;

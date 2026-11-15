@@ -51,6 +51,16 @@ struct NoteAudio {
 NoteAudio render_note(EngineHost& host, unsigned track, uint8_t key, uint8_t velocity, uint64_t hold, PrintTap tap,
                       float most_tail, const std::function<bool()>& keep_going = {});
 
+// The auto sampler's check: these notes (`at` frames in, on or off) over `frames`, the track's latency left out, as
+// one channel (left and right's mean). The notes still held at the end are let go.
+struct ProbeNote {
+    uint64_t at = 0;
+    bool on = true;
+    uint8_t key = 60, velocity = 100;
+};
+std::vector<float> render_notes(EngineHost& host, unsigned track, std::vector<ProbeNote> notes, uint64_t frames, PrintTap tap,
+                                const std::function<bool()>& keep_going = {});
+
 // The frames of a pass at the model rate, as render_print() counts a pass at the device's (for PrintRecord::pass).
 uint32_t model_frames_of(uint64_t device_frames, float rate);
 

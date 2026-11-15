@@ -420,7 +420,8 @@ void SamplerEngine::zones_on(Multisample& multi, const PadSound& sound, int pad,
         mono_key[size_t(pad)] = int8_t(key);
         return;
     }
-    const int glide_from = mono && multi.glide > 0 ? mono_key[size_t(pad)] : -1;
+    // Legato: a press after the last key was let go starts at its own pitch; only without Legato does it slide there.
+    const int glide_from = mono && !multi.legato && multi.glide > 0 ? mono_key[size_t(pad)] : -1;
     if (mono) mono_key[size_t(pad)] = int8_t(key);
     for (auto& v : voices)
         if (v.zone && v.pad == pad && v.trigger == owner && v.key == key && v.held) { v.held = false; if (v.gate) { v.env.gate(false); v.filter_env.gate(false); } }

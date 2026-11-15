@@ -157,4 +157,37 @@ NoteAudio render_note(EngineHost& host, unsigned track, uint8_t key, uint8_t vel
     return a;
 }
 
+std::vector<float> render_notes(EngineHost& host, unsigned track, std::vector<ProbeNote> notes, uint64_t frames, PrintTap tap,
+                                const std::function<bool()>& keep_going) {
+    const unsigned B = EngineHost::block;
+    host.set_print_tap(track, tap == PrintTap::PostFx);
+    std::stable_sort(notes.begin(), notes.end(), [](const ProbeNote& a, const ProbeNote& b) { return a.at < b.at; });
+    std::vector<int32_t> out(B * 2);
+    std::vector<float> x;
+    x.reserve(size_t(frames));
+    uint64_t played = 0, latency = 0;
+    size_t next = 0;
+    bool planned = false;
+    while (x.size() < frames) {
+        if (keep_going && !keep_going()) { x.clear(); break; }
+        while (next < notes.size() && notes[next].at <= played) { // each note on its own frame: blocks split there
+            const auto& n = notes[next++];
+            if (n.on) host.send({Command::Type::NoteOn, uint8_t(track), 0, n.key, int16_t(std::max<uint8_t>(n.velocity, 1))});
+            else host.send({Command::Type::NoteOff, uint8_t(track), 0, n.key});
+        }
+        unsigned n = B;
+        if (next < notes.size()) n = unsigned(std::clamp<uint64_t>(notes[next].at - played, 1, B));
+        host.render(out.data(), n, 1.0f);
+        drain(host);
+        if (!planned) { latency = tap == PrintTap::PreFx ? host.engine_latency(track) : host.track_latency(track); planned = true; }
+        const float* l = host.print_left();
+        const float* r = host.print_right();
+        for (unsigned f = 0; f < n && x.size() < frames; ++f)
+            if (played + f >= latency) x.push_back(0.5f * (l[f] + r[f]));
+        played += n;
+    }
+    host.send({Command::Type::AllNotesOff, uint8_t(track)});
+    return x;
+}
+
 } // namespace melodee

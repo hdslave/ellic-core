@@ -158,7 +158,7 @@ void instrument_text(std::string& s, unsigned number_, const XpmKeygroup* k, dou
     t("LowNote", k ? int(k->low) : 24);
     t("HighNote", k ? int(k->high) : 24);
     t.flag("IgnoreBaseNote", false);
-    t("ZonePlay", 1); // the layers its velocity reaches
+    t("ZonePlay", k && k->cycle ? 0 : 1); // in turn (takes), else the layers its velocity reaches
     t("MuteGroup", 0);
     for (const char* mute : {"MuteTarget1", "MuteTarget2", "MuteTarget3", "MuteTarget4"}) t(mute, 0);
     for (const char* simult : {"SimultTarget1", "SimultTarget2", "SimultTarget3", "SimultTarget4"}) t(simult, 0);
