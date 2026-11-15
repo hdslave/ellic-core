@@ -73,19 +73,14 @@ std::string WavReader::open(const std::string& path, unsigned max_seconds, WavIn
     count = uint32_t(std::min(held, limit) / ((bits / 8) * channels));
     if (!count) return "no audio";
     if (info) { info->channels = channels; info->rate = hz; }
+    data_start = data_at;
     file.seekg(std::streamoff(data_at));
     return {};
 }
 
-uint32_t WavReader::read(float* left, float* right, uint32_t frames) {
-    const uint32_t wanted = std::min(frames, count - done);
-    if (!wanted || !file) return 0;
-    const unsigned size = bits / 8, block = size * channels;
-    const bool floating = format == 3;
-    bytes.resize(size_t(wanted) * block);
-    file.read(reinterpret_cast<char*>(bytes.data()), std::streamsize(bytes.size()));
-    frames = uint32_t(uint64_t(std::max<std::streamsize>(file.gcount(), 0)) / block);
-    if (frames < wanted) count = done + frames; // it could not be read: no more
+void wav_frames(const WavLayout& layout, const uint8_t* bytes, uint32_t frames, float* left, float* right) {
+    const unsigned size = layout.bits / 8, channels = layout.channels, bits = layout.bits;
+    const bool floating = layout.floating;
     auto sample = [&](unsigned frame, unsigned channel) {
         const uint8_t* p = &bytes[(size_t(frame) * channels + channel) * size];
         if (floating) { float f; std::memcpy(&f, p, 4); return std::isfinite(f) ? f : 0.0f; }
@@ -93,7 +88,19 @@ uint32_t WavReader::read(float* left, float* right, uint32_t frames) {
         if (bits == 24) return int32_t(uint32_t(p[0]) << 8 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 24) / 2147483648.0f;
         return int32_t(u32(p)) / 2147483648.0f;
     };
+    if (!right) { for (unsigned n = 0; n < frames; ++n) left[n] = sample(n, 0); return; }
     for (unsigned n = 0; n < frames; ++n) { left[n] = sample(n, 0); right[n] = sample(n, std::min(1u, channels - 1)); }
+}
+
+uint32_t WavReader::read(float* left, float* right, uint32_t frames) {
+    const uint32_t wanted = std::min(frames, count - done);
+    if (!wanted || !file) return 0;
+    const unsigned block = bits / 8 * channels;
+    bytes.resize(size_t(wanted) * block);
+    file.read(reinterpret_cast<char*>(bytes.data()), std::streamsize(bytes.size()));
+    frames = uint32_t(uint64_t(std::max<std::streamsize>(file.gcount(), 0)) / block);
+    if (frames < wanted) count = done + frames; // it could not be read: no more
+    wav_frames(layout(), bytes.data(), frames, left, right);
     done += frames;
     return frames;
 }

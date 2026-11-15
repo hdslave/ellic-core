@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #include "melodee/engine/stream_pager.h"
+#include "melodee/engine/sample_data.h"
 #include <algorithm>
 #include <chrono>
+#include <fcntl.h>
 #include <pthread.h>
 #include <sys/mman.h>
 #include <thread>
+#include <unistd.h>
 
 namespace melodee {
 namespace {
@@ -15,6 +18,67 @@ size_t chunk_bytes(uint32_t frames, uint32_t chunk) { return std::min<uint32_t>(
 } // namespace
 
 ZonePart::~ZonePart() { if (mapping) munmap(mapping, mapping_bytes); }
+
+namespace {
+// A side's room in a part read in place: whole chunks, so each chunk of each side is whole pages to let go of.
+size_t side_bytes(uint32_t frames) { return (size_t(frames) * sizeof(float) + stream_chunk_bytes - 1) / stream_chunk_bytes * stream_chunk_bytes; }
+
+// A chunk of a part read in place, from its file into the part's memory as floats. False when the file gives less.
+bool fill_chunk(ZonePart& part, uint32_t chunk) {
+    const ZoneSource& source = *part.source;
+    const uint32_t first = chunk * stream_chunk, frames = std::min<uint32_t>(stream_chunk, part.total - first);
+    WavLayout layout;
+    layout.channels = source.channels; layout.bits = source.bits; layout.floating = source.floating;
+    const size_t block = layout.block();
+    static thread_local std::vector<uint8_t> bytes; // the pager's thread, and a landing thread's hold()
+    bytes.resize(size_t(frames) * block);
+    const int file = open(source.path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (file < 0) return false; // the card is gone
+    size_t done = 0;
+    while (done < bytes.size()) {
+        const ssize_t got = pread(file, bytes.data() + done, bytes.size() - done, off_t(source.data_at + uint64_t(first) * block + done));
+        if (got <= 0) break; // the file is shorter than it said
+        done += size_t(got);
+    }
+    close(file);
+    if (done < bytes.size()) return false;
+    float* left = const_cast<float*>(part.left) + first;
+    wav_frames(layout, bytes.data(), frames, left, part.right != part.left ? const_cast<float*>(part.right) + first : nullptr);
+    return true;
+}
+
+// The same chunk given back: its pages go, and read as silence until it is filled again.
+void empty_chunk(ZonePart& part, uint32_t chunk) {
+    const uint32_t first = chunk * stream_chunk;
+    madvise(const_cast<float*>(part.left) + first, stream_chunk_bytes, MADV_DONTNEED);
+    if (part.right != part.left) madvise(const_cast<float*>(part.right) + first, stream_chunk_bytes, MADV_DONTNEED);
+}
+} // namespace
+
+bool read_in_place(const std::string& path, const WavLayout& layout, ZonePart& part) {
+    if (!layout.frames || layout.channels < 1 || layout.channels > 2) return false;
+    if (access(path.c_str(), R_OK) != 0) return false;
+    auto source = std::make_unique<ZoneSource>();
+    source->path = path;
+    source->data_at = layout.data_at; source->channels = uint8_t(layout.channels); source->bits = uint8_t(layout.bits);
+    source->floating = layout.floating;
+    // Room for every frame, none of it memory yet: a page is had only once a chunk is filled.
+    const size_t side = side_bytes(layout.frames), bytes = side * layout.channels;
+    int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+#if defined(MAP_NORESERVE)
+    flags |= MAP_NORESERVE;
+#endif
+    void* start = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, flags, -1, 0);
+    if (start == MAP_FAILED) return false;
+    part.mapping = start; part.mapping_bytes = bytes;
+    part.left = static_cast<const float*>(start);
+    part.right = layout.channels > 1 ? part.left + side / sizeof(float) : part.left;
+    part.pins.assign((layout.frames - 1) / stream_chunk + 1, 0);
+    part.rate = float(layout.rate);
+    part.total = layout.frames;
+    part.source = std::move(source);
+    return true;
+}
 
 StreamPager::StreamPager(Pin pin) : pin_fn(pin ? pin : real_pin) {}
 StreamPager::~StreamPager() { stop(); }
@@ -96,6 +160,13 @@ void StreamPager::flush() {
 }
 
 bool StreamPager::pin_chunk(ZonePart& part, uint32_t chunk) {
+    if (part.source) { // read in place: the first to want a chunk fills it from the file
+        std::lock_guard<std::mutex> guard(part.source->lock);
+        if (part.pins[chunk]) { ++part.pins[chunk]; return true; }
+        if (!fill_chunk(part, chunk)) return false;
+        part.pins[chunk] = 1;
+        return true;
+    }
     if (part.pins[chunk]) { ++part.pins[chunk]; return true; }
     size_t bytes = chunk_bytes(part.total, chunk);
     if (!pin_fn(part.left + chunk * stream_chunk, bytes, true)) return false;
@@ -108,6 +179,12 @@ bool StreamPager::pin_chunk(ZonePart& part, uint32_t chunk) {
 }
 
 void StreamPager::unpin_chunk(ZonePart& part, uint32_t chunk) {
+    if (part.source) { // read in place: the last to need it gives its memory back
+        std::lock_guard<std::mutex> guard(part.source->lock);
+        if (--part.pins[chunk]) return;
+        empty_chunk(part, chunk);
+        return;
+    }
     if (--part.pins[chunk]) return;
     size_t bytes = chunk_bytes(part.total, chunk);
     pin_fn(part.left + chunk * stream_chunk, bytes, false);

@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <thread>
 
 // What keeps a multisampled voice off the card's time. A zone's frames are
@@ -16,7 +17,21 @@
 // here, not there) and publishes how far is safe; the audio thread reads
 // only below it. mlock answers ENOMEM where a read would be SIGBUS, so a card
 // pulled out stops a voice instead of the app.
+//
+// A PCM WAV needs no copy laid out to be read so (read_in_place()): where a
+// mapped part's chunk is pinned, its chunk is read from the file and turned
+// to floats in memory, and where that one is let go its memory is given back.
+// The voice reads floats below the published limit either way.
 namespace melodee {
+
+struct WavLayout; // engine/sample_data.h
+
+// A part read in place from the PCM WAV at `path`, as `layout` says it lies there: no copy of it is laid out on the
+// card. Room is set aside for its frames as floats at the file's own rate, none of it memory until a chunk is
+// wanted: the pager then reads that chunk of the file and turns it to floats (a tenth of a millisecond) where for a
+// mapped part it pins pages, and gives the memory back when no voice needs it. False when the file cannot be read;
+// the part is then as it was.
+bool read_in_place(const std::string& path, const WavLayout& layout, ZonePart& part);
 
 class StreamPager {
 public:

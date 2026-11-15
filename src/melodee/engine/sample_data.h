@@ -91,6 +91,19 @@ constexpr unsigned max_hits = 512;
 // the rates agree, else one conversion); 0 or 44.1 kHz none.
 std::string read_wav(const std::string& path, SampleData& out, unsigned max_seconds = 60, WavInfo* info = nullptr, float play_at = 0);
 
+// How a PCM WAV lies in its file: where its frames start, how many there are and how each is kept. Enough to read
+// any stretch of it in place (a multisampled instrument's file streamed from the card as it is, engine/stream_pager.h).
+struct WavLayout {
+    uint64_t data_at = 0;   // bytes from the file's start
+    uint32_t frames = 0;
+    unsigned channels = 0, rate = 0, bits = 0;
+    bool floating = false;  // 32-bit float; else integer PCM of `bits`
+    unsigned block() const { return bits / 8 * channels; } // bytes a frame
+};
+// `frames` frames as they lie in such a file (`bytes`) as floats, as read_wav() makes them: left and right apart, a
+// mono file's on `left` alone when `right` is null (else on both).
+void wav_frames(const WavLayout& layout, const uint8_t* bytes, uint32_t frames, float* left, float* right);
+
 // A WAV file's frames a piece at a time, as read_wav() reads them whole (it is read_wav()'s reader): open() reads
 // the head (and, with `info`, the smpl chunk wherever it lies) and finds the frames, at most `max_seconds` of them;
 // read() hands on the next ones as floats at the file's own rate (a mono file's on both sides), fewer at the end of
@@ -101,10 +114,12 @@ public:
     unsigned rate() const { return hz; }
     uint32_t frames() const { return count; }
     uint32_t read(float* left, float* right, uint32_t frames);
+    WavLayout layout() const { return {data_start, count, channels, hz, bits, format == 3}; } // after open()
 private:
     std::ifstream file;
     unsigned format = 0, channels = 0, hz = 0, bits = 0;
     uint32_t count = 0, done = 0;
+    uint64_t data_start = 0;
     std::vector<uint8_t> bytes;
 };
 

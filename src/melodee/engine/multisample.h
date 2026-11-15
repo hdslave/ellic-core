@@ -7,6 +7,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
+#include <string>
 #include <vector>
 
 // A multisampled instrument's zones: what sits on a kit pad in place of one
@@ -74,9 +76,23 @@ inline float zone_crossfade(const SampleZone& z, int key, int velocity) {
     return curve(k, z.key_power) * curve(v, z.vel_power);
 }
 
-// One audio file of an instrument: its frames, mapped from the card's cache
-// (or, in tests, held). `frames` stays 0 until it has landed, its zones' start,
-// end and loop written before it, so the audio thread may read them after.
+// A PCM WAV read in place (engine/stream_pager.h): the file and how its frames lie in it. The part's `left` and
+// `right` then point into memory of the part's own, empty until the pager turns a chunk of the file to floats there
+// as a voice nears it, and emptied again once no voice needs it. The file is opened for the length of a read only:
+// an instrument of a thousand files holds none open. More than one pager may read a part (the live one and a
+// print's), so its chunks are counted, filled and let go under `lock`.
+struct ZoneSource {
+    std::string path;
+    uint64_t data_at = 0;             // bytes from the file's start to its first frame
+    uint8_t channels = 0, bits = 0;
+    bool floating = false;
+    std::mutex lock;
+};
+
+// One audio file of an instrument: its frames, mapped from the card's cache,
+// read in place from a PCM WAV (`source`), or, in tests, held. `frames` stays 0
+// until it has landed, its zones' start, end and loop written before it, so the
+// audio thread may read them after.
 struct ZonePart {
     ZonePart() = default;
     ZonePart(const ZonePart&) = delete;
@@ -84,6 +100,8 @@ struct ZonePart {
     ~ZonePart(); // the mapping goes, and its pins with it (engine/stream_pager.cpp)
     const float* left = nullptr;
     const float* right = nullptr;     // == left: one side
+    float rate = 44100;               // of its frames: the project's when laid out in the cache, the file's own read in place
+    std::unique_ptr<ZoneSource> source; // read in place; none: mapped (or held)
     uint32_t total = 0;               // its length, known before it is published
     std::atomic<uint32_t> frames {0}; // its length once landed: what the audio thread goes by
     std::vector<uint16_t> pins;       // a count a chunk; the landing thread's, then the pager's

@@ -79,8 +79,9 @@ void SamplerEngine::start(Voice& v, const PadSound& sound, int pad, int velocity
     // Roadmap P2: a sample made ready at the device's rate plays from that copy, a frame each device frame (only its
     // pitch moves the read on), the pad's 44.1 kHz frames scaled there; else (an instrument's zones, or no copy made)
     // from its 44.1 kHz frames, each device frame reading that much further on.
+    // A zone's part has a rate of its own: 44.1 kHz laid out in the cache, its file's when that is read in place.
     v.native = !part && data->plays_at(dsp::sample_rate());
-    v.scale = v.native ? double(data->play_rate) / dsp::model_rate : 1.0;
+    v.scale = part ? double(part->rate) / dsp::model_rate : v.native ? double(data->play_rate) / dsp::model_rate : 1.0;
     auto at_rate = [&](uint32_t frame) { return v.native ? uint32_t(std::llround(frame * v.scale)) : frame; };
     const uint32_t total = part ? part->total : v.native ? data->play_frames : data->frames;
     v.start = std::min(zone ? zone->start : at_rate(sound.start), total - 1);
@@ -171,8 +172,9 @@ void SamplerEngine::aim(Voice& v, const PadSound& sound, const SampleZone* zone,
     else if (p[Follow] && sound.own_tempo) { rate = double(tempo) / sound.own_tempo; v.follows = true; }
     const bool keep_length = p[PitchHow] == 1 || (warped && !tape);
     const bool shifted = std::fabs(step - 1.0) > 1e-6;
-    // At 44.1 kHz (no copy at the device's rate) each output frame reads that much further along.
-    const double per_frame = v.native ? 1.0 : dsp::model_rate / dsp::sample_rate();
+    // At 44.1 kHz (no copy at the device's rate) each output frame reads that much further along; a zone's part by
+    // its own rate over the device's.
+    const double per_frame = v.native ? 1.0 : dsp::model_rate * v.scale / dsp::sample_rate();
     v.aim.step = (tape ? step * rate : step) * per_frame;             // what it reads at (a stretch's taps)
     v.aim.advance = rate * (keep_length ? 1.0 : step) * per_frame;    // how fast the sound moves on
     if (bend != 0.0f && pad < int(sampler_pads)) { // the pitch wheel (not Chop's audition): a stretched voice keeps its length, the rest move with it as tape does
