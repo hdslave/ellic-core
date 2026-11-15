@@ -77,7 +77,11 @@ ProbeGlide probe_glide(const std::vector<float>& x, const std::vector<float>& al
     const size_t window = size_t(0.03f * rate), hop = size_t(0.004f * rate);
     // Soon after the second key: mono when the first key's pitch is gone, where alone it still sounds (a poly
     // instrument plays it on under the second, however it decays).
-    const size_t at = onset + size_t(0.15f * rate), n = size_t(0.06f * rate);
+    // Over a stretch long enough to tell the two keys' tones apart (a Hann window's reach is two over its length:
+    // low keys lie close in frequency, C2 and G2 33 Hz, and the second would read as the first still sounding):
+    // 60 ms, or six periods of the difference between them, 0.3 s at most.
+    const float apart = std::fabs(to_hz - from_hz);
+    const size_t at = onset + size_t(0.15f * rate), n = size_t(std::clamp(apart > 0 ? 6.0f / apart : 0.06f, 0.06f, 0.3f) * rate);
     const float kept = probe_tone_db(alone, at, n, from_hz, rate), heard = probe_tone_db(x, at, n, from_hz, rate);
     g.mono = kept > -90 && heard < kept - 10;
     if (!g.mono) return g;

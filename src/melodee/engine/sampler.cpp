@@ -418,6 +418,7 @@ void SamplerEngine::zones_on(Multisample& multi, const PadSound& sound, int pad,
     // on to it, no new attack, sliding there. Else the press starts afresh, its pitch sliding from the last key: with
     // Legato only from a key still held (one let go before starts at its own pitch), without it always.
     const bool mono = multi.mono && pad >= 0 && pad < int(sampler_pads);
+    if (mono && trigger < 0) hold_key(pad, semitones, vel);
     if (mono && multi.tied && trigger < 0 && carry(pad, semitones, multi.glide)) {
         key_velocity[size_t(key)] = uint8_t(vel); key_since[size_t(key)] = played_frames;
         mono_key[size_t(pad)] = int8_t(key);
@@ -461,6 +462,27 @@ void SamplerEngine::zones_on(Multisample& multi, const PadSound& sound, int pad,
     }
 }
 
+void SamplerEngine::hold_key(int pad, int semitones, int velocity) {
+    drop_key(pad, semitones);
+    if (mono_held_count == mono_held.size()) { // the oldest makes room
+        std::copy(mono_held.begin() + 1, mono_held.end(), mono_held.begin());
+        --mono_held_count;
+    }
+    mono_held[mono_held_count++] = {int16_t(pad), int8_t(semitones), uint8_t(std::clamp(velocity, 1, 127))};
+}
+
+void SamplerEngine::drop_key(int pad, int semitones) {
+    unsigned kept = 0;
+    for (unsigned n = 0; n < mono_held_count; ++n)
+        if (mono_held[n].pad != pad || mono_held[n].semis != semitones) mono_held[kept++] = mono_held[n];
+    mono_held_count = kept;
+}
+
+const SamplerEngine::HeldKey* SamplerEngine::newest_held(int pad) const {
+    for (unsigned n = mono_held_count; n-- > 0;) if (mono_held[n].pad == pad) return &mono_held[n];
+    return nullptr;
+}
+
 bool SamplerEngine::carry(int pad, int semitones, float seconds) {
     const auto& sound = pads[size_t(pad) % sampler_pads];
     const int key = std::clamp(60 + int(sound.pitch) + semitones, 0, 127);
@@ -502,6 +524,7 @@ void SamplerEngine::slide(int from, int to, int velocity, bool glide) {
             const int key = std::clamp(60 + int(pads[0].pitch) + semis, 0, 127);
             key_velocity[size_t(key)] = uint8_t(std::clamp(velocity, 1, 127)); key_since[size_t(key)] = played_frames;
             mono_key[0] = int8_t(key);
+            if (multi->mono) { drop_key(pad, was); hold_key(pad, semis, velocity); } // the note is the new key's now
             return;
         }
     }
@@ -649,6 +672,25 @@ void SamplerEngine::release_key(int key) {
         key = oldest;
     }
     int pad = (key & 0xff) - int(sampler_first_note), semis = int8_t(key >> 8);
+    // A mono program: the key let go leaves the keys held. If it is the one that sounds and another is still held, the
+    // note goes back to the newest of those: carried there with no new attack (tied; nothing when the note has ended),
+    // or started again, what sounded cut and its pitch slid from as a legato press's.
+    if (pad >= 0 && pad < int(sampler_pads) && mono_held_count) {
+        const auto& sound = pads[size_t(pad)];
+        Multisample* multi = multi_of(sound);
+        if (multi && multi->mono) {
+            drop_key(pad, semis);
+            const HeldKey* back = mono_key[size_t(pad)] == std::clamp(60 + int(sound.pitch) + semis, 0, 127) ? newest_held(pad) : nullptr;
+            if (back && !pad_muted(unsigned(pad))) {
+                const HeldKey to = *back;
+                if (!multi->tied) { play(sound, pad, to.velocity, to.semis, -1, -1); return; }
+                if (carry(pad, to.semis, multi->glide)) {
+                    mono_key[size_t(pad)] = int8_t(std::clamp(60 + int(sound.pitch) + to.semis, 0, 127));
+                    return;
+                }
+            }
+        }
+    }
     for (auto& v : voices)
         if (v.trigger == pad && v.pad >= 0 && v.held && (!v.zone || v.semis == semis)) { // a one shot plays on to its end (a loop until hit again)
             v.held = false;
@@ -702,6 +744,7 @@ void SamplerEngine::sample_gone(uint16_t slot) {
 
 void SamplerEngine::all_notes_off() {
     pedal = false; pedal_count = 0; // as a plug-in's: the pedal up too
+    mono_held_count = 0;
     for (auto& v : voices) if (v.pad >= 0) { v.held = false; v.env.gate(false); v.filter_env.gate(false); }
 }
 void SamplerEngine::silence() {
@@ -710,6 +753,7 @@ void SamplerEngine::silence() {
     for (auto& g : grains) g.sample = nullptr;
     s1[0] = s1[1] = s2[0] = s2[1] = 0;
     mono_key.fill(-1);
+    mono_held_count = 0;
 }
 bool SamplerEngine::sounding() const {
     for (auto& v : voices) if (v.pad >= 0) return true;

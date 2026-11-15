@@ -273,6 +273,15 @@ private:
     bool carry(int pad, int semitones, float seconds);
     void porta_from(Voice& v, int from_key, float seconds); // a new voice's pitch starting at `from_key`, sliding to its own
     std::array<int8_t, sampler_pads> mono_key = [] { std::array<int8_t, sampler_pads> a {}; a.fill(-1); return a; }(); // a mono instrument pad's last key
+    // A mono instrument's keys still held, oldest first (the last sixteen): when the key that sounds is let go the note
+    // goes back to the newest of them, as a mono synth's does (carried there when its program is tied, else started
+    // again).
+    struct HeldKey { int16_t pad = -1; int8_t semis = 0; uint8_t velocity = 0; };
+    std::array<HeldKey, 16> mono_held {};
+    unsigned mono_held_count = 0;
+    void hold_key(int pad, int semitones, int velocity); // pressed: the newest
+    void drop_key(int pad, int semitones);               // let go
+    const HeldKey* newest_held(int pad) const;
     Multisample* multi_of(const PadSound& sound) const;
     void end_stream(Voice& v);
     void came_round(Voice& v);          // a zone's loop went back to its start
