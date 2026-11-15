@@ -19,6 +19,11 @@ struct MpcImport {
     unsigned tracks = 0, sequences = 0, pads = 0, notes = 0;
     unsigned over_limit = 0; // tracks, sequences or pads Melodee has no room for
     unsigned missing = 0;    // pads whose file is not in the project's data folder
+    // Freeze plan F3: Audio tracks' regions as patterns' takes (a sequence's region from its start), each take's WAV
+    // file to copy as "Take NNN.wav" (number, file), and regions left out (a second in a sequence, or one starting
+    // later than its start: a pattern plays one take, from its top).
+    unsigned regions = 0, regions_left_out = 0;
+    std::vector<std::pair<unsigned, std::string>> takes;
 };
 
 bool is_mpc_project(const std::string& path);

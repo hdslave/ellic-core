@@ -4,6 +4,7 @@
 #include "melodee/shell/mpc_wav_slices.h"
 #include "melodee/engine/engine_info.h"
 #include "melodee/engine/dsp.h"
+#include "melodee/engine/sample_data.h"
 #include "melodee/model/scales.h"
 #include <juce_core/juce_core.h>
 #include <algorithm>
@@ -474,9 +475,79 @@ std::string import_mpc_project(const std::vector<uint8_t>& file, const std::stri
     Samples samples(project, where.parent_path() / (where.stem().string() + "_[ProjectData]"));
     unsigned used = 0;
     int raw_index = -1;
+    std::map<std::string, unsigned> take_of; // an Audio track's file: its take number
+    const fs::path data_folder = where.parent_path() / (where.stem().string() + "_[ProjectData]");
     for (const auto& source : *tracks) {
         ++raw_index;
         const auto& program = source["program"];
+        if (integer(program, "type") == 6) { // an MPC 3 Audio track (freeze plan F3): an AUDIO track
+            const auto name = source["name"].toString();
+            std::map<unsigned, const juce::var*> firsts; // each sequence's region from its start
+            unsigned regions = 0, others = 0;
+            auto same = [](const juce::var& a, const juce::var& b) { // the take again (as a pattern looping in a longer sequence)
+                return a["sample"]["path"].toString() == b["sample"]["path"].toString() && number(a, "sliceStart") == number(b, "sliceStart")
+                    && number(a, "sliceEnd") == number(b, "sliceEnd");
+            };
+            for (const auto& [n, sequence] : sequences) {
+                const auto* events = clip_of(*sequence, name)["eventList"]["events"].getArray();
+                if (!events) continue;
+                for (const auto& event : *events)
+                    if (integer(event, "type") == 4 && integer(event, "time") <= int(mpc_ticks_per_tick) && !firsts.count(n)) firsts[n] = &event;
+                for (const auto& event : *events) {
+                    if (integer(event, "type") != 4) continue;
+                    ++regions;
+                    if (firsts.count(n) && firsts[n] != &event && !same((*firsts[n])["audio"], event["audio"])) ++others;
+                    if (!firsts.count(n)) ++others;
+                }
+            }
+            if (!regions) continue;
+            if (used == track_count) { ++report.over_limit; continue; }
+            const unsigned index = used++;
+            auto& track = project.tracks[index];
+            track = Track {};
+            track.engine = EngineKind::Audio;
+            track.set_name(name.toRawUTF8());
+            const auto& mix = program["mixable"];
+            track.mix.level = level_of(number(mix, "volume", 0.7079));
+            track.mix.pan = pan_of(number(mix, "pan", 0.5));
+            track.mix.mute = flag(mix, "mute") || flag(source, "mute");
+            track.mix.solo = flag(mix, "solo");
+            for (const auto& [n, sequence] : sequences)
+                patterns.at[index][n].length = uint32_t(std::clamp<int64_t>(int64_t(number(*sequence, "lengthPulses", 3840) / mpc_ticks_per_tick), 1, project.max_length()));
+            for (const auto& [n, event] : firsts) {
+                const auto& audio = (*event)["audio"];
+                const std::string file = audio["sample"]["path"].toString().toStdString();
+                const fs::path wav = data_folder / file;
+                WavReader reader;
+                if (file.empty() || !reader.open(wav.string(), 6 * 3600).empty() || !reader.rate()) { ++report.missing; continue; }
+                auto known = take_of.find(wav.string());
+                unsigned take = known != take_of.end() ? known->second : unsigned(take_of.size() + 1);
+                if (known == take_of.end()) { take_of[wav.string()] = take; report.takes.emplace_back(take, wav.string()); }
+                const double k = 44100.0 / double(reader.rate()); // the file's frames counted at 44.1 kHz, as a take's are
+                auto model = [&](double frames) { return uint32_t(std::max(0.0, std::round(frames * k))); };
+                const double total = double(reader.frames());
+                const double start = std::clamp(number(audio, "sliceStart", 0), 0.0, total), end = std::clamp(number(audio, "sliceEnd", total), start, total);
+                AudioRegion r;
+                r.take = uint16_t(take);
+                r.offset = model(start);
+                r.frames = model(end - start);
+                r.take_frames = std::max(model(total), r.offset + r.frames);
+                r.tempo = tenths(number(audio, "tempo", 120));
+                const double volume = number(audio, "volume", 0.5011872);
+                r.gain = int16_t(volume > 0 ? std::clamp<long>(std::lround(200 * std::log10(volume / 0.5011872)), region_gain_min, region_gain_max) : region_gain_min);
+                r.reverse = flag(audio, "reverse");
+                r.fade_in = std::min(model(number(audio, "fadeIn", 0)), r.frames);
+                r.fade_out = std::min(model(number(audio, "fadeOut", 0)), r.frames);
+                r.warp = flag(audio, "warpEnable");
+                r.semi = int8_t(std::clamp(integer(audio, "coarseTune", 0), -24, 24));
+                r.fine = int8_t(std::clamp(integer(audio, "fineTune", 0), -50, 50));
+                if (!r.used()) continue;
+                patterns.at[index][n].audio = r;
+                ++report.regions;
+            }
+            report.regions_left_out += others;
+            continue;
+        }
         const auto* instruments = program["drum"]["instruments"].getArray();
         if (!instruments) continue; // submixes and outputs are tracks in the file too
         const auto name = source["name"].toString();
