@@ -26,6 +26,7 @@
 #include "melodee/shell/xpm_write.h"
 #include <juce_core/juce_core.h>
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -177,7 +178,9 @@ bool is_wav(const SampleRef& ref) { return ref.used() && !ref.instrument() && wa
 // The project's WAV files, each copied once into the data folder under a name of its own.
 class Files {
 public:
-    explicit Files(fs::path f) : folder(std::move(f)) {}
+    // `in_place`: the files are in the data folder already, under their own names (a track file written beside a
+    // program's folder): nothing is copied.
+    explicit Files(fs::path f, bool in_place = false) : folder(std::move(f)), in_place(in_place) {}
     // The copy's name in the data folder for the file at `source` (named after `stem` when given; a print of more
     // than two channels made stereo); empty when the file is not there, so nothing names it (MPC 3 stops on opening
     // a project that names a sample it cannot find).
@@ -186,6 +189,27 @@ public:
         if (found != names.end()) return found->second;
         std::error_code missing_error;
         if (!fs::exists(source, missing_error)) { ++report.missing; return names[source] = std::string(); }
+        if (in_place) {
+            // Under the name the folder has it by: a program names "X.WAV" and a card finds "X.wav" for it, where an
+            // MPC's own drive would not.
+            std::string own = fs::path(source).filename().string();
+            if (listed.empty()) {
+                std::error_code list_error;
+                for (const auto& entry : fs::directory_iterator(folder, list_error)) {
+                    std::string name = entry.path().filename().string(), key = name;
+                    for (auto& c : key) c = char(std::tolower(static_cast<unsigned char>(c)));
+                    listed[key] = name;
+                }
+            }
+            std::string key = own;
+            for (auto& c : key) c = char(std::tolower(static_cast<unsigned char>(c)));
+            if (auto there = listed.find(key); there != listed.end()) own = there->second;
+            taken.insert(own);
+            infos[own] = wav_of(source);
+            ++report.samples;
+            order.push_back(own);
+            return names[source] = own;
+        }
         auto stem = own_stem.empty() ? fs::path(source).stem().string() : own_stem;
         std::string file = stem + ".wav";
         for (unsigned n = 2; taken.count(file); ++n) file = stem + " " + std::to_string(n) + ".wav";
@@ -212,6 +236,8 @@ public:
     const std::vector<std::string>& all() const { return order; }
 private:
     fs::path folder;
+    bool in_place = false;
+    std::map<std::string, std::string> listed; // in place: the folder's files by their names in lower case
     std::map<std::string, std::string> names;
     std::map<std::string, Wav> infos;
     std::set<std::string> taken;
@@ -419,6 +445,125 @@ struct Written {
     bool keyed = false;    // a KEYGROUP track's: its notes MIDI notes (60 + the tune's semitones on an instrument)
 };
 
+
+// A pad's sounds as MPC 3 gets them: a drum pad's layers, or keygroups. An instrument's program keeps its Mono and
+// Portamento (engine/sfz.h SfzRead) on the keygroup track it becomes.
+struct PadPlan {
+    std::vector<Layer> drum;
+    std::vector<Keygroup> keys;
+    bool instrument = false, mono = false, legato = false, tied = false;
+    double glide = 0;
+};
+
+// An instrument's zones as keygroups, by their keys in the order they come (128 at most).
+void plan_keygroups(std::vector<std::pair<SampleZone, Layer>>& zones, const SfzRead& read, PadPlan& plan, Mpc3Export& report) {
+    plan.instrument = true;
+    plan.mono = read.mono; plan.legato = read.legato; plan.tied = read.tied; plan.glide = read.glide;
+    for (auto& [zone, layer] : zones) {
+        auto same = std::find_if(plan.keys.begin(), plan.keys.end(), [&](const Keygroup& k) {
+            return k.low_key == zone.low_key && k.high_key == zone.high_key && k.attack == zone.attack && k.release == zone.release;
+        });
+        if (same == plan.keys.end()) {
+            if (plan.keys.size() == mpc_pads) { ++report.skipped_pads; continue; }
+            Keygroup made;
+            made.low_key = zone.low_key;
+            made.high_key = zone.high_key;
+            made.one_shot = zone.one_shot;
+            made.attack = zone.attack; made.release = zone.release;
+            plan.keys.push_back(made);
+            same = plan.keys.end() - 1;
+        }
+        same->layers.push_back(std::move(layer));
+    }
+}
+
+// The MPC's samples list of a program or a project.
+juce::var samples_of(const std::vector<std::string>& used) {
+    std::vector<juce::var> list;
+    for (const auto& file : used) list.push_back(Files::sample_entry(file));
+    return array_of(std::move(list));
+}
+
+// A pad's keygroups as MPC 3's Keygroup track `track_name`, a copy of the template's (its mix and mute are the
+// caller's); void when none of them has a file. `pad`: the pad they play on (level, tune, envelope, filter).
+juce::var keygroup_track(const juce::var& doc, const PadPlan& plan, const PadSound& pad, const std::string& track_name, double tempo,
+                         Files& files, Mpc3Export& report) {
+    juce::var made = field(doc, "keygroupTrack").clone();
+    put(made, "name", juce::String(track_name));
+    const auto& program = field(made, "program");
+    put(program, "name", juce::String(track_name));
+    juce::Array<juce::var> instruments;
+    std::vector<std::string> used;
+    unsigned groups = 0;
+    for (unsigned k = 0; k < mpc_pads; ++k) {
+        juce::var instrument = field(doc, "keygroupPad").clone();
+        if (k < plan.keys.size()) {
+            const auto& group = plan.keys[k];
+            if (fill_layers(instrument, group.layers, true, files, used, report)) {
+                // An instrument's notes carry the pad's pitch in their keys; a WAV pad's keygroup carries it in its tune.
+                fill_sound(instrument, pad, false, plan.instrument ? 0 : pad.pitch, group.one_shot);
+                put(instrument, "lowNote", whole(group.low_key));
+                put(instrument, "highNote", whole(group.high_key));
+                put(instrument, "triggerMode", whole(group.one_shot ? 0 : 2));
+                if (plan.instrument) {
+                    // An instrument's attack and release as the MPC's 0..1 for the seconds Melodee plays them
+                    // in (its zones' own stages over the pad's): what read_keygroup() made of them, back.
+                    const auto& amp = field(field(instrument, "synthSection"), "ampEnvelope");
+                    const float attack = time_seconds(std::clamp(pad.attack + group.attack, 0, 100)) * 0.3f;
+                    const float release = time_seconds(std::clamp(pad.release + group.release, 0, 100)) * 0.5f + 0.003f;
+                    put(field(amp, "Attack"), "value0", real(xpm_envelope_value(attack)));
+                    put(field(amp, "Release"), "value0", real(xpm_envelope_value(release)));
+                }
+                if (!plan.instrument) {
+                    const auto& first = group.layers.front();
+                    fill_warp(instrument, pad, first, files.info(files.name(first.source, report)), tempo);
+                }
+                ++groups;
+            }
+        }
+        instruments.add(instrument);
+    }
+    if (!groups) return juce::var();
+    put(field(program, "drum"), "instruments", juce::var(instruments));
+    put(field(program, "keygroup"), "numKeygroups", whole(int(groups)));
+    if (plan.mono) { // MPC 3's Mono and Portamento, as the program read had them
+        const auto& voices = field(program, "drum");
+        put(voices, "monophonic", true);
+        put(voices, "portamentoTime", real(mpc_portamento_value(plan.glide)));
+        put(voices, "portamentoLegato", plan.legato);
+        put(voices, "monoRetrigger", !plan.tied); // Mono Retrig: a key pressed while one is held starts the note again
+    }
+    put(program, "samples", samples_of(used));
+    retarget_tracks(made, {}, juce::String(track_name));
+    return made;
+}
+
+// The template's five header lines (its kind `kind`: a project's, a track's), then {"data": ...}, gzipped, as `out`.
+std::string write_document(const juce::var& doc, const char* kind, const juce::var& data, const fs::path& out) {
+    juce::String text;
+    if (const auto* header = field(doc, "header").getArray())
+        for (int n = 0; n < header->size(); ++n) text << (n == 2 ? juce::String(kind) : header->getReference(n).toString()) << "\n";
+    auto root = object();
+    put(root, "data", data);
+    text << juce::JSON::toString(root);
+    fs::path temporary = out;
+    temporary += ".part";
+    {
+        juce::FileOutputStream file(juce::File(temporary.string()));
+        if (!file.openedOk()) return "Cannot write " + out.string();
+        file.setPosition(0);
+        file.truncate();
+        juce::GZIPCompressorOutputStream packed(file, 6, juce::GZIPCompressorOutputStream::windowBitsGZIP);
+        const auto utf8 = text.toUTF8();
+        if (!packed.write(utf8.getAddress(), utf8.sizeInBytes() - 1)) return "Cannot write " + out.string();
+        packed.flush();
+    }
+    std::error_code error;
+    fs::rename(temporary, out, error);
+    if (error) return "Cannot write " + out.string();
+    return {};
+}
+
 } // namespace
 
 std::string export_mpc3_project(const Project& project, const PatternBank& patterns, const std::string& folder,
@@ -442,11 +587,6 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
             taken.insert(buses.back().first);
         }
     const auto& pad_notes = field(field(field(doc, "drumTrack"), "program"), "padNoteMap")["noteForPad"];
-    auto samples_of = [](const std::vector<std::string>& used) {
-        std::vector<juce::var> list;
-        for (const auto& file : used) list.push_back(Files::sample_entry(file));
-        return array_of(std::move(list));
-    };
     auto program_mix = [](const juce::var& program, const Mix& mix) {
         const auto& mixable = field(program, "mixable");
         put(mixable, "volume", real(mpc_volume(mix.level)));
@@ -543,8 +683,6 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
                         noted[e.key - sampler_first_note] = true;
                         pitched[e.key - sampler_first_note] = pitched[e.key - sampler_first_note] || e.pitch;
                     }
-        // An instrument's program keeps its Mono and Portamento (engine/sfz.h SfzRead) on the keygroup track it becomes.
-        struct PadPlan { std::vector<Layer> drum; std::vector<Keygroup> keys; bool instrument = false, mono = false, legato = false; double glide = 0; };
         std::array<PadPlan, sampler_pads> plans;
         for (unsigned n = 0; n < (keyed ? 1u : sampler_pads); ++n) {
             const auto& pad = track.pads[n];
@@ -574,24 +712,7 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
                 }
                 continue;
             }
-            plan.instrument = true;
-            plan.mono = read.mono; plan.legato = read.legato; plan.glide = read.glide;
-            for (auto& [zone, layer] : zones) { // keygroups by their keys, in the order they come
-                auto same = std::find_if(plan.keys.begin(), plan.keys.end(), [&](const Keygroup& k) {
-                    return k.low_key == zone.low_key && k.high_key == zone.high_key && k.attack == zone.attack && k.release == zone.release;
-                });
-                if (same == plan.keys.end()) {
-                    if (plan.keys.size() == mpc_pads) { ++report.skipped_pads; continue; }
-                    Keygroup made;
-                    made.low_key = zone.low_key;
-                    made.high_key = zone.high_key;
-                    made.one_shot = zone.one_shot;
-                    made.attack = zone.attack; made.release = zone.release;
-                    plan.keys.push_back(made);
-                    same = plan.keys.end() - 1;
-                }
-                same->layers.push_back(std::move(layer));
-            }
+            plan_keygroups(zones, read, plan, report);
         }
 
         // The kit: its pads, unless all of them went to keygroup tracks and no note is left for it.
@@ -632,59 +753,15 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
             const auto& plan = plans[n];
             if (plan.keys.empty()) continue;
             const auto& pad = track.pads[n];
-            juce::var made = field(doc, "keygroupTrack").clone();
             char label[4], fallback[48];
             pad_label(n, label);
             std::snprintf(fallback, sizeof(fallback), "%s %s", track.name[0] ? track.name : "Keys", label);
             const std::string own = keyed ? std::string(track.name) : std::string(project.samples[pad.sample % sample_slots].name);
             const std::string track_name = unique_name(own, fallback, taken);
-            put(made, "name", juce::String(track_name));
+            juce::var made = keygroup_track(doc, plan, pad, track_name, project.tempo / 10.0, files, report);
+            if (made.isVoid()) continue;
             put(made, "mute", track.mix.mute || track.pad_muted(n));
-            const auto& program = field(made, "program");
-            put(program, "name", juce::String(track_name));
-            program_mix(program, track.mix);
-            juce::Array<juce::var> instruments;
-            std::vector<std::string> used;
-            unsigned groups = 0;
-            for (unsigned k = 0; k < mpc_pads; ++k) {
-                juce::var instrument = field(doc, "keygroupPad").clone();
-                if (k < plan.keys.size()) {
-                    const auto& group = plan.keys[k];
-                    if (fill_layers(instrument, group.layers, true, files, used, report)) {
-                        // An instrument's notes carry the pad's pitch in their keys; a WAV pad's keygroup carries it in its tune.
-                        fill_sound(instrument, pad, false, plan.instrument ? 0 : pad.pitch, group.one_shot);
-                        put(instrument, "lowNote", whole(group.low_key));
-                        put(instrument, "highNote", whole(group.high_key));
-                        put(instrument, "triggerMode", whole(group.one_shot ? 0 : 2));
-                        if (plan.instrument) {
-                            // An instrument's attack and release as the MPC's 0..1 for the seconds Melodee plays them
-                            // in (its zones' own stages over the pad's): what read_keygroup() made of them, back.
-                            const auto& amp = field(field(instrument, "synthSection"), "ampEnvelope");
-                            const float attack = time_seconds(std::clamp(pad.attack + group.attack, 0, 100)) * 0.3f;
-                            const float release = time_seconds(std::clamp(pad.release + group.release, 0, 100)) * 0.5f + 0.003f;
-                            put(field(amp, "Attack"), "value0", real(xpm_envelope_value(attack)));
-                            put(field(amp, "Release"), "value0", real(xpm_envelope_value(release)));
-                        }
-                        if (!plan.instrument) {
-                            const auto& first = group.layers.front();
-                            fill_warp(instrument, pad, first, files.info(files.name(first.source, report)), project.tempo / 10.0);
-                        }
-                        ++groups;
-                    }
-                }
-                instruments.add(instrument);
-            }
-            if (!groups) continue;
-            put(field(program, "drum"), "instruments", juce::var(instruments));
-            put(field(program, "keygroup"), "numKeygroups", whole(int(groups)));
-            if (plan.mono) { // MPC 3's Mono and Portamento, as the program read had them
-                const auto& voices = field(program, "drum");
-                put(voices, "monophonic", true);
-                put(voices, "portamentoTime", real(mpc_portamento_value(plan.glide)));
-                put(voices, "portamentoLegato", plan.legato);
-            }
-            put(program, "samples", samples_of(used));
-            retarget_tracks(made, {}, juce::String(track_name));
+            program_mix(field(made, "program"), track.mix);
             written.push_back({t, int(n), plan.instrument, track_name, made, false, keyed});
             ++report.keygroups;
         }
@@ -918,28 +995,34 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
     put(field(data, "info"), "title", juce::String(name));
     retarget_tracks(data, std::set<std::string>(names.begin(), names.end()), juce::String(written.front().name));
 
-    // Five header lines, then {"data": ...}, gzipped.
-    juce::String text;
-    if (const auto* header = field(doc, "header").getArray())
-        for (const auto& line : *header) text << line.toString() << "\n";
-    auto root = object();
-    put(root, "data", data);
-    text << juce::JSON::toString(root);
-    const fs::path out = where / (name + ".xpj");
-    const fs::path temporary = where / (name + ".xpj.part");
-    {
-        juce::FileOutputStream file(juce::File(temporary.string()));
-        if (!file.openedOk()) return "Cannot write " + out.string();
-        file.setPosition(0);
-        file.truncate();
-        juce::GZIPCompressorOutputStream packed(file, 6, juce::GZIPCompressorOutputStream::windowBitsGZIP);
-        const auto utf8 = text.toUTF8();
-        if (!packed.write(utf8.getAddress(), utf8.sizeInBytes() - 1)) return "Cannot write " + out.string();
-        packed.flush();
-    }
-    fs::rename(temporary, out, error);
-    if (error) return "Cannot write " + out.string();
-    return {};
+    return write_document(doc, "SerialisableProjectData", data, where / (name + ".xpj"));
+}
+
+std::string write_mpc3_track(const std::string& program, const std::string& file) {
+    const juce::var doc = read_template();
+    if (!field(doc, "keygroupTrack").isObject() || !field(doc, "keygroupPad").isObject()) return "MPC 3 template unreadable";
+    const fs::path out(file), data = fs::path(program).parent_path();
+    if (data.filename().string() != out.stem().string() + "_[TrackData]" || data.parent_path() != out.parent_path())
+        return "The program is not in " + out.stem().string() + "_[TrackData]";
+    Mpc3Export report;
+    std::string why;
+    const SfzRead read = read_instrument(program, &why);
+    auto zones = instrument_layers(program, read, report);
+    if (zones.empty()) return why.empty() ? std::string("No keygroups") : why;
+    PadPlan plan;
+    plan_keygroups(zones, read, plan, report);
+    // The pad as a Load lands the program (shell/sample_files.cpp): poly, the envelope most of its zones have.
+    PadSound pad;
+    pad.mono = false;
+    const auto& e = read.envelope;
+    if (e.attack) pad.attack = uint8_t(*e.attack > 0 ? sfz_attack_step(*e.attack) : 0);
+    if (e.decay) pad.decay = uint8_t(sfz_decay_step(*e.decay));
+    if (e.sustain) pad.sustain = uint8_t(sfz_percent_step(*e.sustain));
+    if (e.release) pad.release = uint8_t(sfz_release_step(*e.release));
+    Files files(data, true);
+    const juce::var made = keygroup_track(doc, plan, pad, out.stem().string(), 120.0, files, report);
+    if (made.isVoid()) return "No keygroups";
+    return write_document(doc, "SerialisableTrackData", made, out);
 }
 
 } // namespace melodee

@@ -32,6 +32,14 @@ ProbeGlide probe_glide(const std::vector<float>& x, const std::vector<float>& al
 // The second of two keys played apart (it starts at `onset`): whether it starts at the first key's pitch and slides
 // (a portamento that is not legato).
 bool probe_slides_apart(const std::vector<float>& x, size_t onset, float from_hz, float to_hz, float rate);
+// Two keys played legato on a mono instrument: whether the second starts the sound again, as a press alone does, or
+// the first's note carries on at the new pitch (a 303's slide, a synth's single trigger). `both`: the second pressed
+// at `onset` while the first is held; `alone`: the first key held alone; `fresh`: the second key alone, from frame 0.
+// A held note moves on from how it starts (it fades, its filter closes, it swells): over the 0.3 s after `onset`,
+// 40 ms at a time in level and brightness, a note started again is back where the sound starts and one carried on is
+// where the held note has got to. 1: it starts again; 0: it carries on; -1: not told, the held note being by then
+// within 2 dB of how it starts (either way sounds the same).
+int probe_retriggers(const std::vector<float>& both, const std::vector<float>& alone, const std::vector<float>& fresh, size_t onset, float rate);
 
 // A key held (x[from, to): the held part, past its attack): whether it sustains, so a loop there plays on for as long
 // as the key is held: its level over the last quarter within `most` dB of its level over the first (a tremolo's

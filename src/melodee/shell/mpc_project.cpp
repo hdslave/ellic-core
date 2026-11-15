@@ -420,6 +420,8 @@ std::string program_tree(const juce::var& program, const std::string& data_folde
     out.tags["Mono"] = flag(voices, "monophonic") ? "True" : "False";
     out.tags["PortamentoTime"] = std::to_string(number(voices, "portamentoTime", 0));
     out.tags["PortamentoLegato"] = flag(voices, "portamentoLegato") ? "True" : "False";
+    // Mono Retrig (MPC 3.9): a key pressed while one is held starts the note again. A project saved before it has none.
+    if (!voices["monoRetrigger"].isVoid()) out.tags["MonoRetrigger"] = flag(voices, "monoRetrigger") ? "True" : "False";
     for (int n = 0; n < std::min(instruments->size(), mpc_pads); ++n)
         out.instruments.push_back(instrument_tags(instruments->getReference(n), n + 1, data_folder));
     return {};

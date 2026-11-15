@@ -270,6 +270,10 @@ SfzRead read_keygroup(const KeygroupProgram& program) {
     if (auto transpose = number_at(p, "KeygroupMasterTranspose"); transpose && std::fabs(*transpose - 0.5) > 1e-6) read.ignored.insert("KeygroupMasterTranspose");
     read.mono = flag_at(p, "Mono").value_or(false);
     read.legato = flag_at(p, "PortamentoLegato").value_or(false);
+    // Mono Retrig, MPC 3's (monoRetrigger in its projects; the auto sampler writes it in an .xpm, which has no tag
+    // of its own for it): whether a key pressed while one is held starts the note again. A program without it (an
+    // MPC 2's, an earlier auto sample's) carries the note on where its portamento is Legato, as before.
+    read.tied = !flag_at(p, "MonoRetrigger").value_or(!read.legato);
     read.glide = mpc_portamento_seconds(number_at(p, "PortamentoTime").value_or(0));
     bool velocity_taken = false;
     for (const auto& instrument : program.instruments) {

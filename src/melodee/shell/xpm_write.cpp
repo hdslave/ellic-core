@@ -223,6 +223,7 @@ std::string xpm_text(const XpmProgram& program) {
     t("PortamentoTime", program.glide > 0 ? mpc_portamento_value(program.glide) : 0.0);
     t.flag("PortamentoLegato", program.legato);
     t.flag("PortamentoQuantized", false);
+    t.flag("MonoRetrigger", program.mono && !program.tied);
     t("Program.Xfader.Route", 0);
     t("KeygroupMasterTranspose", 0.5);
     t("KeygroupNumKeygroups", int(count));

@@ -412,16 +412,22 @@ void SamplerEngine::zones_on(Multisample& multi, const PadSound& sound, int pad,
     const int owner = trigger >= 0 ? trigger : pad;
     // Roadmap P3: a keyswitch picks the zones that play from now on and sounds nothing of itself (nor cuts what sounds).
     if (multi.switch_low >= 0 && key >= multi.switch_low && key <= multi.switch_high) { multi.switched = int16_t(key); return; }
-    // A mono program (an MPC keygroup's Mono and Portamento): with Legato, a key pressed while one is held carries that
-    // note on to it, no new attack, sliding there; else the press starts afresh, sliding from the last key.
+    // A mono program (an MPC keygroup's Mono and Portamento). Tied: a key pressed while one is held carries that note
+    // on to it, no new attack, sliding there. Else the press starts afresh, its pitch sliding from the last key: with
+    // Legato only from a key still held (one let go before starts at its own pitch), without it always.
     const bool mono = multi.mono && pad >= 0 && pad < int(sampler_pads);
-    if (mono && multi.legato && trigger < 0 && carry(pad, semitones, multi.glide)) {
+    if (mono && multi.tied && trigger < 0 && carry(pad, semitones, multi.glide)) {
         key_velocity[size_t(key)] = uint8_t(vel); key_since[size_t(key)] = played_frames;
         mono_key[size_t(pad)] = int8_t(key);
         return;
     }
-    // Legato: a press after the last key was let go starts at its own pitch; only without Legato does it slide there.
-    const int glide_from = mono && !multi.legato && multi.glide > 0 ? mono_key[size_t(pad)] : -1;
+    int glide_from = -1;
+    if (mono && multi.glide > 0) {
+        bool held = !multi.legato;
+        for (const auto& v : voices)
+            held = held || (v.zone && v.pad == pad && v.trigger == owner && v.held && !v.choked && v.env.stage != dsp::Envelope::Stage::Release);
+        if (held) glide_from = mono_key[size_t(pad)];
+    }
     if (mono) mono_key[size_t(pad)] = int8_t(key);
     for (auto& v : voices)
         if (v.zone && v.pad == pad && v.trigger == owner && v.key == key && v.held) { v.held = false; if (v.gate) { v.env.gate(false); v.filter_env.gate(false); } }

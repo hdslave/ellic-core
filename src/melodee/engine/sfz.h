@@ -38,8 +38,9 @@ struct SfzRead {
     SfzEnvelope envelope;
     double velocity = 100;         // percent: its first region's amp_veltrack
     // An MPC keygroup program's Mono and Portamento: one note at a time; the pitch slides to a new key over `glide`
-    // seconds (0: it jumps); with `legato` a key pressed while another is held carries that note on without a new attack.
-    bool mono = false, legato = false;
+    // seconds (0: it jumps); with `legato` only from a key still held. `tied`: a key pressed while another is held
+    // carries that note on without a new attack (else it starts again).
+    bool mono = false, legato = false, tied = false;
     double glide = 0;
 };
 

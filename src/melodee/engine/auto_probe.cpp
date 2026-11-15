@@ -104,6 +104,38 @@ bool probe_slides_apart(const std::vector<float>& x, size_t onset, float from_hz
     return hz > 0 && std::fabs(semitones(hz, to_hz)) > 1.0f && std::fabs(semitones(hz, from_hz)) < std::fabs(semitones(hz, to_hz));
 }
 
+int probe_retriggers(const std::vector<float>& both, const std::vector<float>& alone, const std::vector<float>& fresh, size_t onset, float rate) {
+    const size_t win = size_t(0.04f * rate), hop = size_t(0.02f * rate), count = 14; // to 0.3 s
+    const size_t reach = (count - 1) * hop + win;
+    if (!win || both.size() < onset + reach || alone.size() < onset + reach || fresh.size() < reach) return -1;
+    // Level in dB and brightness as dB (a doubling 6): nothing told of the brightness of a window near silence.
+    struct Heard { float db, bright; };
+    auto heard = [&](const std::vector<float>& x, size_t from) {
+        const float db = probe_db(x, from, win), hz = db > -80.0f ? probe_brightness(x, from, win, rate) : 0.0f;
+        return Heard {std::max(db, -100.0f), hz > 0 ? 20.0f * std::log10(hz) : 0.0f};
+    };
+    auto apart = [](const Heard& a, const Heard& b) { return Heard {a.db - b.db, a.bright != 0 && b.bright != 0 ? a.bright - b.bright : 0.0f}; };
+    // What the second key itself changes against the first, each from its start.
+    Heard key {0, 0};
+    for (size_t i = 0; i < count; ++i) {
+        const Heard d = apart(heard(fresh, i * hop), heard(alone, i * hop));
+        key.db += d.db / float(count); key.bright += d.bright / float(count);
+    }
+    // How far the held note has moved on from its start, and how much of that the legato note takes back.
+    double moved = 0, back = 0;
+    for (size_t i = 0; i < count; ++i) {
+        const Heard start = heard(alone, i * hop), later = heard(alone, onset + i * hop), legato = heard(both, onset + i * hop);
+        const Heard on = apart(start, later);
+        Heard jump = apart(legato, later);
+        jump.db -= key.db;
+        if (jump.bright != 0) jump.bright -= key.bright;
+        moved += double(on.db) * on.db + double(on.bright) * on.bright;
+        back += double(jump.db) * on.db + double(jump.bright) * on.bright;
+    }
+    if (moved / double(count) < 4.0) return -1;
+    return back > 0.5 * moved ? 1 : 0;
+}
+
 bool probe_sustains(const std::vector<float>& x, size_t from, size_t to, float rate, float most) {
     to = std::min(to, x.size());
     if (to <= from + size_t(0.4f * rate)) return false;

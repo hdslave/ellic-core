@@ -229,7 +229,7 @@ public:
     static std::vector<std::string> internal_tops();
 
 private:
-    struct Request { uint8_t slot = 0; char path[160] {}; };
+    struct Request { uint8_t slot = 0; char path[sizeof(SampleRef::path)] {}; };
     void scan();
     void make(const SampleJob& job);
     void hear(const std::string& path);

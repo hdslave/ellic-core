@@ -38,8 +38,11 @@ struct XpmProgram {
     std::vector<XpmKeygroup> keygroups; // 128 at most, in key order
     double release = 0.05;              // seconds after the key is let go (the samples hold their own release)
     // Mono and Portamento (engine/keygroup.h mpc_portamento_value()): one note at a time, the pitch sliding to a new
-    // key over `glide` seconds (0: none); with `legato` only a key pressed while another is held slides, no new attack.
-    bool mono = false, legato = false;
+    // key over `glide` seconds (0: none); with `legato` only a key pressed while another is held slides. `tied`: such
+    // a key carries the held note on, no new attack; else it starts again. That is MPC 3's Mono Retrig
+    // (monoRetrigger in its projects and track files, <MonoRetrigger> here, after PortamentoQuantized as MPC 3 has
+    // them); an MPC 2 has no such setting, passes the tag over and always starts the note again.
+    bool mono = false, legato = false, tied = false;
     double glide = 0;
 };
 

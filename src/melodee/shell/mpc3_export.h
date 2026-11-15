@@ -44,4 +44,11 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
                                 const std::string& name, Mpc3Export& report, const PrintTable* prints = nullptr,
                                 const std::string& prints_dir = {});
 
+// A keygroup program (an .xpm, MPC 2's file, with its WAV files beside it) as MPC 3's track file `file`
+// ("<name>.xty": the same gzip and header around one Keygroup track). MPC 3 looks for a track's samples in
+// "<name>_[TrackData]" beside the file: that is the folder the program and its WAV files must be in, so nothing is
+// copied. It carries what an .xpm has no tag for (Mono Retrig). Empty on success. Reads files: never on the MIDI or
+// audio thread.
+std::string write_mpc3_track(const std::string& program, const std::string& file);
+
 } // namespace melodee

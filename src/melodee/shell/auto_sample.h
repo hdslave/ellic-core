@@ -32,6 +32,9 @@ struct AutoFindings {
     AutoKind kind = AutoKind::Keys;
     float glide = 0;
     bool legato = true;
+    // Mono: a key pressed while another is held carries that note on to it, no new attack (a 303's slide, a synth's
+    // single trigger); false: it starts the sound again, as the plug-in was heard to (probe_retriggers()).
+    bool tied = true;
     uint8_t accent = 0;
     uint8_t takes = 1;
     bool sustains = false;
