@@ -76,9 +76,9 @@ enum class StageKind : uint8_t {
     PluginEdit,        // a PLUGIN track's own parameters, three a row; the wheel moves the rows
     OpenEdit,          // a button that opens the Edit page instead of a Stage page (a MIDI track's B3: its every page)
     NewSynth, NewKit, NewMidi,                         // an empty track: what it becomes (Push)
-    // Freeze plan F3, an audio track: the region at the Song cursor (or the next one): CLIP its level, start and end;
-    // FADES its fade in, fade out and reverse; WARP its BPM, semitones and cents; MODE warp on or off and how.
-    Clip, Fades, Warp, WarpMode,
+    // Freeze plan F3, an audio track: the take of the pattern in hand (CLIP its level, start and end; FADES its fade in,
+    // fade out and reverse), and what it records (INPUT: source, monitor, gain).
+    Clip, Fades, AudioInput,
 };
 // What the picture over the knobs draws.
 enum class StagePicture : uint8_t {
@@ -91,7 +91,8 @@ enum class StagePicture : uint8_t {
     Mix, Sends, Arp, Chord, Fx, Wave, Route, Program, Cc, Engines, Sources, Ports,
     PluginSound, PluginEdit,
     Colours,   // a kit's bank as its pads sit, each in its colour, the last pad outlined
-    Region,    // freeze plan F3: an audio track's region in its take, its fades, its bars
+    Region,    // freeze plan F3: an audio track's pattern's take in its bars, its fades
+    Input,     // freeze plan F3: an audio track's pattern as it will record (or records), and the input's level
 };
 struct StagePage {
     const char* key = ""; // as the soft key names it: "AMP ENV"

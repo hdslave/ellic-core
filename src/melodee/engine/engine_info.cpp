@@ -106,13 +106,13 @@ const EngineInfo& engine_info(EngineKind kind) {
         {"KIND 3", 0, int16_t(MacroKind::End) - 1, 0, Format::Number}};
     static const EngineInfo plugin {EngineKind::Plugin, "PLUGIN", true, plugin_params, plugin_track::Count, nullptr, 0, {-1, -1, -1},
                                     plugin_sounds, 1, nullptr, 0, false, &plugin_stage};
-    // AUDIO (freeze plan F3, model/audio_track.h): records into the song and plays its regions; no values of its own.
-    // Its Stage pages are the regions' (stage_groups()); offered by the new-track picker, not among the engines.
+    // AUDIO (freeze plan F3, model/audio_track.h): records into its patterns and plays their takes; no values of its own.
+    // Offered by the new-track picker, not among the engines.
     static const Sound audio_sounds[] {{"AUDIO", {{{-1, 0}}}}};
-    // B1 the region (CLIP, FADES), B2 how it follows the tempo (WARP, MODE), B3 the track's mix, sends and effects.
+    // B1 the pattern's take (CLIP, FADES), B2 what records (INPUT), B3 the track's mix, sends and effects.
     static const StageGroups audio_stage {{{
         {{{{"CLIP", StageKind::Clip, StagePicture::Region}, {"FADES", StageKind::Fades, StagePicture::Region}}}, 2},
-        {{{{"WARP", StageKind::Warp, StagePicture::Region}, {"MODE", StageKind::WarpMode, StagePicture::Region}}}, 2},
+        {{{{"INPUT", StageKind::AudioInput, StagePicture::Input}}}, 1},
         {{{stage_mix, stage_sends, stage_fx}}, 3},
     }}};
     static const EngineInfo audio {EngineKind::Audio, "AUDIO", false, nullptr, 0, nullptr, 0, {-1, -1, -1}, audio_sounds, 1, nullptr, 0, false, &audio_stage};

@@ -16,16 +16,16 @@
 // pager pins about a second ahead of a voice. Past what is pinned a voice plays
 // silence (an underrun; just after a jump, a wait) and keeps its place.
 //
-// The song leads: on each tick the engine host names the region sounding there
-// and how far into it the song is. A voice started plays on at its own pace
-// (a tempo change does not move it); only a jump (Play, the loop coming round,
-// a locate) puts it where the song is, fading across.
+// The pattern leads: on each tick of the track's pattern the engine host names
+// its take and how far into the pattern it is. The take starts again each time
+// the pattern comes round; between, a voice plays on at its own pace (a tempo
+// change does not move it) and only a jump (a locate) puts it where the
+// pattern is, fading across.
 namespace melodee {
 
-// One region: frames [offset, offset + frames) of `take`, at song ticks [start, end).
+// A pattern's take as played: frames [offset, offset + frames) of `take`, from the pattern's top.
 struct RegionClip {
     ZonePart* take = nullptr;
-    uint32_t start = 0, end = 0;
     uint32_t offset = 0, frames = 0;    // the take's frames, at its own rate
     uint32_t fade_in = 0, fade_out = 0; // the take's frames
     float gain = 1;
@@ -34,17 +34,22 @@ struct RegionClip {
     uint32_t held = 0;     // frames from where it starts playing pinned for as long as the pack lives
 };
 
-// An audio track's regions, by start, and the takes they play. The MIDI thread makes it (shell/audio_tracks.cpp),
-// the audio thread plays it (Command::AudioPack) and hands it back to be freed once no voice reads it.
+// An audio track's patterns' takes (nullptr: none) and the files they play. The MIDI thread makes it
+// (shell/audio_tracks.cpp), the audio thread plays it (Command::AudioRegions) and hands it back to be freed once no
+// voice reads it.
 struct AudioPack {
     uint8_t track = 0;
-    std::vector<RegionClip> regions;
+    std::array<const RegionClip*, pattern_count> clips {};
+    std::vector<std::unique_ptr<RegionClip>> owned_clips;
     std::vector<std::unique_ptr<ZonePart>> takes;
     std::vector<std::vector<float>> owned; // tests: frames held whole (left, then right)
-    // The region sounding at song tick `tick`, or nullptr.
-    const RegionClip* at(uint32_t tick) const;
     // Tests: a take of `frames` frames at `rate`, `left` and `right` held whole; its index in `takes`.
     unsigned hold_take(std::vector<float> left, std::vector<float> right, float rate);
+    RegionClip& add(unsigned pattern) { // a clip for pattern `pattern`, owned here
+        owned_clips.push_back(std::make_unique<RegionClip>());
+        clips[pattern % pattern_count] = owned_clips.back().get();
+        return *owned_clips.back();
+    }
 };
 
 class RegionPlayer {
@@ -53,10 +58,11 @@ public:
     static constexpr float fade_seconds = 0.005f;
     static constexpr double slack = 256; // device frames a voice may be off the song after a jump before it moves
     void set_pager(StreamPager* p) { pager = p; }
-    // On a tick of the song: `clip` the region sounding there (nullptr: none), `into` the device frames from its
-    // start to this tick (unrounded), `jumped` when the song did not come here from the tick before.
-    void follow(const RegionClip* clip, double into, bool jumped, float rate);
-    void release(float rate);  // the region left: its voice fades out
+    // On a tick of the track's pattern: `clip` its take (nullptr: none), `into` the device frames from the pattern's top
+    // to this tick (unrounded), `top` when the pattern starts (again) here, `jumped` when it did not come here from the
+    // tick before.
+    void follow(const RegionClip* clip, double into, bool top, bool jumped, float rate);
+    void release(float rate);  // the pattern stopped or has no take: its voice fades out
     void fade_all(float rate); // its pack replaced: every voice fades out, marked as leaving
     void cut_all();            // every voice closed at once
     bool leaving() const;      // a voice from before fade_all() still sounds

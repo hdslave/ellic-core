@@ -943,7 +943,7 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
     // shell/song_export.cpp): each track's lane its clips' patterns end to end, each Audio track its clips' prints.
     const Song& song = project.song;
     int song_key = -1;
-    const unsigned song_bars = song.length(project.bar_ticks());
+    const unsigned song_bars = song.length();
     if (song_bars) {
         for (unsigned p = 0; p < pattern_count && song_key < 0; ++p) {
             bool free = true;

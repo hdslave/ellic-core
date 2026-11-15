@@ -6,13 +6,6 @@
 
 namespace melodee {
 
-const RegionClip* AudioPack::at(uint32_t tick) const {
-    auto after = std::upper_bound(regions.begin(), regions.end(), tick, [](uint32_t t, const RegionClip& r) { return t < r.start; });
-    if (after == regions.begin()) return nullptr;
-    const RegionClip& r = *(after - 1);
-    return tick < r.end ? &r : nullptr;
-}
-
 unsigned AudioPack::hold_take(std::vector<float> left, std::vector<float> right, float rate) {
     auto part = std::make_unique<ZonePart>();
     owned.push_back(std::move(left));
@@ -86,14 +79,17 @@ void RegionPlayer::retire_main(float rate) {
 
 void RegionPlayer::release(float rate) { retire_main(rate); }
 
-void RegionPlayer::follow(const RegionClip* clip, double into, bool jumped, float rate) {
+void RegionPlayer::follow(const RegionClip* clip, double into, bool top, bool jumped, float rate) {
     auto& m = voices[0];
     if (!clip) { if (m.clip) release(rate); return; }
     const double pos = into * double(clip->take ? clip->take->rate : rate) / std::max(1.0f, rate);
-    if (m.clip != clip) { // a region begins (at its top, or the song started inside it)
+    if (top) { // the pattern starts (again): its take from the top, what still sounds faded out
+        if (m.clip) retire_main(rate);
+        begin(clip, 0, false, rate);
+    } else if (m.clip != clip) { // another pattern's take, or Play inside the pattern: from where the pattern is
         if (m.clip) retire_main(rate);
         begin(clip, pos, pos > slack, rate);
-    } else if (jumped && std::fabs(m.pos - pos) > slack * m.step) { // somewhere else in it now
+    } else if (jumped && std::fabs(m.pos - pos) > slack * m.step) { // somewhere else in it now (a locate)
         retire_main(rate);
         begin(clip, pos, true, rate);
     }

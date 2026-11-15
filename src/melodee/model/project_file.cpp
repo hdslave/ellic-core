@@ -687,17 +687,19 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
         w.u8(unsigned(tr.audio.source)); w.u8(unsigned(tr.audio.monitor));
         w.end(at);
     }
-    for (unsigned n = 0; n < project.song.region_count; ++n) { // an audio track's region on its Song lane (freeze plan F3)
-        const auto& g = project.song.regions[n];
-        at = w.begin("AREG");
-        w.u8(1); // the section's version
-        w.u8(g.track); w.u16(g.take); w.u16(g.bar); w.u16(g.tick);
-        w.u32(g.offset); w.u32(g.frames); w.u32(g.take_frames); w.u16(g.tempo); w.i16(g.gain);
-        w.u32(g.fade_in); w.u32(g.fade_out);
-        w.u8(unsigned(g.reverse) | unsigned(g.muted) << 1 | unsigned(g.warp) << 2);
-        w.u8(unsigned(g.mode)); w.i16(g.semi); w.i16(g.fine);
-        w.end(at);
-    }
+    for (unsigned t = 0; t < track_count; ++t) // an audio track's pattern's take (freeze plan F3, model/audio_track.h)
+        for (unsigned p = 0; p < pattern_count; ++p) {
+            const auto& g = patterns.at[t][p].audio;
+            if (!g.used()) continue;
+            at = w.begin("PAUD");
+            w.u8(1); // the section's version
+            w.u8(t); w.u8(p); w.u16(g.take);
+            w.u32(g.offset); w.u32(g.frames); w.u32(g.take_frames); w.u16(g.tempo); w.i16(g.gain);
+            w.u32(g.fade_in); w.u32(g.fade_out);
+            w.u8(unsigned(g.reverse) | unsigned(g.warp) << 1);
+            w.u8(unsigned(g.mode)); w.i16(g.semi); w.i16(g.fine);
+            w.end(at);
+        }
     for (unsigned t = 0; t < track_count; ++t) { // a PLUGIN track and the entry of PLUG it plays; TRAK said None
         const auto& tr = project.tracks[t];
         if (tr.engine != EngineKind::Plugin) continue;
@@ -1245,23 +1247,23 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
             tr.engine = EngineKind::Audio;
             tr.audio.source = InputSource(std::min<unsigned>(r.u8(), unsigned(InputSource::Count) - 1));
             tr.audio.monitor = TrackMonitor(std::min<unsigned>(r.u8(), unsigned(TrackMonitor::Count) - 1));
-        } else if (name == "AREG") { // a region on an audio track's lane (freeze plan F3); a later version is skipped
+        } else if (name == "PAUD") { // an audio track's pattern's take (freeze plan F3); a later version is skipped
             if (r.u8() != 1) continue;
+            unsigned t = r.u8(), p = r.u8();
             AudioRegion g;
-            g.track = uint8_t(r.u8()); g.take = uint16_t(r.u16()); g.bar = uint16_t(r.u16()); g.tick = uint16_t(r.u16());
+            g.take = uint16_t(r.u16());
             g.offset = r.u32(); g.frames = r.u32(); g.take_frames = r.u32();
             g.tempo = uint16_t(std::clamp<unsigned>(r.u16(), 300, 3000));
             g.gain = int16_t(std::clamp(r.i16(), region_gain_min, region_gain_max));
             g.fade_in = r.u32(); g.fade_out = r.u32();
             unsigned flags = r.u8();
-            g.reverse = flags & 1; g.muted = flags & 2; g.warp = flags & 4;
+            g.reverse = flags & 1; g.warp = flags & 2;
             g.mode = WarpMode(std::min<unsigned>(r.u8(), unsigned(WarpMode::Count) - 1));
             g.semi = int8_t(std::clamp(r.i16(), -24, 24)); g.fine = int8_t(std::clamp(r.i16(), -50, 50));
-            if (!r.ok || g.track >= track_count || !g.frames || !g.take || g.bar > song_bars) continue;
+            if (!r.ok || t >= track_count || p >= pattern_count || !g.used()) continue;
             g.take_frames = std::max(g.take_frames, g.offset + g.frames);
             g.fade_in = std::min(g.fade_in, g.frames); g.fade_out = std::min(g.fade_out, g.frames);
-            auto& song = project->song;
-            if (song.region_count < song.regions.size()) song.regions[song.region_count++] = g;
+            patterns->at[t][p].audio = g;
         } else if (name == "PLGT") { // a PLUGIN track; TRAK, before it, said None
             unsigned t = r.u8(), entry = r.u8();
             if (r.ok && t < track_count) {
@@ -1474,8 +1476,8 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
     }
     // From before keygroup tracks: each kit's instrument pad its own keygroup track (model/keygroup_track.h).
     if (!keygroups_known) migrate_instrument_pads(*project, *patterns);
-    for (unsigned t = 0; t < track_count; ++t) // freeze plan F3: regions only on audio tracks' lanes
-        if (project->tracks[t].engine != EngineKind::Audio) project->song.drop_regions(t);
+    for (unsigned t = 0; t < track_count; ++t) // freeze plan F3: takes only on audio tracks' patterns
+        if (project->tracks[t].engine != EngineKind::Audio) for (auto& p : patterns->at[t]) p.audio = AudioRegion {};
     target = *project;
     target_patterns = *patterns;
     if (version) *version = file_version;

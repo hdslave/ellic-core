@@ -139,13 +139,13 @@ struct Command {
         // A controller from MIDI in on a kit or PLUGIN track (a MIDI track's goes out as MidiEcho): track, index = the
         // CC number, value 0..127. Not CC 1: the mod wheel is Wheel.
         Control,
-        // Freeze plan F3: track, audio = its regions (engine/audio_player.h) to play from now; the pack it replaces
-        // goes back to be freed (EngineHost::take_done_audio). None: it plays nothing.
+        // Freeze plan F3: track, audio = its patterns' takes (engine/audio_player.h) to play from now; the pack it
+        // replaces goes back to be freed (EngineHost::take_done_audio). None: it plays nothing.
         AudioRegions,
-        // Freeze plan F3: a take for audio track `track` (EngineHost::audio_take()), recorded while the song plays
-        // from bar `index` to bar `value` (0: until Stop); value -1 cancels one armed.
+        // Freeze plan F3: a take for audio track `track` (EngineHost::audio_take()): value 0 arms it (it records one
+        // pass of the track's pattern from where the pattern next comes round), -1 lets one armed go, -2 ends it here.
         AudioRecord,
-        // Freeze plan F3: audio track `track`'s regions heard (value 0) or not (1: its monitor hears the input instead).
+        // Freeze plan F3: audio track `track`'s takes heard (value 0) or not (1: its monitor hears the input instead).
         AudioQuiet
 
     };

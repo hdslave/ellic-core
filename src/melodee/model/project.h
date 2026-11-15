@@ -2,7 +2,6 @@
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #pragma once
 #include "melodee/model/tempo_lane.h"
-#include "melodee/model/audio_track.h"
 #include "melodee/model/chop_slices.h"
 #include "melodee/model/compressor.h"
 #include "melodee/model/knob_fx.h"
@@ -38,7 +37,7 @@ namespace melodee {
 // DecentSampler preset, an .sf2 preset, or one WAV across the keys) on pad 1 of
 // the sampler, its notes MIDI notes (engine/sampler.h keyed); files keep it in
 // KGRP, TRAK says None, so older builds load the track empty.
-// Audio (freeze plan F3, model/audio_track.h): records its input into the song and plays its regions back; files keep
+// Audio (freeze plan F3, model/audio_track.h): records its input into its patterns and plays their takes; files keep
 // it in AUDT, TRAK says None.
 enum class EngineKind : uint8_t { None = 0, Sampler = 6, Midi = 7, Plugin = 8, Keygroup = 9, Audio = 10, Count = 11 };
 
@@ -168,95 +167,8 @@ struct Song {
             if (c.end() > to && count < clips.size()) { Clip tail = c; tail.bar = uint16_t(to); tail.bars = uint16_t(c.end() - to); clips[count++] = tail; }
         }
     }
-    // The bars the song runs: to the end of its last clip or region (`bar_ticks`: a bar's ticks, for the regions).
-    unsigned length(unsigned bar_ticks) const {
-        unsigned end = 0;
-        for (unsigned n = 0; n < count; ++n) end = std::max<unsigned>(end, clips[n].end());
-        bar_ticks = std::max(bar_ticks, 1u);
-        for (unsigned n = 0; n < region_count; ++n) end = std::max<unsigned>(end, (region_end(regions[n], bar_ticks) + bar_ticks - 1) / bar_ticks);
-        return end;
-    }
+    unsigned length() const { unsigned end = 0; for (unsigned n = 0; n < count; ++n) end = std::max<unsigned>(end, clips[n].end()); return end; }
     bool looping() const { return loop_end > loop_start; }
-
-    // Freeze plan F3: audio tracks' regions (model/audio_track.h), in no order; a lane's never overlap.
-    std::array<AudioRegion, song_regions> regions {};
-    uint16_t region_count = 0;
-    // The region of `track` sounding at song tick `at`, or -1.
-    int region_at(unsigned track, uint32_t at, unsigned bar_ticks) const {
-        for (unsigned n = 0; n < region_count; ++n) {
-            const auto& r = regions[n];
-            if (r.track == track && at >= region_start(r, bar_ticks) && at < region_end(r, bar_ticks)) return int(n);
-        }
-        return -1;
-    }
-    // The first region of `track` starting at or after `at`, or -1.
-    int region_after(unsigned track, uint32_t at, unsigned bar_ticks) const {
-        int best = -1;
-        for (unsigned n = 0; n < region_count; ++n) {
-            const auto& r = regions[n];
-            if (r.track != track || region_start(r, bar_ticks) < at) continue;
-            if (best < 0 || region_start(r, bar_ticks) < region_start(regions[size_t(best)], bar_ticks)) best = int(n);
-        }
-        return best;
-    }
-    // The region Stage edits: the one sounding at `at`, else the next one on, else -1.
-    int region_near(unsigned track, uint32_t at, unsigned bar_ticks) const {
-        int here = region_at(track, at, bar_ticks);
-        return here >= 0 ? here : region_after(track, at, bar_ticks);
-    }
-    void erase_region(unsigned index) {
-        if (index >= region_count) return;
-        for (unsigned n = index + 1; n < region_count; ++n) regions[n - 1] = regions[n];
-        regions[--region_count] = AudioRegion {};
-    }
-    // Clears song ticks [from, to) on an audio track's lane: the regions there shortened, split or gone; the part of
-    // a take after the cut keeps its place in time.
-    void cut_regions(unsigned track, uint32_t from, uint32_t to, unsigned bar_ticks) {
-        for (unsigned n = 0; n < region_count;) {
-            AudioRegion r = regions[n];
-            uint32_t start = region_start(r, bar_ticks), end = region_end(r, bar_ticks);
-            if (r.track != track || end <= from || start >= to) { ++n; continue; }
-            erase_region(n);
-            if (start < from) {
-                AudioRegion head = r;
-                head.frames = uint32_t(std::min<uint64_t>(r.frames, ticks_to_frames(from - start, r.tempo)));
-                head.fade_out = std::min(head.fade_out, head.frames);
-                if (head.frames) regions[region_count++] = head;
-            }
-            if (end > to && region_count < regions.size()) {
-                AudioRegion tail = r;
-                uint32_t skip = uint32_t(std::min<uint64_t>(r.frames, ticks_to_frames(to - start, r.tempo)));
-                tail.offset = r.offset + skip; tail.frames = r.frames - skip;
-                tail.fade_in = std::min(tail.fade_in, tail.frames);
-                set_region_start(tail, to, bar_ticks);
-                if (tail.frames) regions[region_count++] = tail;
-            }
-        }
-    }
-    // Adds a region, first clearing what it covers on its lane; false when full.
-    bool place_region(const AudioRegion& r, unsigned bar_ticks) {
-        cut_regions(r.track, region_start(r, bar_ticks), region_end(r, bar_ticks), bar_ticks);
-        if (region_count == regions.size() || !r.used()) return false;
-        regions[region_count++] = r;
-        return true;
-    }
-    // Every region of `track` gone (the track emptied or made another kind).
-    void drop_regions(unsigned track) {
-        for (unsigned n = 0; n < region_count;) if (regions[n].track == track) erase_region(n); else ++n;
-    }
-    // The regions of `track`'s lane by where they start (indices into `regions`); how many.
-    unsigned lane_regions(unsigned track, unsigned bar_ticks, std::array<uint16_t, song_regions>& out) const {
-        unsigned n = 0;
-        for (unsigned k = 0; k < region_count; ++k) if (regions[k].track == track) out[n++] = uint16_t(k);
-        std::sort(out.begin(), out.begin() + n, [&](uint16_t a, uint16_t b) { return region_start(regions[a], bar_ticks) < region_start(regions[b], bar_ticks); });
-        return n;
-    }
-    // The highest take number a region plays (0: none).
-    unsigned last_take() const {
-        unsigned most = 0;
-        for (unsigned n = 0; n < region_count; ++n) most = std::max<unsigned>(most, regions[n].take);
-        return most;
-    }
 
     // Markers: names come from a fixed list until there is a way to type
     // one (open question 9). step_marker() adds one at `bar`, or moves an

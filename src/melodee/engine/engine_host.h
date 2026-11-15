@@ -329,7 +329,8 @@ public:
     uint32_t audio_waits() const { return audio_waited.load(std::memory_order_relaxed); }
     Bounce& audio_take() { return audio_in; }
     const Bounce& audio_take() const { return audio_in; }
-    int audio_take_track() const { return audio_track.load(std::memory_order_relaxed); } // -1: none
+    int audio_take_track() const { return audio_track.load(std::memory_order_relaxed); }     // -1: none
+    int audio_take_pattern() const { return audio_pattern.load(std::memory_order_relaxed); } // -1: not begun
     uint32_t frozen_tracks() const { return frozen_now.load(std::memory_order_relaxed); }
     uint32_t printing_tracks() const { return printing_now.load(std::memory_order_relaxed); }
     uint32_t sleeping_tracks() const { return sleeping_now.load(std::memory_order_relaxed); }
@@ -459,8 +460,8 @@ private:
         float* print_r = nullptr;
         bool print_fed = false;
         Ease print_mix_l, print_mix_r;
-        // Freeze plan F3: an AUDIO track's engine (its regions' voices), its regions, ones replaced whose voices still
-        // fade, and the song tick it followed last (a jump when the next is not the one after).
+        // Freeze plan F3: an AUDIO track's engine (its takes' voices), its patterns' takes, ones replaced whose voices
+        // still fade, and the pattern tick it followed last (a jump when the next is not the one after).
         AudioTrackEngine audio;
         AudioPack* audio_pack = nullptr;
         AudioPack* audio_leaving = nullptr;
@@ -526,14 +527,12 @@ private:
     // Freeze plan F3: audio tracks.
     void set_audio(unsigned t, AudioPack* pack);
     void retire_audio(AudioPack* pack);
-    void audio_follow(Slot& slot);
-    unsigned song_end_bar() const;
+    void audio_tick(unsigned t, Slot& slot, uint32_t at);
     MidiQueue<64, AudioPack*> done_audio;
     std::array<AudioPack*, 16> audio_limbo {};
     std::atomic<uint32_t> audio_under {0}, audio_waited {0};
-    unsigned audio_from = 0, audio_to = 0; // its bars (audio_to 0: until Stop)
-    std::atomic<int> audio_track {-1};
-    bool audio_recording = false;     // a take armed or running: the song runs past its end
+    std::atomic<int> audio_track {-1};   // the track a take is armed or recording for
+    std::atomic<int> audio_pattern {-1}; // the pattern it is recording (from its first frame)
     std::array<FreezePack*, 16> freeze_limbo {};
     std::atomic<uint32_t> frozen_now {0}, printing_now {0}, sleeping_now {0}, print_under {0}, print_waited {0};
     // Roadmap P5: track t's follow action planned from where its pattern started (dice rolled now), and brought.

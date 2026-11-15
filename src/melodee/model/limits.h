@@ -33,7 +33,6 @@ constexpr unsigned max_pattern_events = 65535; // notes a pattern holds; an edit
 constexpr unsigned song_clips = 256;    // clips in the arrange view
 constexpr unsigned song_markers = 16;
 constexpr unsigned song_punches = 128;  // punches written into the song (Seq Record)
-constexpr unsigned song_regions = 256;  // freeze plan F3: audio tracks' regions (model/audio_track.h)
 constexpr unsigned song_bars = 999;
 constexpr unsigned song_tempo_points = 64; // roadmap P5: the song's tempo lane (model/tempo_lane.h)
 // Effects along the signal (open question 5: slot counts and four buses).

@@ -80,7 +80,7 @@ std::vector<uint8_t> write_smf(const std::vector<SmfTrack>& tracks, unsigned tem
 SmfTempos smf_tempos(const Project& project) {
     SmfTempos out;
     const auto& lane = project.song.tempo;
-    unsigned bars = project.song.length(project.bar_ticks());
+    unsigned bars = project.song.length();
     if (lane.empty() || !bars) return out;
     uint32_t bar = std::max(1u, project.bar_ticks());
     long was = std::lround(lane.at(0, project.tempo));
@@ -185,7 +185,7 @@ bool read_smf(const std::vector<uint8_t>& data, std::vector<SmfTrack>& out, std:
 std::vector<SmfTrack> smf_tracks(const Project& project, const PatternBank& patterns) {
     std::vector<SmfTrack> out;
     const auto& song = project.song;
-    unsigned bars = song.length(project.bar_ticks());
+    unsigned bars = song.length();
     for (unsigned t = 0; t < track_count; ++t) {
         const auto& tr = project.tracks[t];
         if (!tr.used()) continue;
