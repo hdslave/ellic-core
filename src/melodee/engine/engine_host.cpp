@@ -1657,7 +1657,7 @@ void EngineHost::bar_start() {
     if (tick_now) ++song_bar_now;
     bool rendering = bounce_song && render_out.running(); // the mixdown plays the song once, loop or not
     if (!rendering && song.looping() && song_bar_now == song.loop_end) song_bar_now = song.loop_start;
-    if ((rendering || !song.looping()) && !song_recording && song_bar_now >= std::max(song.length(), 1u)) { // the end of the song
+    if ((rendering || !song.looping()) && !song_recording && song_bar_now >= std::max(song.length(bar), 1u)) { // the end of the song
         running = false;
         if (rendering) render_out.tail(); // on until the mix falls silent
         for (auto& s : slots) { for (auto& off : s.offs) if (off.key >= 0) { engine_note_off(s, off.key); off.key = -1; } s.held = {}; }
@@ -1756,7 +1756,7 @@ void EngineHost::mtc_place(double seconds) {
         for (auto& s : slots) s.clip = -1; // every clip from the new place
         if (offset == 0) {
             song_bar_now = b ? b - 1 : 0; // the first tick's bar_start() moves it on to b (and finds its end)
-        } else if (!song.looping() && !song_recording && b >= std::max(song.length(), 1u)) {
+        } else if (!song.looping() && !song_recording && b >= std::max(song.length(bar), 1u)) {
             running = false; // past the song's end
             for (auto& s : slots) { for (auto& off : s.offs) if (off.key >= 0) { engine_note_off(s, off.key); off.key = -1; } s.held = {}; }
         } else {

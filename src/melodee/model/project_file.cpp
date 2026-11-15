@@ -245,9 +245,10 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
     for (unsigned t = 0; t < track_count; ++t) {
         const auto& tr = project.tracks[t];
         at = w.begin("TRAK");
-        // A MIDI, PLUGIN or KEYGROUP track is None here and itself in MIDT / PLGT / KGRP, so older builds load it empty
-        // (not as the engine after their last). A keygroup's instrument is its pad 1, kept with the pads as a kit's.
-        bool own_section = tr.engine == EngineKind::Midi || tr.engine == EngineKind::Plugin || tr.engine == EngineKind::Keygroup;
+        // A MIDI, PLUGIN, KEYGROUP or AUDIO track is None here and itself in MIDT / PLGT / KGRP / AUDT, so older builds
+        // load it empty (not as the engine after their last). A keygroup's instrument is its pad 1, kept with the pads as a kit's.
+        bool own_section = tr.engine == EngineKind::Midi || tr.engine == EngineKind::Plugin || tr.engine == EngineKind::Keygroup
+                        || tr.engine == EngineKind::Audio;
         w.u8(t); w.u8(own_section ? 0u : unsigned(tr.engine)); w.u16(tr.preset); w.text(tr.name);
         auto values = tr.params;
         if (tr.engine == EngineKind::Midi) // P1-P16's own programs where older builds kept them (Pattern::program now)
@@ -676,6 +677,25 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
         if (project.tracks[t].engine != EngineKind::Keygroup) continue;
         at = w.begin("KGRP");
         w.u8(t); w.u8(1); // the section's version
+        w.end(at);
+    }
+    for (unsigned t = 0; t < track_count; ++t) { // an AUDIO track (freeze plan F3) and its source and monitor; TRAK said None
+        const auto& tr = project.tracks[t];
+        if (tr.engine != EngineKind::Audio) continue;
+        at = w.begin("AUDT");
+        w.u8(t); w.u8(1); // the section's version
+        w.u8(unsigned(tr.audio.source)); w.u8(unsigned(tr.audio.monitor));
+        w.end(at);
+    }
+    for (unsigned n = 0; n < project.song.region_count; ++n) { // an audio track's region on its Song lane (freeze plan F3)
+        const auto& g = project.song.regions[n];
+        at = w.begin("AREG");
+        w.u8(1); // the section's version
+        w.u8(g.track); w.u16(g.take); w.u16(g.bar); w.u16(g.tick);
+        w.u32(g.offset); w.u32(g.frames); w.u32(g.take_frames); w.u16(g.tempo); w.i16(g.gain);
+        w.u32(g.fade_in); w.u32(g.fade_out);
+        w.u8(unsigned(g.reverse) | unsigned(g.muted) << 1 | unsigned(g.warp) << 2);
+        w.u8(unsigned(g.mode)); w.i16(g.semi); w.i16(g.fine);
         w.end(at);
     }
     for (unsigned t = 0; t < track_count; ++t) { // a PLUGIN track and the entry of PLUG it plays; TRAK said None
@@ -1218,6 +1238,30 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
         } else if (name == "KGRP") { // a KEYGROUP track; TRAK, before it, said None
             unsigned t = r.u8(), version = r.u8();
             if (r.ok && t < track_count && version >= 1) project->tracks[t].engine = EngineKind::Keygroup;
+        } else if (name == "AUDT") { // an AUDIO track (freeze plan F3); TRAK, before it, said None
+            unsigned t = r.u8(), version = r.u8();
+            if (!r.ok || t >= track_count || version < 1) continue;
+            auto& tr = project->tracks[t];
+            tr.engine = EngineKind::Audio;
+            tr.audio.source = InputSource(std::min<unsigned>(r.u8(), unsigned(InputSource::Count) - 1));
+            tr.audio.monitor = TrackMonitor(std::min<unsigned>(r.u8(), unsigned(TrackMonitor::Count) - 1));
+        } else if (name == "AREG") { // a region on an audio track's lane (freeze plan F3); a later version is skipped
+            if (r.u8() != 1) continue;
+            AudioRegion g;
+            g.track = uint8_t(r.u8()); g.take = uint16_t(r.u16()); g.bar = uint16_t(r.u16()); g.tick = uint16_t(r.u16());
+            g.offset = r.u32(); g.frames = r.u32(); g.take_frames = r.u32();
+            g.tempo = uint16_t(std::clamp<unsigned>(r.u16(), 300, 3000));
+            g.gain = int16_t(std::clamp(r.i16(), region_gain_min, region_gain_max));
+            g.fade_in = r.u32(); g.fade_out = r.u32();
+            unsigned flags = r.u8();
+            g.reverse = flags & 1; g.muted = flags & 2; g.warp = flags & 4;
+            g.mode = WarpMode(std::min<unsigned>(r.u8(), unsigned(WarpMode::Count) - 1));
+            g.semi = int8_t(std::clamp(r.i16(), -24, 24)); g.fine = int8_t(std::clamp(r.i16(), -50, 50));
+            if (!r.ok || g.track >= track_count || !g.frames || !g.take || g.bar > song_bars) continue;
+            g.take_frames = std::max(g.take_frames, g.offset + g.frames);
+            g.fade_in = std::min(g.fade_in, g.frames); g.fade_out = std::min(g.fade_out, g.frames);
+            auto& song = project->song;
+            if (song.region_count < song.regions.size()) song.regions[song.region_count++] = g;
         } else if (name == "PLGT") { // a PLUGIN track; TRAK, before it, said None
             unsigned t = r.u8(), entry = r.u8();
             if (r.ok && t < track_count) {
@@ -1430,6 +1474,8 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
     }
     // From before keygroup tracks: each kit's instrument pad its own keygroup track (model/keygroup_track.h).
     if (!keygroups_known) migrate_instrument_pads(*project, *patterns);
+    for (unsigned t = 0; t < track_count; ++t) // freeze plan F3: regions only on audio tracks' lanes
+        if (project->tracks[t].engine != EngineKind::Audio) project->song.drop_regions(t);
     target = *project;
     target_patterns = *patterns;
     if (version) *version = file_version;

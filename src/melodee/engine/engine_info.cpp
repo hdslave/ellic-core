@@ -106,7 +106,12 @@ const EngineInfo& engine_info(EngineKind kind) {
         {"KIND 3", 0, int16_t(MacroKind::End) - 1, 0, Format::Number}};
     static const EngineInfo plugin {EngineKind::Plugin, "PLUGIN", true, plugin_params, plugin_track::Count, nullptr, 0, {-1, -1, -1},
                                     plugin_sounds, 1, nullptr, 0, false, &plugin_stage};
+    // AUDIO (freeze plan F3, model/audio_track.h): records into the song and plays its regions; no values of its own.
+    // Its Stage pages are the regions' (stage_groups()); offered by the new-track picker, not among the engines.
+    static const Sound audio_sounds[] {{"AUDIO", {{{-1, 0}}}}};
+    static const EngineInfo audio {EngineKind::Audio, "AUDIO", false, nullptr, 0, nullptr, 0, {-1, -1, -1}, audio_sounds, 1};
     switch (kind) {
+    case EngineKind::Audio: return audio;
     case EngineKind::Midi: return midi;
     case EngineKind::Plugin: return plugin;
     case EngineKind::Sampler: return sampler;
