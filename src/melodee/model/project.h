@@ -11,6 +11,7 @@
 #include "melodee/model/midi_track.h"
 #include "melodee/model/modulators.h"
 #include "melodee/model/pad_fx.h"
+#include "melodee/model/progression_data.h"
 #include "melodee/model/pattern.h"
 #include "melodee/model/sampler.h"
 #include <algorithm>
@@ -234,9 +235,9 @@ struct Scene {
     }
 };
 
-// Drums: a drum plug-in's or drum machine's pads, as a kit's (model/scales.h pad_note()). Files keep the number:
-// new layouts go on the end.
-enum class PadLayout : uint8_t { Scale, Chromatic, Chords, Levels, Drums, Count };
+// Drums: a drum plug-in's or drum machine's pads, as a kit's (model/scales.h pad_note()). Prog: each pad one chord
+// of the track's progression (model/progression.h). Files keep the number: new layouts go on the end.
+enum class PadLayout : uint8_t { Scale, Chromatic, Chords, Levels, Drums, Prog, Count };
 
 constexpr unsigned max_chain = 8; // a track's pattern chain (seq-sheet2 B), patterns in the order played
 // A chained pattern in its last bar (`position` ticks into its `length`), when the next is queued for the bar line,
@@ -300,6 +301,11 @@ struct Track {
     // Chord: one pad, one chord from the scale (up to four notes).
     bool chord = false, chord_hold = false;
     uint8_t chord_type = 1, chord_voicing = 0, chord_invert = 0;
+    // Prog layout: the chords of an MPC 3 progression, one a pad over banks A-C (model/progression.h), moved by
+    // prog_shift semitones (K1 KEY, -6..5) and voiced by prog_voicing (K2: ProgVoicing).
+    Progression prog;
+    int8_t prog_shift = 0;
+    uint8_t prog_voicing = 0;
     // Note Repeat: every pad held, again on each step of its rate (engine/note_repeat.h).
     bool repeat = false;
     uint8_t repeat_rate = 4; // engine/arp.h, 4 is 1/16

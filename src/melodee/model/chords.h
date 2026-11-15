@@ -15,7 +15,7 @@ inline const char* chord_type_name(unsigned t) { static const char* n[] {"Triad"
 inline const char* chord_voicing_name(unsigned v) { static const char* n[] {"Close", "Open", "Drop 2", "Spread"}; return n[v % 4]; }
 inline const char* chord_invert_name(unsigned i) { static const char* n[] {"Root", "1st", "2nd", "3rd"}; return n[i % 4]; }
 
-// Up to four notes in order (a plain insertion sort; std::sort's inlining
+// Up to notes_per_step notes in order (a plain insertion sort; std::sort's inlining
 // trips GCC's bounds check on an array this small).
 inline void sort_notes(std::array<int, notes_per_step>& keys, unsigned n) {
     for (unsigned i = 1; i < n && i < keys.size(); ++i)
@@ -25,6 +25,7 @@ inline void sort_notes(std::array<int, notes_per_step>& keys, unsigned n) {
 // The chord on pad `pad` of a track; returns how many notes (up to four).
 inline unsigned chord_notes(const Project& project, const Track& track, unsigned pad, std::array<int, notes_per_step>& out) {
     if (track.layout == PadLayout::Drums) { out[0] = pad_note(project, track, pad).key; return 1; } // a drum is no chord's root
+    if (track.layout == PadLayout::Prog) return prog_keys(track, prog_index(track, pad), out); // the progression's chord
     std::array<uint8_t, 12> degrees {};
     unsigned count = scale_degrees(project.scale, degrees);
     int base = 12 * (track.octave + 1) + project.root + track.transpose; // as the pads' (pad_note()): the pad's note is the root
@@ -53,25 +54,6 @@ inline unsigned chord_notes(const Project& project, const Track& track, unsigned
         sort_notes(out, n);
     }
     return n;
-}
-
-// A name for it: the root's letter, m for a minor third, 7 or maj7, sus, 5, add9.
-inline std::string chord_name(const Project& project, const Track& track, unsigned pad) {
-    std::array<int, notes_per_step> keys {};
-    unsigned n = chord_notes(project, track, pad, keys);
-    int root = pad_note(project, track, pad).key;
-    bool has[12] {};
-    for (unsigned k = 0; k < n; ++k) has[((keys[k] - root) % 12 + 12) % 12] = true;
-    std::string name = note_letter(unsigned(root) % 12);
-    unsigned type = track.chord_type % 6;
-    if (type == 4) return name + "5";
-    if (type == 2) return name + "sus2";
-    if (type == 3) return name + "sus4";
-    bool minor = has[3] && !has[4], diminished = minor && has[6] && !has[7];
-    if (diminished) name += "dim"; else if (minor) name += "m";
-    if (type == 1 || type == 5) name += has[11] ? "maj7" : has[10] ? "7" : "";
-    if (type == 5) name += "(9)";
-    return name;
 }
 
 // Any keys held together, named (round 2, stage-preset B, as the FM-1 firmware names a chord): the shape their pitch
@@ -104,6 +86,33 @@ inline std::string name_chord(const int* keys, unsigned count) {
             }
     }
     return "";
+}
+
+// A name for it: the root's letter, m for a minor third, 7 or maj7, sus, 5, add9.
+inline std::string chord_name(const Project& project, const Track& track, unsigned pad) {
+    if (track.layout == PadLayout::Prog) { // the progression's own name, in the key K1 moved it to
+        unsigned index = prog_index(track, pad);
+        if (!track.prog.chords[index].used()) return "-";
+        std::array<int, notes_per_step> keys {};
+        unsigned n = prog_keys(track, index, keys);
+        std::string name = name_chord(keys.data(), n);
+        return name.empty() ? note_name(keys[0]) : name;
+    }
+    std::array<int, notes_per_step> keys {};
+    unsigned n = chord_notes(project, track, pad, keys);
+    int root = pad_note(project, track, pad).key;
+    bool has[12] {};
+    for (unsigned k = 0; k < n; ++k) has[((keys[k] - root) % 12 + 12) % 12] = true;
+    std::string name = note_letter(unsigned(root) % 12);
+    unsigned type = track.chord_type % 6;
+    if (type == 4) return name + "5";
+    if (type == 2) return name + "sus2";
+    if (type == 3) return name + "sus4";
+    bool minor = has[3] && !has[4], diminished = minor && has[6] && !has[7];
+    if (diminished) name += "dim"; else if (minor) name += "m";
+    if (type == 1 || type == 5) name += has[11] ? "maj7" : has[10] ? "7" : "";
+    if (type == 5) name += "(9)";
+    return name;
 }
 
 } // namespace melodee

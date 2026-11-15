@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #pragma once
 #include "melodee/model/project.h"
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -26,10 +27,10 @@ inline const char* note_letter(unsigned pitch_class) {
     return names[pitch_class % 12];
 }
 // C4 is MIDI 60, so D2 is 38.
-inline std::string note_name(int key) { return std::string(note_letter(unsigned(key) % 12)) + std::to_string(key / 12 - 1); }
+inline std::string note_name(int key) { return key < 0 ? std::string("-") : std::string(note_letter(unsigned(key) % 12)) + std::to_string(key / 12 - 1); }
 
 inline const char* layout_name(PadLayout layout) {
-    static const char* names[] {"Scale", "Chromatic", "Chords", "16 Levels", "Drums"};
+    static const char* names[] {"Scale", "Chromatic", "Chords", "16 Levels", "Drums", "Prog"};
     return names[unsigned(layout) % unsigned(PadLayout::Count)];
 }
 
@@ -57,6 +58,53 @@ inline unsigned scale_degrees(unsigned scale, std::array<uint8_t, 12>& out) {
     return n;
 }
 
+// Prog (model/progression.h): pad 0..15 of the bank in view (A-C) plays chord 16 * bank + pad of the track's
+// progression, moved by K1 KEY (prog_shift), the octave (OCT 2 as the file has it) and the transpose, and voiced by K2:
+// File as the file has it; Close the bass, the rest in the octave above it; Open as Close with every second note above
+// the bass an octave up; Spread as the file with the bass an octave down.
+enum class ProgVoicing : uint8_t { File, Close, Open, Spread, Count };
+inline const char* prog_voicing_name(unsigned v) { static const char* n[] {"File", "Close", "Open", "Spread"}; return n[v % 4]; }
+constexpr unsigned prog_banks = prog_chords / 16;
+inline unsigned prog_bank(const Track& track) { return track.bank % prog_banks; }
+// A synth track's pads playing its progression (not 16 Levels over it).
+inline bool prog_pads(const Track& track) {
+    return track.layout == PadLayout::Prog && !track.levels && track.engine != EngineKind::Sampler && track.engine != EngineKind::None;
+}
+inline unsigned prog_index(const Track& track, unsigned pad) { return 16 * prog_bank(track) + pad % 16; }
+// The keys chord `index` plays, lowest first; how many (0: no chord there).
+inline unsigned prog_keys(const Track& track, unsigned index, std::array<int, notes_per_step>& out) {
+    if (index >= prog_chords) return 0;
+    const auto& chord = track.prog.chords[index];
+    unsigned n = std::min<unsigned>(chord.count, notes_per_step);
+    if (!n) return 0;
+    int move = track.prog_shift + track.transpose + 12 * (track.octave - 2);
+    for (unsigned k = 0; k < n; ++k) out[k] = int(chord.notes[k]) + move;
+    auto sort = [&]() {
+        for (unsigned i = 1; i < n; ++i)
+            for (unsigned j = i; j > 0 && out[j - 1] > out[j]; --j) std::swap(out[j - 1], out[j]);
+    };
+    sort();
+    auto voicing = ProgVoicing(track.prog_voicing % unsigned(ProgVoicing::Count));
+    if (voicing == ProgVoicing::Close || voicing == ProgVoicing::Open) {
+        int bass = out[0];
+        for (unsigned k = 1; k < n; ++k) out[k] = bass + 1 + ((out[k] - bass - 1) % 12 + 12) % 12;
+        sort();
+        unsigned kept = 1; // a pitch class twice: once
+        for (unsigned k = 1; k < n; ++k) if (out[k] != out[kept - 1]) out[kept++] = out[k];
+        n = kept;
+        if (voicing == ProgVoicing::Open) {
+            for (unsigned k = 2; k < n; k += 2) out[k] += 12;
+            sort();
+        }
+    } else if (voicing == ProgVoicing::Spread) {
+        out[0] -= 12;
+    }
+    for (unsigned k = 0; k < n; ++k) out[k] = std::clamp(out[k], 0, 127);
+    return n;
+}
+// The progression's key as K1 shows it: the file's root moved by prog_shift.
+inline unsigned prog_key(const Track& track) { return unsigned((int(track.prog.root) + track.prog_shift) % 12 + 12) % 12; }
+
 // The key pad 0..15 (pad 1 bottom left) plays on a track, and whether it is
 // a root. 16 Levels plays the track's last note on every pad.
 struct PadNote { int key; bool root; };
@@ -66,6 +114,12 @@ inline PadNote pad_note(const Project& project, const Track& track, unsigned pad
     case PadLayout::Chromatic: return {base + int(pad), pad % 12 == 0};
     case PadLayout::Levels: return {track.last_note, false};
     case PadLayout::Drums: return {drum_key(track, pad), false};
+    case PadLayout::Prog: { // the chord's lowest key; an empty pad: none (-1)
+        std::array<int, notes_per_step> keys {};
+        unsigned index = prog_index(track, pad);
+        if (!prog_keys(track, index, keys)) return {-1, false};
+        return {keys[0], track.prog.chords[index].root};
+    }
     case PadLayout::Scale:
     case PadLayout::Chords:
     default: {

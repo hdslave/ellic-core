@@ -626,6 +626,20 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
         w.u8(uint8_t(l.what)); w.u16(l.lane); w.u8(l.engine); w.u8(l.pot); w.u8(tr.fader_pin);
         w.end(at);
     }
+    for (unsigned t = 0; t < track_count; ++t) { // the Prog layout's progression, its key and voicing, where it has one
+        const auto& tr = project.tracks[t];
+        if (tr.prog.empty() && !tr.prog_shift && !tr.prog_voicing && !tr.prog.name[0]) continue;
+        at = w.begin("PROG");
+        w.u8(t); w.u8(1); // the section's version
+        w.text(tr.prog.name); w.text(tr.prog.file); w.u8(tr.prog.root); w.u8(uint8_t(tr.prog_shift)); w.u8(tr.prog_voicing);
+        w.u8(tr.prog.count);
+        for (unsigned n = 0; n < tr.prog.count && n < prog_chords; ++n) {
+            const auto& chord = tr.prog.chords[n];
+            w.u8(chord.root ? 1 : 0); w.text(chord.name); w.u8(chord.count);
+            for (unsigned k = 0; k < chord.count; ++k) w.u8(chord.notes[k]);
+        }
+        w.end(at);
+    }
     for (unsigned t = 0; t < track_count; ++t) { // a pattern chain (seq-sheet2 B): the patterns in the order they play
         const auto& tr = project.tracks[t];
         if (tr.chain_count < 2) continue;
@@ -1154,6 +1168,31 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
             unsigned tempo = r.u16();
             scene.tempo = uint16_t(tempo ? std::clamp(tempo, 300u, 3000u) : 0);
             if (r.ok && n < pattern_count) project->scenes[n] = scene;
+        } else if (name == "PROG") { // the Prog layout's progression; without it none
+            unsigned t = r.u8(), version = r.u8();
+            Progression prog;
+            r.text(prog.name, sizeof(prog.name)); r.text(prog.file, sizeof(prog.file));
+            prog.root = uint8_t(r.u8() % 12);
+            int shift = int8_t(r.u8());
+            unsigned voicing = r.u8(), count = r.u8();
+            for (unsigned n = 0; n < count && r.ok; ++n) {
+                ProgChord chord;
+                chord.root = r.u8() != 0;
+                r.text(chord.name, sizeof(chord.name));
+                unsigned notes = r.u8();
+                for (unsigned k = 0; k < notes && r.ok; ++k) {
+                    unsigned key = r.u8();
+                    if (k < notes_per_step) chord.notes[k] = uint8_t(std::min(key, 127u));
+                }
+                chord.count = uint8_t(std::min(notes, notes_per_step));
+                if (n < prog_chords) prog.chords[n] = chord;
+            }
+            if (!r.ok || t >= track_count || version < 1) continue;
+            prog.count = uint8_t(std::min(count, prog_chords));
+            auto& tr = project->tracks[t];
+            tr.prog = prog;
+            tr.prog_shift = int8_t(std::clamp(shift, -6, 5));
+            tr.prog_voicing = uint8_t(voicing % 4);
         } else if (name == "CHAN") { // a pattern chain (seq-sheet2 B); without it a track plays the one pattern
             unsigned t = r.u8(), count = r.u8();
             if (!r.ok || t >= track_count) continue;
