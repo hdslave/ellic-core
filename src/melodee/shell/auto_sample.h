@@ -11,8 +11,8 @@
 // each note held, let go and its release kept, written as 24-bit WAVs and an MPC
 // keygroup program (shell/xpm_write.h) in Samples/Keygroups/<name>/, which a new
 // KEYGROUP track then plays with the plug-in track's patterns and mix
-// (shell/auto_sample.cpp). Taken before the track's chain, so the keygroup
-// track can have one of its own.
+// (shell/auto_sample.cpp). Taken before the track's chain (the keygroup
+// track gets the chain) or after it (the keygroup track's chain empty).
 namespace melodee {
 
 // What a plug-in track is played over, a note at a time.
@@ -22,6 +22,9 @@ struct AutoSampleSettings {
     uint8_t layers = 1;          // velocity layers, 1-4
     float hold = 2.0f;           // seconds each key is held
     float tail = 8.0f;           // seconds of release kept at most
+    bool post_fx = false;        // taken after the track's chain (its effects in the samples), else before it
+    bool loop = false;           // each sample a loop where the key was held (engine/loop_find.h)
+    bool normalize = true;       // one gain for the whole program, its loudest sample at -1 dB (layers keep their balance)
     // Each layer's velocity (the loudest of its range): 127 alone; 63, 127; 42, 84, 127; 31, 63, 95, 127.
     uint8_t velocity(unsigned layer) const {
         const unsigned n = std::clamp<unsigned>(layers, 1, 4);
@@ -42,6 +45,9 @@ struct AutoSampleResult {
     std::string name;
     std::string error;   // empty: made
     unsigned samples = 0;
+    unsigned loops = 0;  // samples given a loop
+    float gain_db = 0;   // the program's gain (normalize)
+    bool post_fx = false;
     double seconds = 0;
 };
 
