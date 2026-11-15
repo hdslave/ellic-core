@@ -443,7 +443,8 @@ struct Written {
     bool shifted = false;  // a keygroup track's notes: 60 + the pad's pitch + the note's (an instrument), else 60 + the note's
     std::string name;
     juce::var track;
-    bool audio = false;    // the track's prints
+    bool audio = false;    // the track's prints (or `takes`)
+    bool takes = false;    // an AUDIO track's: its patterns' takes (freeze plan F3)
     bool keyed = false;    // a KEYGROUP track's: its notes MIDI notes (60 + the tune's semitones on an instrument)
 };
 
@@ -584,7 +585,8 @@ std::string write_document(const juce::var& doc, const char* kind, const juce::v
 } // namespace
 
 std::string export_mpc3_project(const Project& project, const PatternBank& patterns, const std::string& folder,
-                                const std::string& name, Mpc3Export& report, const PrintTable* prints, const std::string& prints_dir) {
+                                const std::string& name, Mpc3Export& report, const PrintTable* prints, const std::string& prints_dir,
+                                const std::string& audio_dir) {
     report = Mpc3Export {};
     const juce::var doc = read_template();
     const auto& data = field(doc, "data");
@@ -616,6 +618,33 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
     for (unsigned t = 0; t < track_count; ++t) {
         const auto& track = project.tracks[t];
         if (!track.used()) continue;
+        if (track.engine == EngineKind::Audio) { // freeze plan F3: an Audio track of MPC 3's own, its takes in its program
+            juce::var made = field(doc, "audioTrack").clone();
+            char fallback[16];
+            std::snprintf(fallback, sizeof(fallback), "Audio %03u", t + 1);
+            const std::string track_name = unique_name(track.name, fallback, taken);
+            put(made, "name", juce::String(track_name));
+            put(made, "mute", track.mix.mute);
+            const auto& program = field(made, "program");
+            put(program, "name", juce::String(track_name));
+            program_mix(program, track.mix);
+            std::vector<std::string> used;
+            for (const auto& pattern : patterns.at[t]) {
+                if (!pattern.audio.used() || audio_dir.empty()) continue;
+                const auto& file = files.name((fs::path(audio_dir) / audio_take_name(pattern.audio.take)).string(), report);
+                if (!file.empty() && std::find(used.begin(), used.end(), file) == used.end()) used.push_back(file);
+            }
+            put(program, "samples", samples_of(used));
+            retarget_tracks(made, {}, juce::String(track_name));
+            Written w;
+            w.index = t;
+            w.name = track_name;
+            w.track = made;
+            w.audio = w.takes = true;
+            written.push_back(std::move(w));
+            ++report.audio;
+            continue;
+        }
         if (track.engine == EngineKind::Plugin && prints && !prints_dir.empty()) { // its prints, as an Audio track
             bool any = false;
             for (const auto& r : prints->records) any = any || (r.track == t && !r.file.empty());
@@ -807,7 +836,7 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
     const TimeSignature signature = project.time_signature();
     const int beat_pulses = int(3840 / signature.unit);
     const int bar_pulses = beat_pulses * signature.beats;
-    struct Placement { int at = 0, length = 0; const PrintRecord* record = nullptr; };
+    struct Placement { int at = 0, length = 0; const PrintRecord* record = nullptr; const AudioRegion* take = nullptr; };
     auto make_sequence = [&](int key, const std::string& title, unsigned tempo, int pulses,
                              const std::function<const Pattern&(const Written&)>& pattern_of,
                              const std::function<std::vector<Placement>(const Written&)>& prints_of) {
@@ -842,6 +871,31 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
             auto own = std::find_if(written.begin(), written.end(), [&](const Written& w) { return w.name == track_name; });
             if (own != written.end() && own->audio) { // its prints: the clip spans the sequence, as MPC 3 saves an audio clip
                 for (const auto& place : prints_of(*own)) {
+                    if (const auto* take = place.take) { // an audio track's take, as recorded: its part of the file, level, fades
+                        const auto& file = files.name((fs::path(audio_dir) / audio_take_name(take->take)).string(), report);
+                        if (file.empty()) continue;
+                        const auto& wav = files.info(file);
+                        const double k = double(wav.rate ? wav.rate : 44100) / 44100.0; // the take counts 44.1 kHz frames
+                        juce::var event = field(doc, "audioEvent").clone();
+                        put(event, "time", whole(place.at));
+                        put(event, "muted", false);
+                        const auto& audio = field(event, "audio");
+                        const double volume = double(audio["volume"]) * std::pow(10.0, take->gain / 200.0);
+                        put(audio, "sample", Files::sample_entry(file));
+                        put(audio, "name", juce::String(fs::path(file).stem().string()));
+                        put(audio, "tempo", real(take->tempo / 10.0));
+                        put(audio, "volume", real(volume));
+                        put(audio, "reverse", take->reverse);
+                        put(audio, "fadeIn", whole(int(std::llround(take->fade_in * k))));
+                        put(audio, "fadeOut", whole(int(std::llround(take->fade_out * k))));
+                        put(audio, "sliceStart", whole(int(std::llround(take->offset * k))));
+                        const bool to_end = take->offset + take->frames >= take->take_frames && wav.frames; // its file's own end, exact
+                        put(audio, "sliceEnd", whole(to_end ? int(wav.frames) : int(std::llround((uint64_t(take->offset) + take->frames) * k))));
+                        put(audio, "warpEnable", false); // played as recorded
+                        put(audio, "length", whole(place.length));
+                        events.add(event);
+                        continue;
+                    }
                     const auto* record = place.record;
                     const auto& file = files.name((fs::path(prints_dir) / record->file).string(), report);
                     if (file.empty()) continue;
@@ -906,12 +960,29 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
         put(sequence, "trackClipMaps", array_of({array_of(std::move(clips))}));
         return entry(whole(key), sequence);
     };
-    // A print of `pattern` from `from` to `to` (pulses), again each time the pattern loops.
+    // What an Audio track plays of `pattern`: an audio track's take, or a plug-in track's print.
+    auto has_audio = [&](const Written& w, unsigned pattern) {
+        if (w.takes) return patterns.at[w.index][pattern % pattern_count].audio.used();
+        return w.audio && prints && prints->find(w.index, pattern);
+    };
+    // A print (or take) of `pattern` from `from` to `to` (pulses), again each time the pattern loops.
     auto loops_of = [&](const Written& w, unsigned pattern, int from, int to, std::vector<Placement>& out) {
-        const auto* record = prints->find(w.index, pattern);
-        if (!record || record->file.empty()) return false;
+        const PrintRecord* record = nullptr;
+        const AudioRegion* take = nullptr;
+        if (w.takes) {
+            take = &patterns.at[w.index][pattern % pattern_count].audio;
+            if (!take->used()) return false;
+        } else {
+            record = prints ? prints->find(w.index, pattern) : nullptr;
+            if (!record || record->file.empty()) return false;
+        }
         const int pass_pulses = int(std::max<uint32_t>(patterns.at[w.index][pattern % pattern_count].length, 1) * mpc_ticks_per_tick);
-        for (int at = from; at < to; at += pass_pulses) out.push_back({at, std::min(pass_pulses, to - at), record});
+        for (int at = from; at < to; at += pass_pulses) {
+            int length = std::min(pass_pulses, to - at);
+            if (take) // a take shorter than the pattern ends where it does
+                length = std::min<int>(length, int(frames_to_ticks(take->frames, take->tempo) * mpc_ticks_per_tick));
+            out.push_back({at, length, record, take});
+        }
         return true;
     };
 
@@ -923,7 +994,7 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
         for (const auto& w : written) {
             const auto& pattern = patterns.at[w.index][size_t(p)];
             longest = std::max(longest, pattern.length);
-            any = any || !pattern.events.empty() || (w.audio && prints->find(w.index, unsigned(p)));
+            any = any || !pattern.events.empty() || has_audio(w, unsigned(p));
         }
         report.sequences += any;
         const int pulses = int(std::max<uint32_t>(longest, 1) * mpc_ticks_per_tick);
@@ -947,7 +1018,7 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
     if (song_bars) {
         for (unsigned p = 0; p < pattern_count && song_key < 0; ++p) {
             bool free = true;
-            for (const auto& w : written) free = free && patterns.at[w.index][p].empty() && !(w.audio && prints->find(w.index, p));
+            for (const auto& w : written) free = free && patterns.at[w.index][p].empty() && !has_audio(w, p);
             for (unsigned n = 0; n < song.count && free; ++n) free = song.clips[n].pattern != p;
             if (free) song_key = int(p);
         }

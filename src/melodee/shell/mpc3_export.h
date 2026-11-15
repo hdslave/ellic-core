@@ -25,7 +25,7 @@ namespace melodee {
 
 struct Mpc3Export {
     unsigned tracks = 0, keygroups = 0, sequences = 0, pads = 0, notes = 0, samples = 0; // tracks: Drum tracks; keygroups: Keygroup tracks
-    unsigned audio = 0, regions = 0; // Audio tracks of prints, and the printed patterns on them
+    unsigned audio = 0, regions = 0; // Audio tracks (of prints, or audio tracks' takes), and the patterns played on them
     unsigned midi = 0;               // MIDI tracks
     unsigned chops = 0;              // copied WAV files given their chop's slices
     unsigned song_bars = 0;          // the song, as the sequence "Song" (0: no song)
@@ -40,9 +40,10 @@ struct Mpc3Export {
 // Writes <folder>/<name>.xpj and <folder>/<name>_[ProjectData]/. Empty on success. Reads and copies files:
 // never on the MIDI or audio thread.
 // `prints` and `prints_dir` (model/print.h prints_folder()): the project's prints, for its plug-in tracks.
+// `audio_dir` (model/audio_track.h audio_folder()): its audio tracks' takes.
 std::string export_mpc3_project(const Project& project, const PatternBank& patterns, const std::string& folder,
                                 const std::string& name, Mpc3Export& report, const PrintTable* prints = nullptr,
-                                const std::string& prints_dir = {});
+                                const std::string& prints_dir = {}, const std::string& audio_dir = {});
 
 // A keygroup program (an .xpm, MPC 2's file, with its WAV files beside it) as MPC 3's track file `file`
 // ("<name>.xty": the same gzip and header around one Keygroup track). MPC 3 looks for a track's samples in
