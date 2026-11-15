@@ -9,11 +9,14 @@
 #include "melodee/engine/sfz.h"
 #include "melodee/model/looper.h"
 #include "melodee/model/sampler.h"
+#include "melodee/shell/load_pool.h"
 #include "melodee/shell/sample_cache.h"
 #include "melodee/shell/zone_shapes.h"
 #include "surface/midi.h"
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -108,6 +111,12 @@ public:
         unsigned left = asked.load(std::memory_order_relaxed) - answered.load(std::memory_order_acquire);
         return left + landings_open.load(std::memory_order_relaxed);
     }
+    // MIDI thread: how a slot's load stands (the Loading sheet), read without the lock. `settled`: its file is in, or
+    // could not be read; an instrument's once each of its files has landed or failed.
+    struct SlotLoad { bool settled = false, instrument = false; unsigned parts = 0, parts_in = 0; };
+    SlotLoad slot_load(unsigned slot) const;
+    // The slot a load last began work for; -1 while nothing loads.
+    int loading_now() const { return now_loading.load(std::memory_order_relaxed); }
     void rescan() { scan_wanted.store(true); }
     // Service thread: a take or a render is writing to the card (SD card access waits for it).
     bool busy() const;
@@ -220,7 +229,6 @@ public:
 private:
     struct Request { uint8_t slot = 0; char path[160] {}; };
     void scan();
-    void read(const Request& request);
     void make(const SampleJob& job);
     void hear(const std::string& path);
     // The browser's preview read a piece a pass while its start plays (hear()): the file, the sample it fills and
@@ -236,9 +244,6 @@ private:
     void install_service(); // an expansion asked for: opened, then a file of it each pass
     std::unique_ptr<ExpansionInstall> installing;
     std::vector<std::string> installs_wanted; // under `lock`
-    // Instruments (sample_library_instruments.cpp): read, then one of their files a pass.
-    void begin_instrument(const Request& request);
-    void land_next();
     void cancel_landing(unsigned slot);
     void hear_instrument(const std::string& path);
     bool reap();       // what the audio thread has let go of; true if anything went
@@ -248,6 +253,8 @@ private:
     static constexpr size_t playback_budget = size_t(256) << 20;
     bool offer(unsigned slot, SampleData* data);
     void refresh_playback();
+    // An instrument whose files are landing (sample_library_instruments.cpp). The pool's threads read it and write
+    // only the part and the zones of the file each was given; the rest is the service thread's.
     struct Landing {
         uint8_t slot = 0;
         std::string folder;
@@ -256,9 +263,43 @@ private:
         std::shared_ptr<Multisample> multi;
         std::vector<std::string> names;         // each part's file, as its regions name it
         std::vector<std::vector<uint16_t>> zones; // the zones of each part
-        unsigned next = 0;
+        unsigned done = 0;                      // service thread: its files landed or failed so far
+        std::atomic<bool> cancelled {false};    // its slot was asked for again, or it was let go: what is left is skipped
     };
-    std::vector<Landing> landings;
+    std::vector<std::shared_ptr<Landing>> landings;
+    // Loads (sample_library.cpp, sample_library_instruments.cpp). Each file asked for is read on one of the pool's
+    // threads (a sample read, converted and analysed; an instrument's text read; one of its files found, laid out
+    // if it must be, mapped and pinned), several side by side. What they made comes back here, and the service
+    // thread hands it to the audio thread in the order it arrives, as that thread's queue has room. Each load of a
+    // slot has a serial; one still on its way when the slot is asked for again is dropped when it arrives.
+    struct Handover { // a sample read (or none: the slot emptied), waiting for the audio thread's queue
+        uint8_t slot = 0;
+        uint32_t serial = 0;
+        bool clear = false;
+        std::unique_ptr<SampleData> data;
+        LoadedSample loaded;
+    };
+    struct InstrumentRead { Request request; uint32_t serial = 0; SfzRead read; std::string error; };
+    struct PartLanded { std::shared_ptr<Landing> landing; unsigned index = 0; bool landed = false, laid_out = false; std::string why; };
+    std::mutex loaded_lock;
+    std::vector<Handover> files_loaded;              // under loaded_lock: from the pool
+    std::vector<InstrumentRead> instruments_read;    // under loaded_lock
+    std::vector<PartLanded> parts_landed;            // under loaded_lock
+    std::deque<Handover> handovers;                  // service thread: in the order they are handed on
+    std::vector<InstrumentRead> instruments_waiting; // service thread: read, their zones not yet with the audio thread
+    std::chrono::steady_clock::time_point handover_since; // when the first of `handovers` was first refused
+    bool handover_refused = false;
+    std::array<uint32_t, sample_slots> slot_serial {};             // service thread
+    std::array<std::atomic<uint32_t>, sample_slots> slot_state {}; // a SlotLoad packed (slot_load())
+    std::atomic<int> now_loading {-1};
+    void set_slot_state(unsigned slot, bool settled, bool instrument = false, unsigned parts = 0, unsigned parts_in = 0);
+    void dispatch(const Request& request);     // a file asked for: its load begun on the pool
+    void take_loaded();                        // what the pool has made since the last pass, handed on
+    bool hand_over(Handover& h);               // false: the audio thread's queue is full, again next pass
+    bool begin_landing(InstrumentRead& read);  // an instrument read: its zones to the audio thread, its files to the pool (false as above)
+    PartLanded land_part(const std::shared_ptr<Landing>& landing, unsigned index, const SampleCache& cache); // a pool thread
+    static constexpr uint64_t long_layout_bytes = uint64_t(48) << 20;
+    std::mutex long_layout; // an instrument's long file is decoded whole to be laid out: one of those at a time
     SampleCache cache;
     bool cache_tidied = false;
     std::vector<std::pair<uint8_t, std::string>> away; // the instruments put down for SD card access
@@ -323,6 +364,19 @@ private:
     std::vector<std::string> bank_reads;  // under `lock`: paths
     std::vector<BankBytes> banks_read;    // under `lock`: what came of them
     bool preview_pending = false;
+    // A load timed for the journal, from the first file asked for until nothing is left to read or hand on: how
+    // many files, instruments and instrument files it was, and how many of those had to be laid out first.
+    struct LoadLog {
+        bool open = false;
+        std::chrono::steady_clock::time_point since;
+        unsigned files = 0, instruments = 0, parts = 0, laid_out = 0, failed = 0;
+    } load_log;
+    // What the pool's threads spent on each step of it, added up over the threads (microseconds): samples read and
+    // converted, analysed (waveform and hits), instruments' texts read, their files landed.
+    struct LoadTimes { std::atomic<uint64_t> read {0}, analyse {0}, parse {0}, land {0}; } load_times;
+    void log_load(); // closes it and writes its line once everything is in
+    // Last, so its threads end before anything they use goes.
+    LoadPool pool {3};
 };
 
 } // namespace melodee
