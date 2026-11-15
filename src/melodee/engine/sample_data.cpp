@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #include "melodee/engine/sample_data.h"
 #include "melodee/engine/dsp.h"
+#include "melodee/plugin/polyphase.h"
 #include "dsp/frame_ring.h"
 #include <algorithm>
 #include <cmath>
@@ -116,7 +117,7 @@ void SampleFill::begin(SampleData& s, uint32_t frames, unsigned rate, float play
         c.length = length(at); c.written = 0;
         l.assign(c.length, 0.0f); r.assign(c.length, 0.0f);
         c.converter.reset();
-        if (at != rate) { c.converter = std::make_unique<SincResampler<2>>(); c.converter->reset(rate, at); }
+        if (at != rate) { c.converter = std::make_unique<PolyphaseResampler>(); c.converter->reset(rate, at); }
     };
     copies = {};
     lay_out(copies[0], s.left, s.right, growth->frames, model);
@@ -156,7 +157,7 @@ void SampleFill::finish() {
         if (!c.left) continue;
         if (c.converter) { // it answers `half` frames late: silence after the last frame lets the end out (resample())
             auto keep = [&](float l, float r) { if (c.written < c.length) { (*c.left)[c.written] = l; (*c.right)[c.written] = r; ++c.written; } };
-            for (unsigned n = 0; n <= SincResampler<2>::max_half && c.written < c.length; ++n) c.converter->feed(0.0f, 0.0f, keep);
+            for (unsigned n = 0; n <= PolyphaseResampler::max_half && c.written < c.length; ++n) c.converter->feed(0.0f, 0.0f, keep);
         }
         if (whole) c.written = c.length; // what the conversion did not reach stays silent, as resample() pads it
         c.landed->store(c.written, std::memory_order_release);
@@ -191,15 +192,17 @@ void resample(const float* left, const float* right, uint32_t frames, unsigned f
     out_left.clear(); out_right.clear();
     if (!frames || !from || !to) return;
     const auto length = size_t(std::llround(double(frames) * to / from));
-    out_left.reserve(length); out_right.reserve(length);
+    out_left.assign(length, 0.0f); out_right.assign(length, 0.0f);
     // The converter's output n sits at input n * from / to (frame_ring.h): nothing to drop at the start; it only
-    // answers `half` frames late, so silence after the last frame lets the end out.
-    auto converter = std::make_unique<SincResampler<2>>();
+    // answers `half` frames late, so silence after the last frame lets the end out. The base's SincResampler with
+    // each output place's weights worked out once (plugin/polyphase.h): a file's ratio never changes, and on the MPC
+    // that is some sixty times the frames a second (a ratio too fine for a table still goes the slow way).
+    auto converter = std::make_unique<PolyphaseResampler>();
     converter->reset(from, to);
-    auto keep = [&](float l, float r) { if (out_left.size() < length) { out_left.push_back(l); out_right.push_back(r); } };
+    size_t written = 0;
+    auto keep = [&](float l, float r) { if (written < length) { out_left[written] = l; out_right[written] = r; ++written; } };
     for (uint32_t n = 0; n < frames; ++n) converter->feed(left[n], right[n], keep);
-    for (unsigned n = 0; n <= SincResampler<2>::max_half && out_left.size() < length; ++n) converter->feed(0.0f, 0.0f, keep);
-    out_left.resize(length, 0.0f); out_right.resize(length, 0.0f);
+    for (unsigned n = 0; n <= PolyphaseResampler::max_half && written < length; ++n) converter->feed(0.0f, 0.0f, keep);
 }
 
 void playback_from(SampleData& sample, const float* left, const float* right, uint32_t frames, unsigned rate, float play_at) {

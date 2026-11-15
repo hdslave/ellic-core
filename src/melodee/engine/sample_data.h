@@ -13,8 +13,6 @@
 #include <string>
 #include <vector>
 
-template <unsigned Channels> class SincResampler; // dsp/frame_ring.h
-
 // A sample in memory at 44.1 kHz, and what the screen needs about it. Read,
 // converted and analysed on the service thread (it allocates and reads
 // files); the audio thread only reads `left`, `right` and `frames` through a
@@ -23,6 +21,8 @@ template <unsigned Channels> class SincResampler; // dsp/frame_ring.h
 // what was read or recorded at another rate also keeps its own frames as the
 // copy the device plays when the rates agree (play_*, source_rate).
 namespace melodee {
+
+class PolyphaseResampler; // plugin/polyphase.h
 
 // A sample still being read (the browser's preview, SampleFill): its frames are laid out at their full length, silent,
 // before the audio thread has it, and filled in from the start while it plays. How far each copy is filled in,
@@ -52,9 +52,10 @@ struct SampleData {
     size_t play_bytes() const { return (play_left.capacity() + play_right.capacity()) * sizeof(float); }
 };
 
-// Band-limited rate conversion (the base's dsp::SincResampler: flat to 0.907 of the lower Nyquist, images 90 dB
-// down): `frames` of left and right at `from` Hz to `to` Hz, frame n of the result at n * from / to of the input
-// (no delay), as many as the ratio gives. Allocates: not for the audio thread.
+// Band-limited rate conversion (the base's dsp::SincResampler, as plugin/polyphase.h works it out for a ratio that
+// never changes: flat to 0.907 of the lower Nyquist, images 90 dB down): `frames` of left and right at `from` Hz to
+// `to` Hz, frame n of the result at n * from / to of the input (no delay), as many as the ratio gives. Allocates: not
+// for the audio thread.
 void resample(const float* left, const float* right, uint32_t frames, unsigned from, unsigned to,
               std::vector<float>& out_left, std::vector<float>& out_right);
 // The device-rate copy of `sample` for `rate`, from its 44.1 kHz frames (dropped at 44.1 kHz, never for an
@@ -133,7 +134,7 @@ private:
         std::vector<float>* right = nullptr;
         std::atomic<uint32_t>* landed = nullptr;
         uint32_t length = 0, written = 0;
-        std::unique_ptr<SincResampler<2>> converter; // none: the file's own frames
+        std::unique_ptr<PolyphaseResampler> converter; // none: the file's own frames
     };
     SampleData* sample = nullptr;
     std::shared_ptr<SampleGrowth> growth;
