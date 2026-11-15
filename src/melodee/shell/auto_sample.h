@@ -86,7 +86,8 @@ struct AutoSampleSettings {
     bool post_fx = false;        // taken after the track's chain (its effects in the samples), else before it
     bool loop = false;           // each sample a loop where the key was held (engine/loop_find.h), when not at Auto
     bool loop_auto = true;       // LOOP at Auto: a loop when the check heard the sound sustain (AutoFindings::sustains)
-    bool normalize = true;       // one gain for the whole program, its loudest sample at -1 dB (layers keep their balance)
+    bool normalize = false;      // one gain for the whole program, its loudest sample at -1 dB (layers keep their balance);
+                                 // else as played: the program as loud as what was sampled
     AutoFindings found;          // what the check heard
     // For the key `key` (its side of a split), and without one for the lower side or the whole instrument.
     bool looping(unsigned key = 0) const {

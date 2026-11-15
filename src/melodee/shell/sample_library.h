@@ -146,6 +146,11 @@ public:
     void read_bank(const std::string& path);
     struct BankBytes { std::string path, error; std::vector<uint8_t> bytes; };
     bool take_bank(BankBytes& out);
+    // MIDI thread: a file or a folder to delete from the card: a folder with all in it, an MPC 3 track, program or
+    // project with the data folder that is its own ("<name>_[TrackData]"). done() tells how it went, and the folder
+    // in view is listed again. removals(): how many have been done (the plug-in picker lists again too).
+    void remove(const std::string& path);
+    unsigned removals() const { return removal_count.load(std::memory_order_acquire); }
     // MIDI thread: an MPC expansion (.xpn) to install onto the card (shell/expansion_install.h);
     // done() says when it starts and ends, and the browser then shows its folder.
     void install(const std::string& path);
@@ -364,6 +369,9 @@ private:
     std::string preview_wanted, preview_heard; // under `lock`
     std::vector<std::pair<std::string, std::vector<uint8_t>>> bank_writes; // under `lock`: name, bytes
     std::vector<std::string> bank_reads;  // under `lock`: paths
+    std::vector<std::string> removals_wanted; // under `lock`: paths to delete
+    std::atomic<unsigned> removal_count {0};
+    void remove_service();
     std::vector<BankBytes> banks_read;    // under `lock`: what came of them
     bool preview_pending = false;
     // A load timed for the journal, from the first file asked for until nothing is left to read or hand on: how
