@@ -21,6 +21,13 @@
 // the pattern comes round; between, a voice plays on at its own pace (a tempo
 // change does not move it) and only a jump (a locate) puts it where the
 // pattern is, fading across.
+//
+// Warp fits a take to the tempo playing, as the MPC's Warp does: it plays
+// faster or slower by the tempo against the one it was recorded at, and keeps
+// its place in the pattern. Repitch plays it faster or slower, its pitch with
+// it; Stretch keeps its pitch (or moves it by its semitones and cents) by
+// reading it in overlapping 60 ms windows, each starting where it best lines
+// up with the one before (WSOLA).
 namespace melodee {
 
 // A pattern's take as played: frames [offset, offset + frames) of `take`, from the pattern's top.
@@ -30,6 +37,10 @@ struct RegionClip {
     uint32_t fade_in = 0, fade_out = 0; // the take's frames
     float gain = 1;
     bool reverse = false;
+    uint16_t tempo = 1200; // tenths of a BPM it was recorded at
+    WarpMode mode = WarpMode::Stretch;
+    bool warp = false;     // fitted to the tempo playing (else as recorded)
+    float pitch = 1;       // Stretch: its semitones and cents, as a ratio of frequencies
     bool resident = false; // tests: every frame in memory, read without the pager
     uint32_t held = 0;     // frames from where it starts playing pinned for as long as the pack lives
 };
@@ -57,7 +68,10 @@ public:
     static constexpr unsigned voice_count = 4;
     static constexpr float fade_seconds = 0.005f;
     static constexpr double slack = 256; // device frames a voice may be off the song after a jump before it moves
+    static constexpr float window_seconds = 0.06f; // Stretch's windows, half of each overlapping the next
+    static constexpr float search_seconds = 0.008f, match_seconds = 0.008f; // where a window may start, what it matches
     void set_pager(StreamPager* p) { pager = p; }
+    void set_tempo(unsigned tenths) { tempo_now = std::max(tenths, 1u); } // the tempo playing, for Warp
     // On a tick of the track's pattern: `clip` its take (nullptr: none), `into` the device frames from the pattern's top
     // to this tick (unrounded), `top` when the pattern starts (again) here, `jumped` when it did not come here from the
     // tick before.
@@ -75,13 +89,28 @@ public:
 private:
     struct Voice {
         const RegionClip* clip = nullptr;
-        double pos = 0, step = 1; // frames into the region, and a device frame's worth of them
+        double pos = 0, step = 1; // frames into the region, and a device frame's worth of them (Warp: at the tempo playing)
+        double read = 1;          // Stretch: a window's own step through the take (its pitch)
+        bool stretch = false;
         int stream = -1;
         bool seeking = false, leaving = false;
         float gain = 1, fade = 0; // a fade: `fade` a frame
+        std::array<double, 2> tap {};      // Stretch: each window's place in the region
+        std::array<uint32_t, 2> age {};    // and how far through it is
+        std::array<bool, 2> on {};
+        uint32_t since = 0, window = 1, hop = 1;
     };
     std::array<Voice, voice_count> voices {}; // [0] the main voice
     StreamPager* pager = nullptr;
+    unsigned tempo_now = 1200;
+    // Stretch's sin² weight a frame of a window, worked out once for its length (60 ms at up to 96 kHz).
+    static constexpr unsigned max_window = 5760;
+    std::array<float, max_window> weights {};
+    uint32_t weights_for = 0;
+    // A device frame's worth of the take's frames: its rate against the device's, and with Warp the tempo against its.
+    double step_of(const RegionClip& c, float rate) const;
+    void steer(Voice& v, float rate); // the voice's steps for the tempo playing
+    double align(const Voice& v, const float* l, const float* r, uint32_t limit, double from, double near) const;
     void begin(const RegionClip* clip, double pos, bool fade_in, float rate);
     void retire_main(float rate);
     void close(Voice& v);

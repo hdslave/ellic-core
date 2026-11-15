@@ -1128,6 +1128,7 @@ void EngineHost::audio_tick(unsigned t, Slot& slot, uint32_t at) {
     const bool jumped = slot.audio_last == UINT32_MAX || at != slot.audio_last + 1;
     slot.audio_last = at;
     const RegionClip* clip = slot.audio_pack ? slot.audio_pack->clips[slot.pattern % pattern_count] : nullptr;
+    slot.audio.player.set_tempo(tempo); // a warped take follows the tempo playing
     slot.audio.player.follow(clip, pattern_frames(at), at == 0, jumped, dsp::sample_rate());
 }
 

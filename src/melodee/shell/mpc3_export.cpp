@@ -891,7 +891,9 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
                         put(audio, "sliceStart", whole(int(std::llround(take->offset * k))));
                         const bool to_end = take->offset + take->frames >= take->take_frames && wav.frames; // its file's own end, exact
                         put(audio, "sliceEnd", whole(to_end ? int(wav.frames) : int(std::llround((uint64_t(take->offset) + take->frames) * k))));
-                        put(audio, "warpEnable", false); // played as recorded
+                        put(audio, "warpEnable", take->warp); // MPC 3's own Warp at the tempo it was recorded at
+                        put(audio, "coarseTune", whole(take->semi));
+                        put(audio, "fineTune", whole(take->fine));
                         put(audio, "length", whole(place.length));
                         events.add(event);
                         continue;

@@ -109,9 +109,10 @@ const EngineInfo& engine_info(EngineKind kind) {
     // AUDIO (freeze plan F3, model/audio_track.h): records into its patterns and plays their takes; no values of its own.
     // Offered by the new-track picker, not among the engines.
     static const Sound audio_sounds[] {{"AUDIO", {{{-1, 0}}}}};
-    // B1 the pattern's take (CLIP, FADES), B2 what records (INPUT), B3 the track's mix, sends and effects.
+    // B1 the pattern's take (CLIP, FADES, WARP), B2 what records (INPUT), B3 the track's mix, sends and effects.
     static const StageGroups audio_stage {{{
-        {{{{"CLIP", StageKind::Clip, StagePicture::Region}, {"FADES", StageKind::Fades, StagePicture::Region}}}, 2},
+        {{{{"CLIP", StageKind::Clip, StagePicture::Region}, {"FADES", StageKind::Fades, StagePicture::Region},
+           {"WARP", StageKind::Warp, StagePicture::Region}}}, 3},
         {{{{"INPUT", StageKind::AudioInput, StagePicture::Input}}}, 1},
         {{{stage_mix, stage_sends, stage_fx}}, 3},
     }}};

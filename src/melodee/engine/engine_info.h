@@ -77,8 +77,8 @@ enum class StageKind : uint8_t {
     OpenEdit,          // a button that opens the Edit page instead of a Stage page (a MIDI track's B3: its every page)
     NewSynth, NewKit, NewMidi,                         // an empty track: what it becomes (Push)
     // Freeze plan F3, an audio track: the take of the pattern in hand (CLIP its level, start and end; FADES its fade in,
-    // fade out and reverse), and what it records (INPUT: source, monitor, gain).
-    Clip, Fades, AudioInput,
+    // fade out and reverse; WARP how it follows the tempo), and what it records (INPUT: source, monitor, gain).
+    Clip, Fades, Warp, AudioInput,
 };
 // What the picture over the knobs draws.
 enum class StagePicture : uint8_t {
