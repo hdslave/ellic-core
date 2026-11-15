@@ -36,7 +36,10 @@ struct ReleaseShape {
 };
 // `held`: frames the key was held; `cut`: the tail was stopped at its longest, not by silence. Empty when the note
 // is too short or too quiet to tell.
-ReleaseShape release_shape(const std::vector<float>& left, const std::vector<float>& right, uint64_t held, float rate, bool cut);
+// `quiet`: what counts as silent, dB (an input's own noise): under it a value is silence, and a note within 15 dB of
+// it as its key is let go tells nothing.
+ReleaseShape release_shape(const std::vector<float>& left, const std::vector<float>& right, uint64_t held, float rate, bool cut,
+                           float quiet = -100.0f);
 
 // The fall as an envelope plays it. A stage's seconds are an amp envelope's release as Melodee and an .xpm state it:
 // the level is e^-3 (26 dB down) after that long.

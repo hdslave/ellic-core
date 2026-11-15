@@ -55,6 +55,22 @@ public:
         uint64_t w = written_.load(std::memory_order_acquire), s = since_.load(std::memory_order_acquire);
         return uint32_t(std::min<uint64_t>(w - std::min(w, s), uint64_t(seconds) * rate()));
     }
+    // Any thread: the frames written since the start (the input's clock, at rate()).
+    uint64_t written() const { return written_.load(std::memory_order_acquire); }
+    // Any thread but audio: frames [from, from + frames), all written already and none older than 25 s, into l and
+    // r; false when they are not there (not written yet, written over, or the rate changed meanwhile).
+    bool copy(uint64_t from, uint32_t frames, float* l, float* r) const {
+        if (!left_) return false;
+        const unsigned at_rate = rate();
+        const uint32_t ring = std::min(capacity, (seconds + 1) * at_rate);
+        const uint64_t end = written_.load(std::memory_order_acquire);
+        if (from + frames > end || end - from > uint64_t(seconds) * at_rate) return false;
+        for (uint32_t f = 0; f < frames; ++f) {
+            const uint32_t i = uint32_t((from + f) % ring);
+            l[f] = left_[i]; r[f] = right_[i];
+        }
+        return written_.load(std::memory_order_acquire) - from <= ring && rate() == at_rate;
+    }
     // Service thread: the last `frames` (at most filled()) into l and r; false
     // when the writer caught up with the copy (nothing usable then).
     bool copy_last(uint32_t frames, float* l, float* r) const {

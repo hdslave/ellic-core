@@ -157,9 +157,9 @@ NoteAudio render_note(EngineHost& host, unsigned track, uint8_t key, uint8_t vel
     return a;
 }
 
-void trim_silence(NoteAudio& note, float rate) {
+void trim_silence(NoteAudio& note, float rate, float silence) {
     size_t last = std::min(note.left.size(), note.right.size());
-    while (last > 0 && std::fabs(note.left[last - 1]) < ring_silence && std::fabs(note.right[last - 1]) < ring_silence) --last;
+    while (last > 0 && std::fabs(note.left[last - 1]) < silence && std::fabs(note.right[last - 1]) < silence) --last;
     const size_t keep = std::min(std::min(note.left.size(), note.right.size()), last + size_t(0.005f * rate));
     if (keep >= note.left.size()) return;
     note.left.resize(keep); note.right.resize(keep);

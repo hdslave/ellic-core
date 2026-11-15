@@ -51,9 +51,9 @@ struct NoteAudio {
 NoteAudio render_note(EngineHost& host, unsigned track, uint8_t key, uint8_t velocity, uint64_t hold, PrintTap tap,
                       float most_tail, const std::function<bool()>& keep_going = {});
 
-// A one-shot note (a drum) cut where it falls silent (-70 dB), with a 5 ms fade, even before the key was let go: no
-// silence kept for the time the key was held.
-void trim_silence(NoteAudio& note, float rate);
+// A one-shot note (a drum) cut where it falls silent (under `silence`: -70 dB, or an input's own noise), with a 5 ms
+// fade, even before the key was let go: no silence kept for the time the key was held.
+void trim_silence(NoteAudio& note, float rate, float silence = 0.000316f);
 
 // A note whose held part sits off zero (a plug-in's DC offset, an uneven pulse wave), through a DC blocker (5 Hz,
 // one pole, so the note still starts from silence): the headroom back and no thump where a sample starts or stops.

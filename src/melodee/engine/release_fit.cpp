@@ -20,7 +20,8 @@ float rms_db(const std::vector<float>& m, size_t from, size_t n) {
 }
 } // namespace
 
-ReleaseShape release_shape(const std::vector<float>& left, const std::vector<float>& right, uint64_t held, float rate, bool cut) {
+ReleaseShape release_shape(const std::vector<float>& left, const std::vector<float>& right, uint64_t held, float rate, bool cut,
+                           float quiet) {
     ReleaseShape shape;
     shape.whole = !cut;
     const size_t frames = std::min(left.size(), right.size()), up = size_t(std::min<uint64_t>(held, frames));
@@ -50,12 +51,12 @@ ReleaseShape release_shape(const std::vector<float>& left, const std::vector<flo
             if (-slope * span >= 4.0) { shape.fading = true; fade = float(std::min(-slope, 120.0)); level = float(at_release); }
         }
     }
-    if (level < -85.0f) return shape; // too quiet by then to tell
+    if (level < quiet + 15.0f) return shape; // too quiet by then to tell
     // The fall: every 10 ms, the mean power from there on over 30 ms or as long again as the time since the release
     // (ReleaseShape::span()), so echoes count by their energy. A fading note's own fade is added back (what that span
     // would have lost held), for as long as it would still have been heard held (past that nothing can be told).
     const size_t hop = size_t(ReleaseShape::hop * rate);
-    const float told = shape.fading ? (level + 95.0f) / fade : 1e9f; // seconds
+    const float told = shape.fading ? (level - quiet - 5.0f) / fade : 1e9f; // seconds
     for (size_t at = up, n = 0; at + size_t(ReleaseShape::window * rate) / 2 <= frames; at += hop, ++n) {
         const float t = ReleaseShape::start_of(n), w = ReleaseShape::span(n);
         if (t > told) { shape.whole = false; break; }
@@ -66,7 +67,7 @@ ReleaseShape release_shape(const std::vector<float>& left, const std::vector<flo
             const double x = double(fade) * w * 0.2302585; // ln(10) / 10
             back = fade * t - float(10.0 * std::log10(x > 1e-6 ? (1.0 - std::exp(-x)) / x : 1.0));
         }
-        shape.db.push_back(db < -100.0f ? silent : std::clamp(db - level + back, silent, 20.0f));
+        shape.db.push_back(db < quiet ? silent : std::clamp(db - level + back, silent, 20.0f));
     }
     return shape;
 }
