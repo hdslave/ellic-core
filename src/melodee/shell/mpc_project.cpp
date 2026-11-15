@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #include "melodee/shell/mpc_project.h"
+#include "melodee/shell/mpc_wav_slices.h"
 #include "melodee/engine/engine_info.h"
 #include "melodee/engine/dsp.h"
 #include "melodee/model/scales.h"
@@ -550,6 +551,9 @@ std::string import_mpc_project(const std::vector<uint8_t>& file, const std::stri
     }
     if (!used) return "Nothing to import";
     report.tracks = used;
+    // Each file's chop, as the MPC keeps it in the WAV ("atem"): Chop on a pad of the whole file finds its slices.
+    for (unsigned n = 0; n < sample_slots; ++n)
+        if (project.samples[n].used() && !project.samples[n].instrument()) project.chops[n] = read_mpc_slices(project.samples[n].path);
     report.sequences = unsigned(sequences.size());
 
     // The tempo: the project's own when it is on, else each sequence's.

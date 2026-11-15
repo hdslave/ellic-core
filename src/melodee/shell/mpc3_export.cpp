@@ -19,6 +19,7 @@
 #include "melodee/model/sampler.h"
 #include "melodee/model/song_flatten.h"
 #include "melodee/shell/mpc_program.h"
+#include "melodee/shell/mpc_wav_slices.h"
 #include "melodee/shell/sample_library.h"
 #include <juce_core/juce_core.h>
 #include <algorithm>
@@ -194,6 +195,11 @@ public:
         return names[source] = file;
     }
     const Wav& info(const std::string& file) { return infos[file]; }
+    // The copy's name for a file already copied; empty when it was not (or is not there).
+    std::string copied(const std::string& source) const {
+        auto found = names.find(source);
+        return found == names.end() ? std::string() : found->second;
+    }
     // The MPC's entry for a file: the project's and a program's samples lists.
     static juce::var sample_entry(const std::string& file) {
         return juce::JSON::parse(juce::String("{\"version\": 1, \"name\": ") + juce::JSON::toString(juce::String(fs::path(file).stem().string())) +
@@ -866,6 +872,12 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
     for (const auto& b : buses) tracks.add(b.second);
     put(data, "tracks", juce::var(tracks));
     put(data, "sequences", juce::var(sequences));
+    // Each copied file's chop, in the WAV as the MPC keeps it ("atem" and "slic"), so Chop on the MPC finds the slices.
+    for (unsigned n = 0; n < sample_slots; ++n) {
+        if (!is_wav(project.samples[n]) || !project.chops[n].used()) continue;
+        const auto file = files.copied(project.samples[n].path);
+        if (!file.empty() && write_mpc_slices((data_folder / file).string(), project.chops[n])) ++report.chops;
+    }
     put(data, "samples", samples_of(files.all()));
     put(data, "masterTempoEnabled", !project.seq_tempo);
     put(data, "masterTempo", real(project.tempo / 10.0));

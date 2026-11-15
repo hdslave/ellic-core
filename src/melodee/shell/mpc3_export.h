@@ -27,6 +27,7 @@ struct Mpc3Export {
     unsigned tracks = 0, keygroups = 0, sequences = 0, pads = 0, notes = 0, samples = 0; // tracks: Drum tracks; keygroups: Keygroup tracks
     unsigned audio = 0, regions = 0; // Audio tracks of prints, and the printed patterns on them
     unsigned midi = 0;               // MIDI tracks
+    unsigned chops = 0;              // copied WAV files given their chop's slices
     unsigned song_bars = 0;          // the song, as the sequence "Song" (0: no song)
     bool song_left_out = false;      // no free pattern number for it
     bool song_full = false;          // a lane had more notes than a pattern holds

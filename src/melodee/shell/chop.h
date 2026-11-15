@@ -123,8 +123,7 @@ inline Slices chop(ChopMode mode, int amount, uint32_t from, uint32_t to, uint32
     if (!frames) return s;
     to = to && to <= frames ? to : frames;
     from = std::min(from, to > min_slice ? to - min_slice : 0);
-    s.start[s.count++] = from;
-    s.last = to;
+    s.whole(from, to);
     switch (mode) {
     case ChopMode::Threshold: {
         int threshold = std::clamp(amount, 0, 100) * 255 / 100;
