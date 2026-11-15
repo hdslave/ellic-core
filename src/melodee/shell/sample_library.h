@@ -115,6 +115,8 @@ public:
     // could not be read; an instrument's once each of its files has landed or failed.
     struct SlotLoad { bool settled = false, instrument = false; unsigned parts = 0, parts_in = 0; };
     SlotLoad slot_load(unsigned slot) const;
+    // True for a path the library loads as a multisampled instrument (an .sfz, a keygroup program, an .sf2 preset...).
+    static bool instrument_path(const std::string& path);
     // The slot a load last began work for; -1 while nothing loads.
     int loading_now() const { return now_loading.load(std::memory_order_relaxed); }
     void rescan() { scan_wanted.store(true); }
