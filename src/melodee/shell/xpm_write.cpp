@@ -82,7 +82,7 @@ void layer_text(std::string& s, unsigned number_, const XpmLayer* l, uint8_t roo
     t("SliceIndex", 128);
     t("Direction", 0);
     t("Offset", 0);
-    t("SliceStart", 0);
+    t("SliceStart", l ? int(l->start) : 0);
     t("SliceEnd", loop ? int(l->loop_end) : last); // a loop runs to the slice's end and back
     t("SliceLoopStart", loop ? int(l->loop_start) : 0);
     t("SliceLoop", loop ? 1 : 0);
@@ -125,10 +125,10 @@ void instrument_text(std::string& s, unsigned number_, const XpmKeygroup* k, dou
     t("VolumeHold", 0.0);
     t.flag("VolumeDecayType", true);
     t.flag("VolumeADEnvelope", false);
-    t("VolumeAttack", 0.0);
+    t("VolumeAttack", k && k->attack > 0 ? xpm_envelope_value(k->attack) : 0.0);
     t("VolumeDecay", 0.0);
     t("VolumeSustain", 1.0);
-    t("VolumeRelease", xpm_envelope_value(release));
+    t("VolumeRelease", xpm_envelope_value(k && k->release >= 0 ? k->release : release));
     t("VolumeAttackCurve", 0.375);
     t("VolumeDecayCurve", 0.375);
     t("VolumeReleaseCurve", 0.375);
@@ -162,7 +162,7 @@ void instrument_text(std::string& s, unsigned number_, const XpmKeygroup* k, dou
     t("MuteGroup", 0);
     for (const char* mute : {"MuteTarget1", "MuteTarget2", "MuteTarget3", "MuteTarget4"}) t(mute, 0);
     for (const char* simult : {"SimultTarget1", "SimultTarget2", "SimultTarget3", "SimultTarget4"}) t(simult, 0);
-    t("TriggerMode", k && k->one_shot ? 0 : 2); // one shot (a drum), else held while the key is
+    t("TriggerMode", k && k->on_release ? 1 : k && k->one_shot ? 0 : 2); // on the key's release (a tail), one shot (a drum), else held
     t("WarpTempo", 120.0);
     t.flag("BpmLock", true);
     t.flag("WarpEnable", false);

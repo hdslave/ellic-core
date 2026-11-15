@@ -22,12 +22,19 @@ struct XpmLayer {
     // A loop while the key is held: from loop_end back to loop_start (0, 0: none).
     uint32_t loop_start = 0, loop_end = 0;
     bool looped() const { return loop_end > loop_start; }
+    uint32_t start = 0;    // the frame it plays from (a release layer: where the key was let go in its WAV)
+    uint32_t held = 0;     // the auto sampler's: frames the key was held when it was recorded
 };
 struct XpmKeygroup {
     uint8_t low = 0, high = 127;
     std::vector<XpmLayer> layers; // four at most, lowest velocity first
     bool cycle = false;           // the layers are takes of one hit, played in turn (ZonePlay Cycle), not by velocity
     bool one_shot = false;        // plays out whole however short the press (a drum), else held while the key is
+    // Played when the key is let go (TriggerMode Note Off): a looped note's own recorded tail, from where its key was
+    // let go, as the loop fades under it. Its keys and layers are those of the keygroup it follows.
+    bool on_release = false;
+    double attack = 0;            // seconds
+    double release = -1;          // seconds after the key is let go; below 0 the program's
 };
 struct XpmProgram {
     std::string name;

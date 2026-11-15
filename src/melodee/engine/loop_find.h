@@ -12,6 +12,12 @@
 // then crossfaded into those before the start, so the jump back
 // is seamless. Nothing is changed when no loop is found (a hold under 0.3 s,
 // silence, or no start that matches well enough).
+//
+// With `always` (a sound heard to sustain, so it must play on while held), a
+// sound that never repeats closely (detuned unison saws, chorus, noise) still
+// gets a loop: most of the held part, from a third of the way in, its join
+// smeared by an equal-power crossfade of up to half a second (what the
+// sample libraries do for pads), `match` then the poor match it had.
 namespace melodee {
 
 struct LoopPoints {
@@ -20,6 +26,6 @@ struct LoopPoints {
     bool found() const { return end > start; }
 };
 
-LoopPoints find_loop(std::vector<float>& left, std::vector<float>& right, uint64_t held, float rate);
+LoopPoints find_loop(std::vector<float>& left, std::vector<float>& right, uint64_t held, float rate, bool always = false);
 
 } // namespace melodee

@@ -37,7 +37,7 @@ float level_before(const std::vector<float>& m, uint32_t at, unsigned w) {
 }
 } // namespace
 
-LoopPoints find_loop(std::vector<float>& left, std::vector<float>& right, uint64_t held, float rate) {
+LoopPoints find_loop(std::vector<float>& left, std::vector<float>& right, uint64_t held, float rate, bool always) {
     LoopPoints out;
     const size_t frames = std::min(left.size(), right.size());
     held = std::min<uint64_t>(held, frames);
@@ -68,7 +68,15 @@ LoopPoints find_loop(std::vector<float>& left, std::vector<float>& right, uint64
         const float score = shape - 0.1f * std::fabs(level_before(m, starts[i], window) - end_db);
         if (score > best) { best = score; best_shape = shape; start = starts[i]; }
     }
-    if (best_shape < good_enough || !start) return out;
+    // Nothing alike enough: none, or (always) the long loop, its join smeared rather than matched.
+    bool smeared = false;
+    if (best_shape < good_enough || !start) {
+        if (!always) return out;
+        auto from = rising(m, std::max<uint64_t>(held / 3, uint64_t(window) * 2), end - shortest);
+        if (from.empty()) return out;
+        start = from.front();
+        smeared = true;
+    }
     // What it faded by over the loop, made up: a gain rising across the loop to that much at its end, and the frames
     // after it (the release) raised the same, so the loop goes round at one level and nothing after it jumps.
     const float faded = std::clamp(level_before(m, start, window) - end_db, 0.0f, 6.0f);
@@ -80,11 +88,12 @@ LoopPoints find_loop(std::vector<float>& left, std::vector<float>& right, uint64
             if (f < m.size()) m[f] = float(m[f] * g);
         }
     }
-    // The crossfade: the frames before the end turn into those before the start.
-    const unsigned fade = unsigned(std::min<uint64_t>({uint64_t((end - start) / 4), uint64_t(0.05f * rate), start}));
+    // The crossfade: the frames before the end turn into those before the start. Matched: up to 50 ms, straight.
+    // Smeared: up to half a second, equal power (the two places are unlike, so their powers add, not their waves).
+    const unsigned fade = unsigned(std::min<uint64_t>({uint64_t((end - start) / (smeared ? 3 : 4)), uint64_t((smeared ? 0.5f : 0.05f) * rate), start}));
     for (unsigned i = 0; i < fade; ++i) {
         const float t = float(i + 1) / float(fade + 1);
-        const float keep = 1 - t, take = t; // the two places are alike: a straight fade keeps the level
+        const float keep = smeared ? std::cos(t * 1.5707963f) : 1 - t, take = smeared ? std::sin(t * 1.5707963f) : t;
         const size_t at = end - fade + i, from = start - fade + i;
         left[at] = keep * left[at] + take * left[from];
         right[at] = keep * right[at] + take * right[from];

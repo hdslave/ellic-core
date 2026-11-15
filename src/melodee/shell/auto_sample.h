@@ -100,6 +100,7 @@ struct AutoSampleResult {
     unsigned samples = 0;
     unsigned loops = 0;  // samples given a loop
     unsigned centred = 0; // samples whose DC offset was taken out
+    unsigned tails = 0;  // keygroups given their recorded tail on the key's release
     float gain_db = 0;   // the program's gain (normalize)
     bool post_fx = false;
     double seconds = 0;
