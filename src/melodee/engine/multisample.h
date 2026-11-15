@@ -50,10 +50,6 @@ struct SampleZone {
     // velocity, `rt_decay` dB quieter a second the key was held, and is not played by the press itself.
     bool on_release = false;
     float rt_decay = 0;
-    // A release sample's level where it starts (RMS of its first 20 ms, its file's own): the sampler starts it at the
-    // level its key's note plays at as it is let go (an auto sampled tail follows its loop, however long it was held).
-    // 0: not known, as recorded.
-    float start_level = 0;
     // Crossfades (xfin_* / xfout_*): over these keys and velocities it fades in, then out; a pair equal:
     // none. `power`: equal power (the format's default), else straight gain.
     uint8_t xfin_lokey = 0, xfin_hikey = 0, xfout_lokey = 127, xfout_hikey = 127;

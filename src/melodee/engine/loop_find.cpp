@@ -35,6 +35,49 @@ float level_before(const std::vector<float>& m, uint32_t at, unsigned w) {
     for (unsigned i = 1; i <= w; ++i) sum += double(m[at - i]) * m[at - i];
     return sum > 1e-14 * w ? float(10 * std::log10(sum / w)) : -140.0f;
 }
+
+// A stretch's level, and how bright it is (its slope's level against its own), in dB, from running sums.
+struct Levels {
+    std::vector<double> power, slope; // sums up to each frame
+    explicit Levels(const std::vector<float>& m) : power(m.size() + 1, 0.0), slope(m.size() + 1, 0.0) {
+        for (size_t f = 0; f < m.size(); ++f) {
+            const double d = f ? double(m[f]) - m[f - 1] : 0.0;
+            power[f + 1] = power[f] + double(m[f]) * m[f];
+            slope[f + 1] = slope[f] + d * d;
+        }
+    }
+    float level(size_t a, size_t b) const {
+        const double sum = power[b] - power[a];
+        return b > a && sum > 1e-14 * double(b - a) ? float(10 * std::log10(sum / double(b - a))) : -140.0f;
+    }
+    float bright(size_t a, size_t b) const {
+        const double p = power[b] - power[a], d = slope[b] - slope[a];
+        return p > 1e-14 && d > 1e-16 ? float(10 * std::log10(d / p)) : -140.0f;
+    }
+};
+
+// The most a run of values climbs back from any low before it: nothing for one that only falls (a fading note).
+float most_rise(const std::vector<float>& y) {
+    float low = y.empty() ? 0.0f : y[0], rise = 0;
+    for (float v : y) { low = std::min(low, v); rise = std::max(rise, v - low); }
+    return rise;
+}
+
+// Whether the held sound moves: past its first half second (a quarter of it, when that is more), its level or its
+// brightness, a tenth of a second at a time, climbs 1.5 dB or more back from a low. Detuned oscillators beating, an
+// LFO on the level or the filter, a chorus: a short loop would freeze one moment of it. A note that only fades, at
+// whatever curve, does not move.
+bool moves(const Levels& of, size_t held, float rate) {
+    const size_t piece = size_t(0.1f * rate), from = std::max(size_t(0.5f * rate), held / 4);
+    float loudest = -140.0f;
+    for (size_t at = 0; at + piece <= held; at += piece) loudest = std::max(loudest, of.level(at, at + piece));
+    std::vector<float> level, bright;
+    for (size_t at = from; at + piece <= held; at += piece) {
+        if (of.level(at, at + piece) < loudest - 50.0f) break; // it has died away: what is left is not the sound
+        level.push_back(of.level(at, at + piece)); bright.push_back(of.bright(at, at + piece));
+    }
+    return level.size() >= 8 && (most_rise(level) >= 1.5f || most_rise(bright) >= 1.5f);
+}
 } // namespace
 
 LoopPoints find_loop(std::vector<float>& left, std::vector<float>& right, uint64_t held, float rate, bool always) {
@@ -54,6 +97,66 @@ LoopPoints find_loop(std::vector<float>& left, std::vector<float>& right, uint64
     if (ends.empty()) return out;
     const uint32_t end = ends.back();
     if (end < shortest + window) return out;
+    // A sound that moves: a long loop, from a place where it was in the state it is in at the end. The state: its level
+    // and brightness over the 0.4 s before, a tenth of a second at a time (so where it is heading counts too). The
+    // start is looked for from a fifth of the hold on (0.3 s at least), leaving a third of the hold (0.4 s at least)
+    // to loop. Then the rising crossing within 20 ms of it whose wave is most like the end's, and a crossfade of up
+    // to a second: straight where the two stretches are alike in wave, else equal power.
+    const Levels of(m);
+    const size_t piece = size_t(0.1f * rate);
+    { // A note that has died away by the time its key is let go (50 dB under its loudest) has nothing to loop.
+        float loudest = -140.0f;
+        for (size_t at = 0; at + piece <= size_t(held); at += piece) loudest = std::max(loudest, of.level(at, at + piece));
+        if (end >= piece && of.level(end - piece, end) < loudest - 50.0f) return out;
+    }
+    const size_t first = std::max({4 * piece, size_t(held / 5), size_t(0.3f * rate)});
+    const size_t room = std::max(size_t(held / 3), size_t(0.4f * rate));
+    if (moves(of, size_t(held), rate) && end >= 4 * piece && size_t(end) > first + room) {
+        auto apart = [&](size_t at) {
+            float sum = 0;
+            for (size_t k = 0; k < 4; ++k) {
+                const size_t a = at - (k + 1) * piece, b = at - k * piece, ea = end - (k + 1) * piece, eb = end - k * piece;
+                sum += std::fabs(of.level(a, b) - of.level(ea, eb)) + 0.5f * std::fabs(of.bright(a, b) - of.bright(ea, eb));
+            }
+            return sum / 4;
+        };
+        const size_t hop = std::max<size_t>(1, size_t(0.01f * rate)), last = size_t(end) - room;
+        float nearest = 1e9f;
+        for (size_t at = first; at <= last; at += hop) nearest = std::min(nearest, apart(at));
+        size_t place = first;
+        if (nearest <= 1.5f) { // it comes round to where it ends (an LFO's turns): the earliest such place, whole turns
+            for (size_t at = first; at <= last; at += hop) if (apart(at) <= nearest + 0.5f) { place = at; break; }
+        } else { // it never does within the hold (oscillators drifting apart): the longest loop, from the place in the
+                 // first fifth of the stretch most like the end; the crossfade's second carries the rest, as one more
+                 // of the swells the sound makes anyway
+            float best = 1e9f;
+            for (size_t at = first; at <= first + (last - first) / 5; at += hop) {
+                const float d = apart(at);
+                if (d < best) { best = d; place = at; }
+            }
+        }
+        uint32_t start = uint32_t(place);
+        float match = 0;
+        const size_t reach = size_t(0.02f * rate);
+        for (uint32_t c : rising(m, place > reach + window ? place - reach : window, place + reach)) {
+            const float a = alike(m, c, end, window);
+            if (a >= match) { match = a; start = c; }
+        }
+        const unsigned fade = unsigned(std::min<uint64_t>({uint64_t((end - start) / 3), uint64_t(rate), start}));
+        const bool straight = fade > 0 && alike(m, start, end, std::min<unsigned>(fade, unsigned(0.2f * rate))) >= 0.5f;
+        for (unsigned i = 0; i < fade; ++i) {
+            const float t = float(i + 1) / float(fade + 1);
+            const float keep = straight ? 1 - t : std::cos(t * 1.5707963f), take = straight ? t : std::sin(t * 1.5707963f);
+            const size_t at = end - fade + i, from = start - fade + i;
+            left[at] = keep * left[at] + take * left[from];
+            right[at] = keep * right[at] + take * right[from];
+        }
+        out.start = start;
+        out.end = end;
+        out.match = match;
+        out.moving = true;
+        return out;
+    }
     const uint64_t earliest = std::max<uint64_t>({end > longest ? end - longest : 0, held / 4, uint64_t(window) * 2});
     auto starts = rising(m, earliest, end - shortest);
     // Many crossings (noise): every one compared would be slow; an even spread of 400 is enough.
@@ -102,6 +205,13 @@ LoopPoints find_loop(std::vector<float>& left, std::vector<float>& right, uint64
     out.end = end;
     out.match = best_shape;
     return out;
+}
+
+bool sound_moves(const std::vector<float>& sound, uint64_t held, float rate) {
+    held = std::min<uint64_t>(held, sound.size());
+    if (rate <= 0 || !held) return false;
+    const std::vector<float> m(sound.begin(), sound.begin() + long(held));
+    return moves(Levels(m), size_t(held), rate);
 }
 
 } // namespace melodee

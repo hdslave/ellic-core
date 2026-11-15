@@ -22,7 +22,10 @@ namespace melodee {
 // sound of its own, sampled once each, not stretched over its neighbours; `keys` those of the range that sound.
 // `accent`: the velocity the sound jumps at (the layers split there), 0 none. `takes`: hits of one key differ, so each
 // key is taken this many times and the program plays them in turn. `sustains`: a held key keeps its level, so LOOP
-// (at Auto) loops each note's held part and it plays on for as long as the key is held.
+// (at Auto) loops each note's held part and it plays on for as long as the key is held. `moves`: held, its level or
+// brightness keeps changing (detuned oscillators, an LFO), so its loop must be long. `hold`: the seconds HOLD (at
+// Auto) holds each key: 2 for a steady sound, 8 for one that moves, and for one that fades as long as it is heard
+// (1 to 8).
 enum class AutoKind : uint8_t { Keys, Mono, Drums };
 struct AutoFindings {
     bool heard = false;
@@ -32,6 +35,11 @@ struct AutoFindings {
     uint8_t accent = 0;
     uint8_t takes = 1;
     bool sustains = false;
+    bool moves = false;
+    float hold = 0; // seconds; 0: not heard
+    // How it falls let go after half a second, while it is loud (engine/release_fit.h): the release for a sound whose
+    // sampled notes are held until they have died away, and so tell nothing of it. Seconds; 0: not heard.
+    float release = 0, release_slow = 0, release_share = 0;
     std::array<uint64_t, 2> keys {};
     uint8_t scan_low = 0, scan_high = 127; // drums: the keys the check tried (outside them nothing is known)
     bool sounds(unsigned key) const {
@@ -46,7 +54,8 @@ struct AutoSampleSettings {
     uint8_t low = 36, high = 96; // the lowest and highest root, MIDI notes (C2, C7)
     uint8_t step = 3;            // semitones between roots
     uint8_t layers = 1;          // velocity layers, 1-4
-    float hold = 2.0f;           // seconds each key is held
+    float hold = 2.0f;           // seconds each key is held, when not at Auto
+    bool hold_auto = true;       // HOLD at Auto: as long as the check found the sound needs (AutoFindings::hold)
     float tail = 8.0f;           // seconds of release kept at most
     bool post_fx = false;        // taken after the track's chain (its effects in the samples), else before it
     bool loop = false;           // each sample a loop where the key was held (engine/loop_find.h), when not at Auto
@@ -54,6 +63,12 @@ struct AutoSampleSettings {
     bool normalize = true;       // one gain for the whole program, its loudest sample at -1 dB (layers keep their balance)
     AutoFindings found;          // what the check heard
     bool looping() const { return loop_auto ? found.sustains && found.kind != AutoKind::Drums : loop; }
+    float hold_seconds() const {
+        if (!hold_auto) return hold;
+        if (!found.heard || found.hold <= 0) return 2.0f;
+        if (!loop_auto && loop && !found.sustains) return 2.0f; // LOOP put on a sound that fades: looped early, while it sounds
+        return found.hold;
+    }
     // The velocity layers taken: as asked, two at least where the check heard an accent.
     unsigned layer_count() const { return std::clamp<unsigned>(found.accent && layers < 2 ? 2 : layers, 1, 4); }
     // Takes of each key: the check's, with one velocity layer (MPC plays a keygroup's layers in turn or by velocity, not both).
@@ -100,7 +115,9 @@ struct AutoSampleResult {
     unsigned samples = 0;
     unsigned loops = 0;  // samples given a loop
     unsigned centred = 0; // samples whose DC offset was taken out
-    unsigned tails = 0;  // keygroups given their recorded tail on the key's release
+    // The release fitted to how its notes fell (engine/release_fit.h): seconds; a second stage's seconds and share (0: none).
+    float release = 0, release_slow = 0, release_share = 0;
+    std::string release_note; // what the fit went by, for `melodee-print status`
     float gain_db = 0;   // the program's gain (normalize)
     bool post_fx = false;
     double seconds = 0;

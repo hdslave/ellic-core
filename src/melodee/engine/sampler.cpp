@@ -664,23 +664,6 @@ void SamplerEngine::release_zones(int pad, int semitones) {
     const int articulation = multi->switched >= 0 ? multi->switched : multi->switch_default;
     seed = seed * 1664525u + 1013904223u;
     const float dice = 0.5f * (int32_t(seed) / 2147483648.0f + 1.0f);
-    // How loud the key's note plays as it is let go (before a release voice takes a voice's place): its envelope and
-    // gain over what it has just read, 20 ms of its file (in memory still). A tail that knows where it starts is
-    // started at that level, so letting go early, late or on a loop's swell neither jumps nor drops.
-    double playing = 0;
-    bool heard = false;
-    for (const auto& o : voices) {
-        if (!o.zone || o.pad != pad || o.semis != semitones || o.multi != multi || o.choked || o.zone_index >= multi->zones.size()) continue;
-        if (multi->zones[o.zone_index].on_release || !o.l || !o.r) continue;
-        const int64_t at = int64_t(o.position), from = std::max<int64_t>(int64_t(o.start), at - 882);
-        double sum = 0;
-        for (int64_t f = from; f < at; ++f) { const double m = 0.5 * (double(o.l[f]) + o.r[f]); sum += m * m; }
-        const double read = at > from ? std::sqrt(sum / double(at - from)) : 0.0;
-        const double level = double(o.env.level) * o.gain * o.duck * read;
-        playing += level * level;
-        heard = true;
-    }
-    playing = std::sqrt(playing);
     for (size_t n = 0; n < multi->zones.size(); ++n) {
         const auto& z = multi->zones[n];
         if (!z.on_release || key < z.low_key || key > z.high_key || vel < z.low_velocity || vel > z.high_velocity) continue;
@@ -692,10 +675,6 @@ void SamplerEngine::release_zones(int pad, int semitones) {
         Voice& v = free_voice();
         start(v, sound, pad, vel, semitones, -1, pad, &z, multi, key);
         if (v.pad >= 0 && z.rt_decay > 0) { v.fall = std::pow(10.0f, -z.rt_decay * held / 20.0f); v.gain *= v.fall; v.aim.gain *= v.fall; }
-        if (v.pad >= 0 && heard && z.start_level > 0 && v.aim.gain > 0) { // as loud as the note was, 12 dB more at most
-            const float match = float(std::min(4.0, playing / (double(v.aim.gain) * z.start_level)));
-            v.fall *= match; v.gain *= match; v.aim.gain *= match;
-        }
     }
 }
 

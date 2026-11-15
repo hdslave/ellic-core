@@ -14,6 +14,7 @@
 // Keys), become a Keygroup track of their own, the pad's notes going with them.
 #include "melodee/shell/mpc3_export.h"
 #include "melodee/engine/dsp.h"
+#include "melodee/engine/engine_info.h"
 #include "melodee/engine/keygroup.h"
 #include "melodee/engine/midi_engine.h"
 #include "melodee/engine/sfz.h"
@@ -22,6 +23,7 @@
 #include "melodee/shell/mpc_program.h"
 #include "melodee/shell/mpc_wav_slices.h"
 #include "melodee/shell/sample_library.h"
+#include "melodee/shell/xpm_write.h"
 #include <juce_core/juce_core.h>
 #include <algorithm>
 #include <cmath>
@@ -233,8 +235,8 @@ struct Layer {
 struct Keygroup {
     uint8_t low_key = 0, high_key = 127;
     bool one_shot = false;
-    bool on_release = false;          // played when the key is let go (an auto sampled note's tail)
-    int attack = 0, release = 0;      // its zones' envelope over the pad's, in the pad's steps
+    int attack = 0, release = 0;      // its zones' envelope over the pad's, in the pad's steps (keygroups over the
+                                      // same keys with a release each: a fall of two stages, engine/release_fit.h)
     std::vector<Layer> layers;
 };
 
@@ -267,13 +269,12 @@ std::vector<Layer> wav_layers(const Project& project, const PadSound& pad, Mpc3E
     return out;
 }
 
-// An instrument's zones as layers: the first of each round robin, release samples too (their keygroups play on the
-// key's release), WAV files only.
+// An instrument's zones as layers: the first of each round robin, no release samples, WAV files only.
 std::vector<std::pair<SampleZone, Layer>> instrument_layers(const std::string& path, const SfzRead& read, Mpc3Export& report) {
     std::vector<std::pair<SampleZone, Layer>> out;
     for (const auto& region : read.regions) {
         const auto& zone = region.zone;
-        if (zone.sequence > 1) continue;
+        if (zone.on_release || zone.sequence > 1) continue;
         std::string source = fs::path(region.sample).is_absolute() ? region.sample : instrument_zone_file(path, region.sample);
         if (source.empty() || !wav_named(source)) { ++report.skipped_pads; continue; }
         Layer layer;
@@ -577,7 +578,7 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
             plan.mono = read.mono; plan.legato = read.legato; plan.glide = read.glide;
             for (auto& [zone, layer] : zones) { // keygroups by their keys, in the order they come
                 auto same = std::find_if(plan.keys.begin(), plan.keys.end(), [&](const Keygroup& k) {
-                    return k.low_key == zone.low_key && k.high_key == zone.high_key && k.on_release == zone.on_release;
+                    return k.low_key == zone.low_key && k.high_key == zone.high_key && k.attack == zone.attack && k.release == zone.release;
                 });
                 if (same == plan.keys.end()) {
                     if (plan.keys.size() == mpc_pads) { ++report.skipped_pads; continue; }
@@ -585,7 +586,6 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
                     made.low_key = zone.low_key;
                     made.high_key = zone.high_key;
                     made.one_shot = zone.one_shot;
-                    made.on_release = zone.on_release;
                     made.attack = zone.attack; made.release = zone.release;
                     plan.keys.push_back(made);
                     same = plan.keys.end() - 1;
@@ -655,11 +655,15 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
                         fill_sound(instrument, pad, false, plan.instrument ? 0 : pad.pitch, group.one_shot);
                         put(instrument, "lowNote", whole(group.low_key));
                         put(instrument, "highNote", whole(group.high_key));
-                        put(instrument, "triggerMode", whole(group.on_release ? 1 : group.one_shot ? 0 : 2));
-                        if (group.attack || group.release) { // its own stages: a tail fading in, the loop it follows fading out
+                        put(instrument, "triggerMode", whole(group.one_shot ? 0 : 2));
+                        if (plan.instrument) {
+                            // An instrument's attack and release as the MPC's 0..1 for the seconds Melodee plays them
+                            // in (its zones' own stages over the pad's): what read_keygroup() made of them, back.
                             const auto& amp = field(field(instrument, "synthSection"), "ampEnvelope");
-                            put(field(amp, "Attack"), "value0", real(fraction(uint8_t(std::clamp(pad.attack + group.attack, 0, 100)))));
-                            put(field(amp, "Release"), "value0", real(fraction(uint8_t(std::clamp(pad.release + group.release, 0, 100)))));
+                            const float attack = time_seconds(std::clamp(pad.attack + group.attack, 0, 100)) * 0.3f;
+                            const float release = time_seconds(std::clamp(pad.release + group.release, 0, 100)) * 0.5f + 0.003f;
+                            put(field(amp, "Attack"), "value0", real(xpm_envelope_value(attack)));
+                            put(field(amp, "Release"), "value0", real(xpm_envelope_value(release)));
                         }
                         if (!plan.instrument) {
                             const auto& first = group.layers.front();

@@ -104,12 +104,23 @@ bool probe_slides_apart(const std::vector<float>& x, size_t onset, float from_hz
     return hz > 0 && std::fabs(semitones(hz, to_hz)) > 1.0f && std::fabs(semitones(hz, from_hz)) < std::fabs(semitones(hz, to_hz));
 }
 
-bool probe_sustains(const std::vector<float>& x, size_t from, size_t to, float rate) {
+bool probe_sustains(const std::vector<float>& x, size_t from, size_t to, float rate, float most) {
     to = std::min(to, x.size());
     if (to <= from + size_t(0.4f * rate)) return false;
     const size_t quarter = (to - from) / 4;
     const float start = probe_db(x, from, quarter), end = probe_db(x, to - quarter, quarter);
-    return end > -55.0f && start - end < 4.0f;
+    return end > -80.0f && start - end < most;
+}
+
+float probe_fade_seconds(const std::vector<float>& x, float rate) {
+    const size_t piece = size_t(0.1f * rate);
+    if (!piece || x.size() < piece) return float(x.size()) / std::max(rate, 1.0f);
+    std::vector<float> level;
+    for (size_t at = 0; at + piece <= x.size(); at += piece) level.push_back(probe_db(x, at, piece));
+    const float floor = *std::max_element(level.begin(), level.end()) - 45.0f;
+    size_t last = level.size(); // the last piece still over the floor, then one more
+    while (last > 0 && level[last - 1] < floor) --last;
+    return float(std::min(last + 1, level.size()) * piece) / rate;
 }
 
 uint8_t probe_accent(const std::vector<uint8_t>& velocities, const std::vector<float>& db, const std::vector<float>& bright) {
