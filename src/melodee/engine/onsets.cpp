@@ -431,9 +431,12 @@ BeatGrid track_beats(const std::vector<float>& flux, const std::vector<Hit>& hit
 } // namespace
 
 unsigned find_hits(const SampleData& s, std::array<Hit, max_hits>& out, BeatGrid& beats) {
+    return find_hits_in(model_mono(s), out, beats);
+}
+
+unsigned find_hits_in(const std::vector<float>& mono, std::array<Hit, max_hits>& out, BeatGrid& beats) {
     std::vector<Hit> found;
     std::vector<float> flux;
-    const auto mono = model_mono(s);
     analyse(mono, found, flux);
     // Whether it starts with an attack: a peak in its first 10 ms at least a quarter of its highest.
     float peak = 0, opening = 0;

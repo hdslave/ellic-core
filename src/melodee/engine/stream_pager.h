@@ -48,8 +48,9 @@ public:
     // restart(), close() and block() take a short spin lock, as kit tracks may
     // render on several cores at once; a stream's own calls (place(), limit(),
     // dead()) are its voice's alone. open() gives a stream, or -1 with none free.
-    // `safe`: frames from `frame` on that are held already (hold()), read at once; past them the pager's word is
-    // waited for (a zone's start and loop are held a chunk; freeze plan F2b: a print's start and bar lines).
+    // `safe`: frames from `frame` on (reversed: down to it) that are held already (hold()), read at once; past them
+    // the pager's word is waited for (a zone's start and loop are held a chunk; freeze plan F2b: a print's start and
+    // bar lines; a long kit sample's pads' starts, ends and loop points).
     int open(ZonePart& part, uint32_t frame, bool reverse, float speed, uint32_t safe = stream_chunk);
     void restart(int stream, uint32_t frame, uint32_t safe = stream_chunk); // a loop came round to here
     void place(int stream, uint32_t frame) { slots[size_t(stream)].at.store(frame, std::memory_order_relaxed); }
@@ -68,6 +69,10 @@ public:
     // The landing thread, before the part is published: frames that stay in
     // memory for as long as the part does. False when they could not be pinned.
     bool hold(ZonePart& part, uint32_t frame, uint32_t frames);
+    // A part read in place, any thread but audio and the pager's (its chunks are counted under its source's lock):
+    // one chunk held (its count raised, read from the file when it was 0), or let go (its memory given back at 0).
+    bool hold_chunk(ZonePart& part, uint32_t chunk) { return chunk < part.pins.size() && pin_chunk(part, chunk); }
+    void let_go(ZonePart& part, uint32_t chunk) { if (chunk < part.pins.size()) unpin_chunk(part, chunk); }
 
     bool pump(); // one pass: messages, then a chunk for each stream that wants one; true if it did anything
 
@@ -95,6 +100,7 @@ private:
         uint32_t frame = 0, serial = 0;
         float speed = 1;
     };
+    static uint32_t head_of(uint32_t frame, uint32_t safe, bool reverse, uint32_t total);
     void begin(Work& work, const Message& message);
     void release(Work& work);
     bool step(unsigned stream);

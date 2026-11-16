@@ -111,7 +111,7 @@ int StreamPager::open(ZonePart& part, uint32_t frame, bool reverse, float speed,
         s.closing = false;
         s.dead.store(false, std::memory_order_relaxed);
         s.reverse = reverse;
-        s.head = uint32_t(std::min<uint64_t>(uint64_t(frame) + safe, part.total));
+        s.head = head_of(frame, safe, reverse, part.total);
         s.at.store(frame, std::memory_order_relaxed);
         Message m;
         m.kind = Message::Open; m.stream = int16_t(n); m.reverse = reverse; m.part = &part; m.frame = frame; m.speed = speed;
@@ -125,7 +125,7 @@ int StreamPager::open(ZonePart& part, uint32_t frame, bool reverse, float speed,
 void StreamPager::restart(int stream, uint32_t frame, uint32_t safe) {
     Sending held(sending);
     auto& s = slots[size_t(stream)];
-    s.head = uint32_t(std::min<uint64_t>(uint64_t(frame) + safe, UINT32_MAX));
+    s.head = head_of(frame, safe, s.reverse, UINT32_MAX);
     s.at.store(frame, std::memory_order_relaxed);
     Message m;
     m.kind = Message::Restart; m.stream = int16_t(stream); m.frame = frame; m.reverse = s.reverse;
@@ -133,11 +133,16 @@ void StreamPager::restart(int stream, uint32_t frame, uint32_t safe) {
     messages.push(m); // on overflow the head still plays, and a gap follows
 }
 
+uint32_t StreamPager::head_of(uint32_t frame, uint32_t safe, bool reverse, uint32_t total) {
+    if (!reverse) return uint32_t(std::min<uint64_t>(uint64_t(frame) + safe, total));
+    return safe ? (frame + 1 > safe ? frame + 1 - safe : 0) : UINT32_MAX; // reversed: from here down, held; none: nothing
+}
+
 uint32_t StreamPager::limit(int stream) const {
     const auto& s = slots[size_t(stream)];
     uint64_t ready = s.ready.load(std::memory_order_acquire);
-    if (uint32_t(ready >> 32) == s.serial) return s.reverse ? uint32_t(ready) : std::max(uint32_t(ready), s.head);
-    return s.reverse ? UINT32_MAX : s.head;
+    if (uint32_t(ready >> 32) == s.serial) return s.reverse ? std::min(uint32_t(ready), s.head) : std::max(uint32_t(ready), s.head);
+    return s.head;
 }
 
 void StreamPager::close(int stream) {

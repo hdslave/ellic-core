@@ -65,6 +65,7 @@ void SamplerEngine::start(Voice& v, const PadSound& sound, int pad, int velocity
     const SampleData* data = (*samples)[sound.sample];
     ZonePart* part = zone && multi ? &multi->parts[zone->part] : nullptr;
     if (!data || (!part && !data->frames)) return;
+    ZonePart* streamed = !part && data->stream ? data->stream.get() : nullptr; // a long WAV read from the card
     glide_setup();
     // A pad in a mute group cuts the others in it; a mono pad cuts what it played before, at any pitch (16 Levels
     // plays one note at a time on a mono pad: set it to Poly for chords).
@@ -79,16 +80,16 @@ void SamplerEngine::start(Voice& v, const PadSound& sound, int pad, int velocity
     // A sample's frames are at its own rate (the file's, or the capture's), and so is a zone's part (44.1 kHz laid
     // out in the cache, its file's when that is read in place): the pad's 44.1 kHz positions are scaled there, and each
     // device frame reads that much further on (aim()), however the rates stand.
-    v.rate = part ? part->rate : float(data->rate);
+    v.rate = part ? part->rate : streamed ? streamed->rate : float(data->rate);
     v.scale = double(v.rate) / dsp::model_rate;
     auto at_rate = [&](uint32_t frame) { return v.scale == 1.0 ? frame : uint32_t(std::llround(frame * v.scale)); };
-    const uint32_t total = part ? part->total : data->frames;
+    const uint32_t total = part ? part->total : streamed ? streamed->total : data->frames;
     v.start = std::min(zone ? zone->start : at_rate(sound.start), total - 1);
     uint32_t end = zone ? zone->end : at_rate(sound.end);
     v.end = end && end <= total ? end : total;
     if (v.end <= v.start + 1) { v.pad = -1; return; }
-    v.l = part ? part->left : data->left.data();
-    v.r = part ? part->right : data->right.data();
+    v.l = part ? part->left : streamed ? streamed->left : data->left.data();
+    v.r = part ? part->right : streamed ? streamed->right : data->right.data();
     v.reverse = sound.reverse;
     v.position = v.reverse ? v.end - 1 : v.start;
     v.total = total;
@@ -101,7 +102,7 @@ void SamplerEngine::start(Voice& v, const PadSound& sound, int pad, int velocity
     } else loop_setup(v, sound);
     // A sample still being read (the browser's preview) plays what has landed, as a stream plays what is pinned.
     if (!part && data->growth && !data->growth->whole.load(std::memory_order_acquire)) v.grow = data->growth.get();
-    v.cloud = sound.cloud && pad < int(sampler_pads) && !v.grow; // not for Chop's audition, nor before all is there
+    v.cloud = sound.cloud && pad < int(sampler_pads) && !v.grow && !streamed; // not for Chop's audition, nor before all is there
     v.held = true; v.gate = sound.play == PadPlay::Gate && !(zone && zone->one_shot); v.group = sound.group;
     if (zone && zone->on_release) v.held = v.gate = v.loop = false; // a release sample plays out once
     aim(v, sound, zone, multi, key);
@@ -118,12 +119,14 @@ void SamplerEngine::start(Voice& v, const PadSound& sound, int pad, int velocity
     v.env.gate(true);
     v.filter_env.gate(true);
     v.since_tune = 1u << 30; // the filter tuned on its first frame
-    if (part && pager) {
-        v.stream = pager->open(*part, uint32_t(v.position), v.reverse, float(std::max(v.advance, v.step)));
+    if ((part || streamed) && pager) {
+        // A zone's start is held, its end is not; a long sample's pads hold where they start, and end when reversed.
+        const uint32_t safe = part && v.reverse ? 0 : stream_chunk;
+        v.stream = pager->open(part ? *part : *streamed, uint32_t(v.position), v.reverse, float(std::max(v.advance, v.step)), safe);
         if (v.stream < 0) { // no stream free: what is held plays, then it ends
-            if (v.reverse) { v.pad = -1; return; }
+            if (v.reverse && part) { v.pad = -1; return; }
             v.capped = true;
-            v.head_end = std::min(v.start + stream_chunk, v.end);
+            v.head_end = v.reverse ? (v.end > stream_chunk ? v.end - stream_chunk : 0) : std::min(v.start + stream_chunk, v.end);
         }
     }
 }
@@ -264,6 +267,7 @@ inline void SamplerEngine::glide(Voice& v) {
 void SamplerEngine::loop_setup(Voice& v, const PadSound& sound) {
     v.loop = sound.loop && v.pad < int(sampler_pads);
     v.loop_at = std::clamp(uint32_t(std::llround(sound.loop_point() * v.scale)), v.start, v.end - 2);
+    v.loop_hi = v.end; // what a stream's reading must reach before it goes round (admit())
     v.edge_in = !v.loop && v.start > 0;              // the file's own start and end need no fade
     v.edge_out = !v.loop && v.end < v.total;
     v.xfade_kind = 0; v.xfade = 0;
@@ -291,12 +295,16 @@ void SamplerEngine::reach(Voice& v, const PadSound& sound) {
     end = end && end <= total ? end : total;
     if (end <= start + 1) return;
     const bool reverse = sound.reverse;
+    const bool streaming = v.stream >= 0 || v.capped;
     if (v.wait) {
         v.start = start; v.end = end; v.reverse = reverse;
         loop_setup(v, sound);
         v.position = v.place = reverse ? end - 1 : start;
+        if (streaming) stream_from(v);
         return;
     }
+    const bool was_reverse = v.reverse;
+    const double was_at = v.stretch ? v.place : v.position;
     // Within a region edge's fade of it counts as reached: the fade would come in a step.
     const double at = v.stretch ? v.place : v.position, edge = slice_edge * v.scale;
     if (!sound.loop && (reverse ? at < start + edge : at >= end - 1 - edge)) { v.choked = true; return; }
@@ -309,6 +317,31 @@ void SamplerEngine::reach(Voice& v, const PadSound& sound) {
         if (v.stretch) v.place = v.end - 1;
         else v.position = v.end - 1;
     }
+    if (streaming && (v.reverse != was_reverse || (v.stretch ? v.place : v.position) != was_at)) stream_from(v);
+}
+
+// A long sample's voice that moved (its region changed under it): its stream again from where it reads, nothing
+// taken as held there.
+void SamplerEngine::stream_from(Voice& v) {
+    if (!pager || !v.sample || !v.sample->stream) return;
+    end_stream(v);
+    v.capped = false;
+    const uint32_t at = uint32_t(std::max(0.0, v.stretch ? v.place : v.position));
+    v.stream = pager->open(*v.sample->stream, at, v.reverse, float(std::max(v.advance, v.step)), 0);
+    if (v.stream < 0) { v.capped = true; v.head_end = v.reverse ? UINT32_MAX : at; } // nothing safe: it ends
+}
+
+// A long sample's voice after its block: the pager told where it reads; a loop that came round in it read on from
+// its near side again (held there, as its start is).
+void SamplerEngine::follow_stream(Voice& v) {
+    if (v.pad < 0) return;
+    const double at = v.stretch ? v.place : v.position;
+    if (v.loop && v.wrapped) {
+        if (v.stream >= 0) pager->restart(v.stream, uint32_t(std::max(0.0, at)));
+        else v.head_end = v.reverse ? (v.end > stream_chunk ? v.end - stream_chunk : 0) : std::min(v.loop_at + stream_chunk, v.end);
+        return;
+    }
+    if (v.stream >= 0) pager->place(v.stream, uint32_t(std::max(0.0, at)));
 }
 
 // A voice stretched from now: Beats' whole segments or Tones' windows, a new one every hop. At its start the first
@@ -911,6 +944,7 @@ void SamplerEngine::voice_out(Voice& v, float l, float r, float a, float left_fr
 
 bool SamplerEngine::plain_run(const Voice& v, unsigned frames) const {
     if (v.gliding || v.grow || v.choked || v.xfade_kind) return false;
+    if ((v.stream >= 0 || v.capped) && (v.duck != 1.0f || v.duck_to != 1.0f)) return false; // a stream's duck, frame by frame
     // Everywhere it can read this run, with a frame to spare.
     const double travel = double(frames + 1) * v.step;
     const double lo = v.reverse ? v.position - travel : v.position, hi = v.reverse ? v.position : v.position + travel;
@@ -1632,7 +1666,9 @@ void SamplerEngine::render_stereo(float* left, float* right, unsigned frames) {
             continue;
         }
         if (v.grow && !admit_grown(v, frames - from)) continue;
-        if (v.stretch) { stretch(v, l, r, to_l, to_r, from, frames); continue; }
+        const bool streaming = v.stream >= 0 || v.capped; // a long sample read from the card
+        if (streaming && !admit(v, frames - from)) continue;
+        if (v.stretch) { stretch(v, l, r, to_l, to_r, from, frames); if (streaming) follow_stream(v); continue; }
         // A loop runs from its loop point to the region's end and round again (backwards: from the end down to the
         // loop point), keeping the fraction and reading across the seam, so a seamless loop stays seamless and in
         // tune at any pitch or device rate.
@@ -1640,6 +1676,7 @@ void SamplerEngine::render_stereo(float* left, float* right, unsigned frames) {
         if (plain_runs && plain_run(v, frames - from)) { // nothing this run needs looking at frame by frame: the short loop
             run_plain(v, l, r, to_l, to_r, from, frames, span);
             ++plain_taken;
+            if (streaming) follow_stream(v);
             continue;
         }
         for (unsigned f = from; f < frames; ++f) {
@@ -1653,7 +1690,7 @@ void SamplerEngine::render_stereo(float* left, float* right, unsigned frames) {
             glide(v);
             float a = v.env.next(v.shape) * v.gain * v.fade;
             if (v.edge_in || v.edge_out) a *= edge_gain(v, v.position);
-            if (v.grow) { v.duck += std::clamp(v.duck_to - v.duck, -edge_step, edge_step); a *= v.duck; }
+            if (v.grow || streaming) { v.duck += std::clamp(v.duck_to - v.duck, -edge_step, edge_step); a *= v.duck; }
             if (v.choked) { v.fade -= edge_step; if (v.fade <= 0) { v.pad = -1; break; } } // a quick fade, not a click
             float sl = l[i] + (l[j] - l[i]) * frac, sr = r[i] + (r[j] - r[i]) * frac;
             if (v.xfade_kind) seam(v, l, r, v.position, sl, sr);
@@ -1661,6 +1698,7 @@ void SamplerEngine::render_stereo(float* left, float* right, unsigned frames) {
             v.position += v.reverse ? -v.step : v.step;
             if (!v.env.active()) { v.pad = -1; break; }
         }
+        if (streaming) follow_stream(v);
     }
     if (laned)
         for (auto& l : *lane) {

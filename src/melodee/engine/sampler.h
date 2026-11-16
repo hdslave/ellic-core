@@ -284,6 +284,8 @@ private:
     const HeldKey* newest_held(int pad) const;
     Multisample* multi_of(const PadSound& sound) const;
     void end_stream(Voice& v);
+    void stream_from(Voice& v);   // a long sample's voice moved: its stream again from there
+    void follow_stream(Voice& v); // and after its block: where it reads, or round its loop
     void came_round(Voice& v);          // a zone's loop went back to its start
     bool admit(Voice& v, unsigned frames); // whether its next frames are safe to read
     bool admit_grown(Voice& v, unsigned frames); // the same for a sample still being read (SampleGrowth)

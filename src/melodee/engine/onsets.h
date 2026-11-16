@@ -19,5 +19,8 @@ struct BeatGrid {
 
 // The hits, as find_hits() (sample_data.h), and the sample's beats.
 unsigned find_hits(const SampleData& sample, std::array<Hit, max_hits>& out, BeatGrid& beats);
+// The same from the sample's sides summed at 44.1 kHz (one value a frame as the project counts them), for a sample
+// not in memory (a long WAV read a piece at a time).
+unsigned find_hits_in(const std::vector<float>& model_mono, std::array<Hit, max_hits>& out, BeatGrid& beats);
 
 } // namespace melodee

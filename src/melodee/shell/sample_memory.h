@@ -13,6 +13,10 @@
 namespace melodee {
 
 constexpr unsigned kit_sample_seconds = 60;                // a kit pad's sample: what is read of its file
+// A PCM WAV longer than stream_seconds is not read into memory: it is read from the card as it plays (its pads'
+// starts held), up to stream_most_seconds of it.
+constexpr unsigned stream_seconds = 10;
+constexpr unsigned stream_most_seconds = 6 * 3600;
 constexpr uint64_t memory_headroom = uint64_t(256) << 20;  // left free after a load: the app's own work and the system's
 
 // What a kit pad's sample of `frames` frames at `rate` Hz holds once read: its own frames, left and right as floats.

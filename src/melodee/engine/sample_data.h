@@ -14,12 +14,13 @@
 #include <string>
 #include <vector>
 
-// A sample in memory, and what the screen needs about it. Read and analysed on
-// the service thread (it allocates and reads files); the audio thread only
-// reads `left`, `right` and `frames` through a pointer handed over by the
-// engine host. A sample is held once, as its file or capture holds it: its
+// A sample, and what the screen needs about it. Read and analysed on the
+// service thread (it allocates and reads files); the audio thread only reads
+// `left`, `right` and `frames` (or `stream`'s) through a pointer handed over by
+// the engine host. A sample is held once, as its file or capture holds it: its
 // frames at its own rate, never converted, with no second copy at the
-// device's rate or at 44.1 kHz. The project's positions count 44.1 kHz frames
+// device's rate or at 44.1 kHz. A long WAV is not read into memory at all: it
+// is read from the card as it plays (`stream`). The project's positions count 44.1 kHz frames
 // (a region, a slice, the overview's columns, the hits): model() and own()
 // turn a position from one to the other, and a voice reads the frames that
 // much further each device frame (engine/sampler.cpp).
@@ -36,10 +37,15 @@ struct SampleGrowth {
 
 struct SampleData {
     std::vector<float> left, right; // at `rate`
-    uint32_t frames = 0;            // of `left` and `right`
+    uint32_t frames = 0;            // of `left` and `right`, or of `stream`
     unsigned rate = 44100;          // Hz: the file's own, or the capture's
     std::shared_ptr<Multisample> multi; // a multisampled instrument: no frames of its own, its zones' instead
     std::shared_ptr<SampleGrowth> growth; // still being read (SampleFill); none: all of it is there
+    // A long WAV read in place from the card (engine/stream_pager.h), `left` and `right` empty: a voice reads the
+    // part's frames, which the pager fills a chunk at a time ahead of it. The chunks the pads start on (and end and
+    // loop on) are held (`held`, the service thread's: shell/sample_library.cpp), so a hit sounds at once.
+    std::shared_ptr<ZonePart> stream;
+    mutable std::vector<uint32_t> held; // the stream's chunks held, in order
     // Frame `own` of its own as the project counts it (44.1 kHz), and the other way, within its frames.
     uint32_t model(uint32_t own) const { return rate == 44100 ? own : uint32_t(std::llround(double(own) * 44100.0 / rate)); }
     uint32_t own(uint32_t model) const {

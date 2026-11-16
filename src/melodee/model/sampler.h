@@ -239,6 +239,7 @@ struct SampleRef {
     // the pads. Not kept in the file.
     std::array<uint64_t, 2> keys {};
     bool one_key_zones = false; // every zone a press plays on one key of its own, two keys or more: a drum or percussion layout
+    bool streamed = false;      // a long WAV read from the card as it plays, once loaded (shell/stream_holds.h); not kept in the file
     bool used() const { return path[0] != 0; }
     // A multisampled instrument, by what it is called: an .sfz, an MPC keygroup
     // program (.xpm, the MPC 3's .xty), a Logic EXS24 instrument (.exs), one

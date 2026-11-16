@@ -12,6 +12,7 @@
 #include "melodee/shell/load_pool.h"
 #include "melodee/shell/sample_cache.h"
 #include "melodee/shell/stems.h"
+#include "melodee/shell/stream_holds.h"
 #include "melodee/shell/zone_shapes.h"
 #include "surface/midi.h"
 #include <array>
@@ -59,6 +60,9 @@ struct SampleFile {
 struct LoadedSample {
     std::string name, path, error;
     uint32_t frames = 0;
+    bool streamed = false;   // a long WAV read from the card as it plays (SampleData::stream): its overview and hits come
+                             // a moment after it plays (`shaped`)
+    bool shaped = false;
     Overview overview {};
     bool stereo = false;                 // its sides differ: the pages draw each side's waveform
     std::array<Overview, 2> sides {};    // left, right (stereo only)
@@ -223,9 +227,14 @@ public:
     };
     void view(View& out) const;
     LoadedSample slot(unsigned n) const;
-    // What the project keeps of slot `n`'s sample once it is loaded: its length and, an instrument's, its zones.
-    struct Measure { uint32_t frames = 0; std::vector<ZoneShape> shapes; };
+    // What the project keeps of slot `n`'s sample once it is loaded: its length, whether it streams and, an
+    // instrument's, its zones.
+    struct Measure { uint32_t frames = 0; bool streamed = false; std::vector<ZoneShape> shapes; };
     Measure measure(unsigned n) const;
+    // MIDI thread: where the pads on slot `n`'s long sample start, end and loop (44.1 kHz frames), for its chunks
+    // there to be held, so a hit sounds at once (shell/stream_holds.h). Those before are let go. Kept for the slot
+    // across reloads (SD card access) until asked again.
+    void hold(unsigned n, std::vector<HeldRange> ranges);
     // Round 3 "instrument C": the zone of slot `n`'s instrument a press of `key` at `velocity` reaches (-1 none),
     // and zone `zone`'s file as its regions name it ("" none). Under the lock.
     int zone_at(unsigned n, int key, int velocity) const;
@@ -306,6 +315,26 @@ private:
         std::unique_ptr<SampleData> data;
         LoadedSample loaded;
     };
+    // A long sample's waveform and hits, read from its file after it plays (stream_shape()).
+    struct ShapeRead {
+        uint16_t slot = 0;
+        uint32_t serial = 0;
+        Overview overview {};
+        std::array<Overview, 2> sides {};
+        bool stereo = false;
+        std::array<Hit, max_hits> hits {};
+        unsigned hit_count = 0;
+        BeatGrid beats;
+    };
+    std::vector<ShapeRead> shapes_read; // under loaded_lock
+    void stream_shape(const std::string& path, ShapeRead& out); // a pool thread
+    std::atomic<bool> shapes_stopped {false}; // SD card access: a shape being read stops where it is
+    // Held chunks of the long samples (hold()): what the MIDI thread asked (under `lock`), what is known (service
+    // thread, kept across reloads) and the slots still to bring in line, a few chunks a pass.
+    std::vector<std::pair<uint16_t, std::vector<HeldRange>>> holds_wanted;
+    std::vector<std::vector<HeldRange>> holds_known;
+    std::vector<uint16_t> holds_due;
+    void holds_service();
     struct InstrumentRead { Request request; uint32_t serial = 0; SfzRead read; std::string error; };
     struct PartLanded { std::shared_ptr<Landing> landing; unsigned index = 0; bool landed = false, laid_out = false; std::string why; };
     std::mutex loaded_lock;
