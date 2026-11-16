@@ -808,7 +808,9 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
             if (made.isVoid()) continue;
             put(made, "mute", track.mix.mute || track.pad_muted(n));
             program_mix(field(made, "program"), track.mix);
-            written.push_back({t, int(n), plan.instrument, track_name, made, false, keyed});
+            Written w {t, int(n), plan.instrument, track_name, made};
+            w.keyed = keyed; // by name: given by position it went to `takes`, the field added before it
+            written.push_back(std::move(w));
             ++report.keygroups;
         }
     }
