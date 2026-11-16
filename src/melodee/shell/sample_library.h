@@ -186,16 +186,17 @@ public:
     std::string card() const; // the card's top folder; empty without one
 
     // Stems (shell/stems.h, shell/sample_library_stems.cpp). MIDI thread: slot `source`'s sample separated into its
-    // drums, vocals and music, as Samples/Stems/<name> DRUMS.wav, <name> VOCALS.wav and <name> MUSIC.wav (the same
-    // free <name> for the three). take_stems() hands back the files written, or why there are none ("stopped": it
-    // was called off). One job at a time; stop_stems() and stems_progress() from any thread.
+    // drums, bass, music and vocals, as Samples/Stems/<name> DRUMS.wav, <name> BASS.wav, <name> MUSIC.wav and
+    // <name> VOCALS.wav (the same free <name> for the four). take_stems() hands back the files written, or why
+    // there are none ("stopped": it was called off). One job at a time; stop_stems() and stems_progress() from any thread.
     struct StemsRequest { uint8_t source = 0; char name[24] {}; };
     bool separate(const StemsRequest& job) { return stems_wanted.push(job); }
     void stop_stems() { separator.cancel(); }
     StemsProgress stems_progress() const { return separator.progress(); }
     bool take_stems(StemsResult& out);
     // Where the separating program is: the release's folder on the card (autorun/melodee/stems), else the folder
-    // `device.py install-sd` starts the app from (sample-base/stems); or $MELODEE_STEMS_ENGINE.
+    // `device.py install-sd` starts the app from (sample-base/stems); or $MELODEE_STEMS_ENGINE. Its model is the
+    // file spleeter-4stems.f16 beside it, or $MELODEE_STEMS_MODEL.
     static std::string stems_program(const std::string& card_top);
 
     // The Looper (docs/LOOPER.md, shell/looper_files.cpp). Commit to pad: loop `loop` into slot `slot`, as

@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <csignal>
+#include <cstdlib>
 #include <filesystem>
 #include <poll.h>
 #include <spawn.h>
@@ -26,29 +27,25 @@ namespace fs = std::filesystem;
 using Clock = std::chrono::steady_clock;
 
 // What the program names its files: the input's name with one of these after it, in stem_name()'s order.
-const char* const made[stem_count] = {"_Drum.wav", "_Vocal.wav", "_Accompaniment.wav"};
-// The program's arguments: threads, the frames of spectrum a pass of the model takes, the bins it tells apart
-// (2048: up to 22 kHz) and the stems.
+const char* const made[stem_count] = {"_Drums.wav", "_Bass.wav", "_Music.wav", "_Vocals.wav"};
+// The program's threads: three (four are slower, the audio and render threads being on the same cores).
 const char* const threads = "3";
-const char* const time_step = "256";
-const char* const bin_limit = "2048";
-// How far the job is when the program is done (the rest: the three files written to the card), and how far the
-// program is when its first pass of the model ends (it prints a line then).
-constexpr float program_share = 0.94f;
-constexpr double first_pass = 0.53;
+// How far the job is when the program is done; the rest is the four files written to the card.
+constexpr float program_share = 0.92f;
 
 double seconds_of(uint32_t frames) { return double(frames) / 44100.0; }
 } // namespace
 
 uint64_t stems_memory(uint32_t frames) {
-    // The program: 400 MB and 4.9 MB a second cover what was measured. Its copy in RAM: 40 MB. Its input and three
-    // outputs there: 1.4 MB a second together.
-    return uint64_t((440.0 + 6.3 * seconds_of(frames)) * 1024.0 * 1024.0);
+    // The program at its fullest, measured: 478 MB for 13 s of sound, 544 MB for 30 s, 656 MB for 60 s (the model
+    // as floats, three networks at work, the mix's spectrum). Its input and four outputs in RAM: 1.7 MB a second.
+    return uint64_t((450.0 + 5.7 * seconds_of(frames)) * 1024.0 * 1024.0);
 }
 
 unsigned stems_seconds(uint32_t frames) {
-    // 6 s and 0.72 s a second measured for the program; its copy from the card and the three files written after.
-    return unsigned(std::ceil(9.0 + 0.72 * seconds_of(frames)));
+    // A guess until the job's own pace is known (separate()): the model read from the card, a pass of each of the
+    // four networks for every 11.9 s (3.5 s a pass on the MPC, three at a time), then the four files written.
+    return unsigned(std::ceil(9.0 + 0.75 * seconds_of(frames)));
 }
 
 StemSeparator::~StemSeparator() {
@@ -120,6 +117,7 @@ std::string StemSeparator::separate(StemsJob& job) {
     if (job.work.empty()) return "no work folder";
     std::error_code error;
     if (!fs::is_regular_file(job.engine, error)) return "no program on the card";
+    if (!fs::is_regular_file(job.model, error)) return "no model on the card";
     fs::remove_all(job.work, error); // what a job that was cut off left
     fs::create_directories(job.work, error);
     if (error) return "no work folder";
@@ -147,7 +145,7 @@ std::string StemSeparator::separate(StemsJob& job) {
     posix_spawn_file_actions_adddup2(&actions, ends[1], 2);
     posix_spawn_file_actions_addclose(&actions, ends[0]);
     posix_spawn_file_actions_addclose(&actions, ends[1]);
-    const char* const args[] = {program.c_str(), threads, time_step, bin_limit, "3", input.c_str(), nullptr};
+    const char* const args[] = {program.c_str(), job.model.c_str(), threads, input.c_str(), nullptr};
     pid_t pid = 0;
     // posix_spawn, not fork(): no copy of Melodee's page tables is made (plugin/vst2_bridge_instance.cpp).
     const int spawned = posix_spawn(&pid, args[0], &actions, nullptr, const_cast<char* const*>(args), environ);
@@ -156,12 +154,12 @@ std::string StemSeparator::separate(StemsJob& job) {
     if (spawned != 0) { close(ends[0]); return "program did not start"; }
     child.store(pid);
 
-    // It prints a line as each of its steps ends. The first pass of the model ending tells how fast this job goes;
-    // until then the time measured on the MPC is the guess.
+    // It prints "progress N" (0 to 100) as it goes. Between two of those the time measured on the MPC carries the
+    // bar on, then the job's own pace once a sixth of it is done.
     const auto began = Clock::now();
     auto elapsed = [&] { return std::chrono::duration<double>(Clock::now() - began).count(); };
-    double whole = std::max(1.0, double(stems_seconds(frames)));
-    bool paced = false, killed = false, reaped = false;
+    double whole = std::max(1.0, double(stems_seconds(frames))), reported = 0;
+    bool killed = false, reaped = false;
     int status = 0;
     std::string line;
     for (;;) {
@@ -180,14 +178,17 @@ std::string StemSeparator::separate(StemsJob& job) {
                     if (line.size() < 256) line += bytes[n];
                     continue;
                 }
-                if (!paced && line.find("Inference") != std::string::npos) { whole = std::max(1.0, elapsed() / first_pass); paced = true; }
+                if (line.rfind("progress ", 0) == 0) {
+                    reported = std::clamp(std::atof(line.c_str() + 9) / 100.0, reported, 1.0);
+                    if (reported >= 1.0 / 6) whole = std::max(1.0, elapsed() / reported);
+                }
                 line.clear();
             }
         }
         // It is over when the program is, not when the pipe closes: something it started may still hold the pipe.
         if (waitpid(pid, &status, WNOHANG) == pid) { reaped = true; break; }
-        const double at = elapsed();
-        fraction.store(program_share * float(std::min(1.0, at / whole)), std::memory_order_relaxed);
+        const double at = elapsed(), shown = std::max(reported, std::min({at / whole, reported + 0.1, 0.99}));
+        fraction.store(program_share * float(shown), std::memory_order_relaxed);
         seconds_left.store(unsigned(std::ceil(std::max(1.0, whole - at))), std::memory_order_relaxed);
     }
     close(ends[0]);
