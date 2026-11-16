@@ -21,6 +21,10 @@
 // as it came, at the device's rate (44.1, 48 or 96 kHz; never converted), and
 // taken() and take_rate() say so; frames() and length() count it in 44.1 kHz
 // frames (dsp::model_rate), as the project and the pages count everything.
+// The buffer holds 60 s. While the service thread drains the take into its
+// file on the card as it comes (spill()), the buffer is a ring and a take goes
+// on past that, up to longest_seconds, as long as the draining keeps up (60 s
+// ahead of it at most; past that the take ends there).
 namespace melodee {
 
 class TakeRecorder {
@@ -28,6 +32,7 @@ public:
     enum class State : uint8_t { Idle, Armed, Recording, Done, Cued };
     static constexpr uint32_t max_frames = 60 * uint32_t(dsp::model_rate);  // the longest take, 44.1 kHz frames
     static constexpr uint32_t capacity = 60 * uint32_t(dsp::max_rate);      // its buffer: 60 s at the highest rate
+    static constexpr uint32_t longest_seconds = 6 * 3600;                   // a take drained to the card (spill())
     static constexpr unsigned columns = 128;
 
     // `buffer` false: none made (a print host's, never armed); arm() then does nothing.
@@ -46,15 +51,18 @@ public:
         quiet = quiet_end;
         silence = std::pow(10.0f, silence_db / 20.0f);
         last_loud = 0; heard = false;
-        const uint32_t most = std::min(capacity, uint32_t(60 * uint64_t(rate)));
-        limit = std::min(length ? length : most, most);
+        most = std::min(capacity, uint32_t(60 * uint64_t(rate))); // what the buffer holds undrained
+        const uint32_t longest = uint32_t(std::min<uint64_t>(uint64_t(longest_seconds) * rate, UINT32_MAX - capacity));
+        limit = std::min(length ? length : longest, longest);
+        drained_.store(0, std::memory_order_relaxed);
+        spilling_.store(false, std::memory_order_relaxed);
         tail_frames = rate / 100;
         take_rate_.store(rate);
         slot_.store(slot);
         frames_.store(0);
         start_at = 0;
         for (auto& c : peaks) c.store(0, std::memory_order_relaxed);
-        limit_.store(limit);
+        limit_.store(std::min(limit, most)); // what the pages show: a free take's first 60 s, then the last 60 s of it
         state_.store(cued ? State::Cued : threshold <= 0 ? State::Recording : State::Armed);
     }
     // Audio thread: the device's rate (EngineHost::set_audio_format), for the takes armed from now on. One
@@ -89,10 +97,14 @@ public:
         start_at = 0;
         l += skip; r += skip; n -= skip;
         uint32_t kept = at;
-        for (unsigned f = 0; f < n && kept < limit; ++f, ++kept) {
-            left_[kept] = l[f]; right_[kept] = r[f];
+        // As far as the buffer may go: what it holds, or, drained to the card, that far past what is drained.
+        const uint32_t room = spilling_.load(std::memory_order_acquire) ? drained_.load(std::memory_order_acquire) + capacity : most;
+        const uint32_t window = std::min(limit, most); // the pages' picture of it
+        for (unsigned f = 0; f < n && kept < limit && kept < room; ++f, ++kept) {
+            left_[kept % capacity] = l[f]; right_[kept % capacity] = r[f];
             if (std::fabs(l[f]) >= silence || std::fabs(r[f]) >= silence) { last_loud = kept; heard = true; }
-            unsigned c = unsigned(uint64_t(kept) * columns / limit);
+            if (kept && kept % window == 0) for (auto& p : peaks) p.store(0, std::memory_order_relaxed); // the next 60 s
+            unsigned c = unsigned(uint64_t(kept % window) * columns / window);
             uint8_t v = uint8_t(std::min(1.0f, std::max(std::fabs(l[f]), std::fabs(r[f]))) * 255);
             if (v > peaks[c].load(std::memory_order_relaxed)) peaks[c].store(v, std::memory_order_relaxed);
         }
@@ -103,7 +115,7 @@ public:
             return;
         }
         frames_.store(kept, std::memory_order_release);
-        if (kept >= limit) state_.store(State::Done);
+        if (kept >= limit || kept >= room) state_.store(State::Done); // its length, or as far as the buffer goes
     }
 
     // Any thread. frames() and length() in 44.1 kHz frames; taken() the take's own (device) frames, at take_rate().
@@ -118,10 +130,15 @@ public:
     uint8_t peak(unsigned column) const { return peaks[column % columns].load(std::memory_order_relaxed); }
     unsigned slot() const { return slot_.load(); }
 
-    // Service thread, while Done: taken() frames at take_rate().
+    // Service thread, while Done: taken() frames at take_rate() (all in the buffer, from its start, when not drained).
     const float* left() const { return left_.get(); }
     const float* right() const { return right_.get(); }
     void release() { if (state_.load() == State::Done) state_.store(State::Idle); }
+    // Service thread, while it records: the take drained into its file as it comes, frame `n` at n % capacity of the
+    // buffer; drained(): how far it has got, so the recorder may write that far past it.
+    void spill(bool on) { spilling_.store(on, std::memory_order_release); }
+    bool spilling() const { return spilling_.load(std::memory_order_relaxed); }
+    void drained(uint32_t frames) { drained_.store(frames, std::memory_order_release); }
 
 private:
     uint32_t to_model(uint32_t device) const {
@@ -135,7 +152,9 @@ private:
     float silence = 0.001f;
     bool heard = false;
     unsigned start_at = 0;
-    uint32_t limit = max_frames;
+    uint32_t limit = max_frames, most = max_frames;
+    std::atomic<bool> spilling_ {false};
+    std::atomic<uint32_t> drained_ {0};
     std::atomic<State> state_ {State::Idle};
     std::atomic<uint32_t> frames_ {0}, limit_ {max_frames};
     std::atomic<unsigned> slot_ {0}, take_rate_ {unsigned(dsp::model_rate)};

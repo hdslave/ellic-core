@@ -378,6 +378,13 @@ private:
     std::atomic<unsigned> preview_count {0};
     std::atomic<unsigned> take_count {0};
     void save_take();
+    // A take drained into Samples/Recorded/TAKE n.wav as it is recorded (with a card): the file, how far it has got,
+    // whether its file is open or failed, and whether this take was looked at already.
+    void take_service();
+    WavStream take_file;
+    std::string take_path;
+    uint32_t take_drained = 0;
+    bool take_open = false, take_failed = false, take_seen = false;
     // Recall and renders (shell/sample_capture.cpp).
     struct RecallJob { uint16_t slot = 0; RecallOptions options; };
     MidiQueue<4, RecallJob> recalls;
@@ -393,6 +400,10 @@ private:
     // so, as Samples/<folder>/<stem> n.wav when there is a card, kept as written at that rate (keep_capture()),
     // offered to `slot` and listed; `what` names it in a failure.
     void land(unsigned slot, std::unique_ptr<SampleData> data, unsigned rate, const char* folder, const char* stem, const char* what);
+    // A file this thread has just written, into slot `slot` as a file asked for (dispatch()): a long one is then read
+    // from the card as it plays. The MIDI thread puts it on its pad once it is in (Context::files_landed()).
+    void load_written(unsigned slot, const std::string& path);
+    bool render_written = false; // a render into a slot going straight into its file on the card (render_path)
     bool rendering = false;
     Render render_job;
     unsigned render_rate = 44100; // the render's frames, the device's rate when it began

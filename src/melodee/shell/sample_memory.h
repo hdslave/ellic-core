@@ -6,15 +6,15 @@
 #include <fstream>
 #include <string>
 
-// What limits a project's samples: memory. A kit pad's sample is read whole into memory (at most kit_sample_seconds
-// of it), its frames at its own rate and nothing more; an instrument's files are streamed from the card, only each
-// zone's start kept. The MPC has 2 GB and no swap, so a load that would leave less than memory_headroom
+// What limits a project's samples: memory. A kit pad's sample is read whole into memory, its frames at its own rate
+// and nothing more, unless it is a long WAV, read from the card as it plays; an instrument's files are streamed from
+// the card, only each zone's start kept. The MPC has 2 GB and no swap, so a load that would leave less than memory_headroom
 // free is refused (shell/sample_library.cpp, shell/sample_library_instruments.cpp). Pure but for memory_free().
 namespace melodee {
 
-constexpr unsigned kit_sample_seconds = 60;                // a kit pad's sample: what is read of its file
 // A PCM WAV longer than stream_seconds is not read into memory: it is read from the card as it plays (its pads'
-// starts held), up to stream_most_seconds of it.
+// starts held). Any sample, and a capture (a take, a render), up to stream_most_seconds; one of another kind (MP3,
+// FLAC, Ogg, AIFF) is read whole, as memory allows.
 constexpr unsigned stream_seconds = 10;
 constexpr unsigned stream_most_seconds = 6 * 3600;
 constexpr uint64_t memory_headroom = uint64_t(256) << 20;  // left free after a load: the app's own work and the system's
@@ -22,7 +22,7 @@ constexpr uint64_t memory_headroom = uint64_t(256) << 20;  // left free after a 
 // What a kit pad's sample of `frames` frames at `rate` Hz holds once read: its own frames, left and right as floats.
 inline uint64_t kit_sample_bytes(uint64_t frames, unsigned rate) {
     if (!rate) return 0;
-    return std::min<uint64_t>(frames, uint64_t(kit_sample_seconds) * rate) * 2 * sizeof(float);
+    return std::min<uint64_t>(frames, uint64_t(stream_most_seconds) * rate) * 2 * sizeof(float);
 }
 
 // Whether a load that takes `wanted` bytes leaves the headroom, with `free` bytes free now (0: the system does not
