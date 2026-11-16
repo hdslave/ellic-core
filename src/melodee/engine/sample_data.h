@@ -109,6 +109,7 @@ public:
     unsigned rate() const { return hz; }
     uint32_t frames() const { return count; }
     uint32_t read(float* left, float* right, uint32_t frames);
+    bool seek(uint32_t frame); // the next read() from this frame on
     WavLayout layout() const { return {data_start, count, channels, hz, bits, format == 3}; } // after open()
 private:
     std::ifstream file;
@@ -173,12 +174,15 @@ public:
     bool open(const std::string& path, unsigned rate = 44100, unsigned bits = 32, unsigned data_at = 0, unsigned channels = 2);
     bool add(const float* interleaved, unsigned frames);
     bool close(); // false when anything failed
+    // Integer PCM is dithered; off, each value is rounded as it is (a copy of frames that came from a file of as many
+    // bits or fewer stays the same to the bit).
+    void set_dither(bool on) { dither = on; }
     uint32_t frames() const { return written; }
 private:
     std::FILE* file = nullptr;
     uint32_t written = 0;
     unsigned rate = 44100, bits = 32, data_at = 0, channels = 2;
-    bool failed = false;
+    bool failed = false, dither = true;
     std::vector<unsigned char> header(uint32_t frames) const;
     uint32_t noise = 0x9e3779b9u; // the dither's
 };

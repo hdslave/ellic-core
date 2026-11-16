@@ -32,6 +32,10 @@ struct WavLayout; // engine/sample_data.h
 // mapped part it pins pages, and gives the memory back when no voice needs it. False when the file cannot be read;
 // the part is then as it was.
 bool read_in_place(const std::string& path, const WavLayout& layout, ZonePart& part);
+// `frames` frames of such a part from `from` on, straight from its file into `left` and `right` (a mono file's on
+// both), its memory not touched: a few frames looked at by a thread that is not the audio's. False when the file
+// gives less.
+bool read_frames(const ZonePart& part, uint32_t from, uint32_t frames, float* left, float* right);
 
 class StreamPager {
 public:

@@ -11,7 +11,8 @@
 // A long sample (SampleRef::streamed) is read from the card as it plays: the pager reads ahead of each voice, but a
 // hit must sound at once, so the chunks where a pad starts are held in memory (SampleLibrary::hold()). Where each pad
 // on such a sample needs them, in the project's 44.1 kHz frames: each layer's start (its end, reversed); its loop
-// point and, with a crossfaded seam, the frames read across it; and Chop's slices while Chop holds the sample. Pure.
+// point and, with a crossfaded seam, the frames read across it; Chop's slices while Chop holds the sample; and a zoomed
+// view of one up to view_most frames wide (Trim's, Chop's), drawn from its frames in memory. Pure.
 namespace melodee {
 
 struct HeldRange {
@@ -21,9 +22,11 @@ struct HeldRange {
     bool operator<(const HeldRange& o) const { return from != o.from ? from < o.from : to != o.to ? to < o.to : back < o.back; }
 };
 using StreamHolds = std::vector<std::pair<uint16_t, std::vector<HeldRange>>>; // by slot, in order; each slot's ranges in order
+constexpr uint32_t view_most = 12 * 44100; // wider, a view is drawn from the sample's peaks (SampleLibrary::detail())
 
-// `chop`: Chop's slices of `chop_sample` while Chop is open (nullptr otherwise).
-inline StreamHolds stream_holds(const Project& project, const Slices* chop = nullptr, unsigned chop_sample = no_sample) {
+// `chop`: Chop's slices of `chop_sample` while Chop is open (nullptr otherwise); `view` of `view_sample`: a zoomed view.
+inline StreamHolds stream_holds(const Project& project, const Slices* chop = nullptr, unsigned chop_sample = no_sample,
+                                unsigned view_sample = no_sample, HeldRange view = {}) {
     StreamHolds out;
     auto add = [&](unsigned slot, HeldRange range) {
         auto at = std::lower_bound(out.begin(), out.end(), slot, [](const auto& e, unsigned s) { return e.first < s; });
@@ -54,6 +57,8 @@ inline StreamHolds stream_holds(const Project& project, const Slices* chop = nul
     }
     if (chop && chop_sample < sample_slots && project.samples[chop_sample].streamed)
         for (unsigned n = 0; n < chop->count; ++n) add(chop_sample, {chop->start[n], chop->start[n], false});
+    if (view_sample < sample_slots && project.samples[view_sample].streamed && view.to > view.from && view.to - view.from <= view_most)
+        add(view_sample, view);
     for (auto& [slot, ranges] : out) {
         std::sort(ranges.begin(), ranges.end());
         ranges.erase(std::unique(ranges.begin(), ranges.end()), ranges.end());

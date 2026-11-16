@@ -1068,7 +1068,7 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
     for (unsigned n = 0; n < sample_slots; ++n) {
         if (!is_wav(project.samples[n]) || !project.chops[n].used()) continue;
         const auto file = files.copied(project.samples[n].path);
-        if (!file.empty() && write_mpc_slices((data_folder / file).string(), project.chops[n])) ++report.chops;
+        if (!file.empty() && write_mpc_slices((data_folder / file).string(), project.chops[n], false)) ++report.chops;
     }
     put(data, "samples", samples_of(files.all()));
     put(data, "masterTempoEnabled", !project.seq_tempo);

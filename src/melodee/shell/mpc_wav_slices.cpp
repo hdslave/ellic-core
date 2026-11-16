@@ -127,7 +127,7 @@ SampleChop read_mpc_slices(const std::string& path) {
     return chop;
 }
 
-bool write_mpc_slices(const std::string& path, const SampleChop& chop) {
+bool write_mpc_slices(const std::string& path, const SampleChop& chop, bool in_place) {
     static std::mutex writing; // one file at a time (Context::write_chops' threads, an export)
     std::lock_guard<std::mutex> one(writing);
     std::ifstream in(path, std::ios::binary);
@@ -167,6 +167,73 @@ bool write_mpc_slices(const std::string& path, const SampleChop& chop) {
         put(uint32_t(start), 4); put(uint32_t(end), 4); put(uint32_t(start), 4); put(0, 2);
     }
     const std::string atem = juce::JSON::toString(doc).toStdString();
+
+    if (in_place) {
+        // The two chunks as they go in the file, each with its pad byte.
+        std::string blob;
+        auto chunk = [&](const char* id, const std::string& body) {
+            blob.append(id, 4);
+            for (int b = 0; b < 4; ++b) blob.push_back(char((uint32_t(body.size()) >> (8 * b)) & 0xff));
+            blob += body;
+            if (body.size() & 1) blob.push_back('\0');
+        };
+        if (sl.count || had_atem) chunk("atem", atem); // no slices: the file's key and tempo still kept
+        if (sl.count) chunk("slic", slic);
+        size_t data = chunks.size();
+        for (size_t n = 0; n < chunks.size() && data == chunks.size(); ++n) if (is(chunks[n], "data")) data = n;
+        if (data == chunks.size()) return false;
+        in.close();
+        auto ours = [](const Chunk& c) { return is(c, "atem") || is(c, "slic") || is(c, "JUNK"); };
+        // The room right before the audio: the atem, slic and JUNK chunks there.
+        const std::streamoff audio = chunks[data].body - 8;
+        std::streamoff room_at = audio;
+        for (size_t n = data; n > 0 && ours(chunks[n - 1]); --n) room_at = chunks[n - 1].body - 8;
+        const auto room = uint64_t(audio - room_at);
+        const bool before = room == blob.size() || room >= blob.size() + 8;
+        // Else the end of the file: after the audio and whatever else follows it, over the atem, slic and JUNK
+        // chunks a write before left there.
+        std::error_code error;
+        const auto size = uint64_t(std::filesystem::file_size(path, error));
+        if (error) return false;
+        uint64_t tail = size;
+        for (size_t n = chunks.size(); n > data + 1 && ours(chunks[n - 1]); --n) tail = uint64_t(chunks[n - 1].body - 8);
+        std::fstream file(path, std::ios::binary | std::ios::in | std::ios::out);
+        if (!file) return false;
+        auto word = [&](uint32_t v) { for (int b = 0; b < 4; ++b) file.put(char((v >> (8 * b)) & 0xff)); };
+        for (const auto& c : chunks) // the old ones, wherever they are
+            if ((is(c, "atem") || is(c, "slic")) && uint64_t(c.body - 8) < tail) { file.seekp(c.body - 8); file.write("JUNK", 4); }
+        if (before) {
+            file.seekp(room_at);
+            file.write(blob.data(), std::streamsize(blob.size()));
+            if (room > blob.size()) { // what is left over, a JUNK chunk
+                const uint64_t left = room - blob.size() - 8;
+                file.write("JUNK", 4); word(uint32_t(left));
+                const std::string zeros(size_t(left), '\0');
+                file.write(zeros.data(), std::streamsize(zeros.size()));
+            }
+            if (tail < size) { // what a write after the audio left: gone
+                file.close();
+                std::filesystem::resize_file(path, tail, error);
+                file.open(path, std::ios::binary | std::ios::in | std::ios::out);
+                if (!file || error) return false;
+            }
+        } else {
+            file.close();
+            if (tail < size) std::filesystem::resize_file(path, tail, error);
+            file.open(path, std::ios::binary | std::ios::in | std::ios::out);
+            if (!file || error) return false;
+            file.seekp(0, std::ios::end);
+            if (uint64_t(file.tellp()) & 1) file.put('\0'); // a last chunk's pad byte some files leave off
+            file.write(blob.data(), std::streamsize(blob.size()));
+        }
+        file.seekp(0, std::ios::end);
+        const auto now = uint64_t(file.tellp());
+        if (now > 0xffffffffull) return false;
+        file.seekp(4);
+        word(uint32_t(now - 8));
+        file.flush();
+        return bool(file);
+    }
 
     // Written beside: every chunk as it was but the old atem and slic, the new ones before the samples.
     const std::string temp = path + ".slices";

@@ -17,8 +17,11 @@ SampleChop read_mpc_slices(const std::string& path);
 
 // The chop's slices written into the WAV file at `path` (its frames at the file's rate): the "atem" chunk's slices
 // replaced (its other values kept; one made when there is none) and the "slic" chunk written again; a chop with
-// no slices takes them out. The file is written beside and renamed over. False when it is not a WAV or cannot be
-// written (the file is then as it was).
-bool write_mpc_slices(const std::string& path, const SampleChop& chop);
+// no slices takes them out. False when it is not a WAV or cannot be written.
+// `in_place` (the sample's own file, which may be playing from the card at this moment): its audio never moves and
+// is never copied. The two chunks go where the old ones were before the audio when they fit there (what is left a
+// JUNK chunk), else after the audio, the old ones made JUNK. Otherwise (a copy for an export) the file is written
+// beside, the chunks before the audio as the MPC writes them, and renamed over.
+bool write_mpc_slices(const std::string& path, const SampleChop& chop, bool in_place = true);
 
 } // namespace melodee

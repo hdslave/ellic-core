@@ -254,6 +254,10 @@ public:
     // 0..255, read from its audio (the overview is too coarse that close); false when it holds no audio.
     // With `sides` (two arrays of `columns`), the left and right apart as well.
     bool detail(unsigned n, uint32_t from, uint32_t to, uint8_t* out, unsigned columns, uint8_t* const* sides = nullptr) const;
+    // A long sample's frames around a frame, read from its file (zero_crossing() on one): `part` holds them at its
+    // rate, `own` is the frame as its own, `first` the first's place; `read` false when it is not one or it failed.
+    struct Around { SampleData part; uint32_t own = 0, first = 0; bool read = false; };
+    Around around(unsigned n, uint32_t frame, uint32_t back, uint32_t ahead) const;
     std::vector<SampleFile> files() const;
     std::string root() const;
     std::string folder() const;
@@ -325,8 +329,10 @@ private:
         std::array<Hit, max_hits> hits {};
         unsigned hit_count = 0;
         BeatGrid beats;
+        std::vector<float> peaks; // Shown::peaks
     };
     std::vector<ShapeRead> shapes_read; // under loaded_lock
+    void make_streamed(const SampleJob& job, const SampleData& source); // Save Sample, Trim, Extract on a long sample
     void stream_shape(const std::string& path, ShapeRead& out); // a pool thread
     std::atomic<bool> shapes_stopped {false}; // SD card access: a shape being read stops where it is
     // Held chunks of the long samples (hold()): what the MIDI thread asked (under `lock`), what is known (service
@@ -416,7 +422,13 @@ private:
     std::vector<std::unique_ptr<SampleData>> held_back;      // service thread: let go of by the audio thread while held
     // Under `lock`: each slot's sample as the pages see it and, an instrument's, its files (zone_file()). Kept only
     // for the slots that hold or held one: none reads as an empty LoadedSample.
-    struct Shown { LoadedSample sample; std::vector<std::string> parts; };
+    // A long sample's peaks (stream_shape()): the loudest of each peak_block of its own frames, left and right in
+    // turn, for Normalize and a zoomed waveform wider than a block a column without reading the card.
+    static constexpr uint32_t peak_block = 1024;
+    struct Shown { LoadedSample sample; std::vector<std::string> parts; std::vector<float> peaks; };
+    // detail() on a long sample, under `lock`: from its peaks where a column is a block or more, else from its
+    // frames in memory where the pager holds them (the zoomed view is held: shell/stream_holds.h).
+    bool detail_streamed(unsigned n, const SampleData& data, uint32_t from, uint32_t to, uint8_t* out, unsigned columns, uint8_t* const* sides) const;
     std::array<std::unique_ptr<Shown>, sample_slots> slot_shown;
     const LoadedSample& shown_at(unsigned slot) const;
     Shown& show(unsigned slot);

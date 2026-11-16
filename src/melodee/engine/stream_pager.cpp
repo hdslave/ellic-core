@@ -55,6 +55,28 @@ void empty_chunk(ZonePart& part, uint32_t chunk) {
 }
 } // namespace
 
+bool read_frames(const ZonePart& part, uint32_t from, uint32_t frames, float* left, float* right) {
+    if (!part.source || from >= part.total) return false;
+    frames = std::min(frames, part.total - from);
+    const ZoneSource& source = *part.source;
+    WavLayout layout;
+    layout.channels = source.channels; layout.bits = source.bits; layout.floating = source.floating;
+    const size_t block = layout.block();
+    std::vector<uint8_t> bytes(size_t(frames) * block);
+    const int file = open(source.path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (file < 0) return false;
+    size_t done = 0;
+    while (done < bytes.size()) {
+        const ssize_t got = pread(file, bytes.data() + done, bytes.size() - done, off_t(source.data_at + uint64_t(from) * block + done));
+        if (got <= 0) break;
+        done += size_t(got);
+    }
+    close(file);
+    if (done < bytes.size()) return false;
+    wav_frames(layout, bytes.data(), frames, left, right);
+    return true;
+}
+
 bool read_in_place(const std::string& path, const WavLayout& layout, ZonePart& part) {
     if (!layout.frames || layout.channels < 1 || layout.channels > 2) return false;
     if (access(path.c_str(), R_OK) != 0) return false;

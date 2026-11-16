@@ -91,6 +91,14 @@ void wav_frames(const WavLayout& layout, const uint8_t* bytes, uint32_t frames, 
     for (unsigned n = 0; n < frames; ++n) { left[n] = sample(n, 0); right[n] = sample(n, std::min(1u, channels - 1)); }
 }
 
+bool WavReader::seek(uint32_t frame) {
+    if (!file || frame > count) return false;
+    file.clear();
+    file.seekg(std::streamoff(data_start + uint64_t(frame) * (bits / 8 * channels)));
+    done = frame;
+    return bool(file);
+}
+
 uint32_t WavReader::read(float* left, float* right, uint32_t frames) {
     const uint32_t wanted = std::min(frames, count - done);
     if (!wanted || !file) return 0;
@@ -325,7 +333,7 @@ bool WavStream::add(const float* interleaved, unsigned frames) {
                 float v = interleaved[channels * at + f];
                 if (!std::isfinite(v)) v = 0;
                 auto draw = [&] { noise ^= noise << 13; noise ^= noise >> 17; noise ^= noise << 5; return double(noise) / 4294967296.0; };
-                double d = draw() - draw(); // triangular, -1..1 of a step
+                double d = dither ? draw() - draw() : 0.0; // triangular, -1..1 of a step
                 auto s = int32_t(std::clamp(std::floor(double(v) * scale + d + 0.5), -scale, top));
                 for (unsigned k = 0; k < width; ++k) bytes[width * f + k] = uint8_t(uint32_t(s) >> (8 * k));
             }
