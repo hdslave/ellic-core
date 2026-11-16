@@ -112,33 +112,35 @@ public:
         std::error_code error;
         missing = !fs::exists(path, error);
         if (path.size() >= sizeof(SampleRef::path)) return -1;
-        for (unsigned n = 0; n < sample_slots; ++n) {
-            auto& ref = project.samples[n];
-            if (ref.used() && path == ref.path) return int(n);
-            if (ref.used()) continue;
-            std::strncpy(ref.path, path.c_str(), sizeof(ref.path) - 1);
-            std::strncpy(ref.name, name.stem().string().c_str(), sizeof(ref.name) - 1);
-            auto rate = wav_rate(path);
-            rates[n] = rate ? double(dsp::model_rate) / rate : 1.0;
-            return int(n);
-        }
-        return -1;
+        const int n = free_or_same(path);
+        if (n < 0 || project.samples[size_t(n)].used()) return n;
+        auto& ref = project.samples.edit(size_t(n));
+        std::strncpy(ref.path, path.c_str(), sizeof(ref.path) - 1);
+        std::strncpy(ref.name, name.stem().string().c_str(), sizeof(ref.name) - 1);
+        auto rate = wav_rate(path);
+        rates[size_t(n)] = rate ? double(dsp::model_rate) / rate : 1.0;
+        return n;
     }
     // A slot for a pad's layers, played as an instrument: the path names the pad.
     int instrument(const std::string& path, const std::string& name) {
         if (path.size() >= sizeof(SampleRef::path)) return -1;
-        for (unsigned n = 0; n < sample_slots; ++n) {
-            auto& ref = project.samples[n];
-            if (ref.used() && path == ref.path) return int(n);
-            if (ref.used()) continue;
-            std::snprintf(ref.path, sizeof(ref.path), "%s", path.c_str());
-            std::snprintf(ref.name, sizeof(ref.name), "%s", name.c_str());
-            return int(n);
-        }
-        return -1;
+        const int n = free_or_same(path);
+        if (n < 0 || project.samples[size_t(n)].used()) return n;
+        auto& ref = project.samples.edit(size_t(n));
+        std::snprintf(ref.path, sizeof(ref.path), "%s", path.c_str());
+        std::snprintf(ref.name, sizeof(ref.name), "%s", name.c_str());
+        return n;
     }
     double to_model(unsigned slot) const { return rates[slot % sample_slots]; }
 private:
+    // The slot holding `path`, else the first free one (the slots are filled from the first on); -1: none.
+    int free_or_same(const std::string& path) const {
+        for (unsigned n = 0; n < sample_slots; ++n) {
+            const auto& ref = project.samples[n];
+            if (!ref.used() || path == ref.path) return int(n);
+        }
+        return -1;
+    }
     Project& project;
     fs::path folder;
     std::array<double, sample_slots> rates {};
@@ -631,7 +633,7 @@ std::string import_mpc_project(const std::vector<uint8_t>& file, const std::stri
     report.tracks = used;
     // Each file's chop, as the MPC keeps it in the WAV ("atem"): Chop on a pad of the whole file finds its slices.
     for (unsigned n = 0; n < sample_slots; ++n)
-        if (project.samples[n].used() && !project.samples[n].instrument()) project.chops[n] = read_mpc_slices(project.samples[n].path);
+        if (project.samples[n].used() && !project.samples[n].instrument()) project.chops.edit(n) = read_mpc_slices(project.samples[n].path);
     report.sequences = unsigned(sequences.size());
 
     // The tempo: the project's own when it is on, else each sequence's.

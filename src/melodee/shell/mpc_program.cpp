@@ -69,15 +69,17 @@ KeygroupTags leaves_of(const juce::XmlElement& element) {
 // The project's sample slots, each path once; -1 when full.
 int slot_for(Project& project, const std::string& path, const std::string& name) {
     if (path.size() >= sizeof(SampleRef::path)) return -1;
+    int free = -1;
     for (unsigned n = 0; n < sample_slots; ++n) {
-        auto& ref = project.samples[n];
+        const auto& ref = project.samples[n];
         if (ref.used() && path == ref.path) return int(n);
-        if (ref.used()) continue;
-        std::snprintf(ref.path, sizeof(ref.path), "%s", path.c_str());
-        std::snprintf(ref.name, sizeof(ref.name), "%s", name.c_str());
-        return int(n);
+        if (free < 0 && !ref.used()) free = int(n);
     }
-    return -1;
+    if (free < 0) return -1;
+    auto& ref = project.samples.edit(size_t(free));
+    std::snprintf(ref.path, sizeof(ref.path), "%s", path.c_str());
+    std::snprintf(ref.name, sizeof(ref.name), "%s", name.c_str());
+    return free;
 }
 // An MPC program writes all 128 of its pads or keygroups, four layers each, some two hundred elements a pad, whether
 // a layer has a sample or not: 1.2 MB of text for a keygroup of forty files, and a third of a second for the XML
@@ -264,7 +266,7 @@ unsigned layers_from_programs(Project& project) {
             to_model.fill(1.0);
             PadSound made = pad;
             if (!keygroup_pad_layers(found->second, slots, to_model, made)) continue; // a note-off pad: as it was
-            if (sharing == 1) project.samples[own] = SampleRef {};
+            if (sharing == 1) project.samples.edit(own) = SampleRef {};
             for (size_t n = 0; n < layers.size(); ++n) {
                 slots[n] = uint16_t(slot_for(project, paths[n], fs::path(paths[n]).stem().string()));
                 if (unsigned rate = mpc_wav_rate(paths[n])) to_model[n] = double(dsp::model_rate) / rate;

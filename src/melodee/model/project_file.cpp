@@ -592,16 +592,26 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
         for (unsigned n = 0; n < sampler_pads; ++n) if (tr.pads[n].used() && !tr.pads[n].plain_layers()) write_layers(w, n, tr.pads[n]);
         w.end(at);
     }
-    for (unsigned t = 0; t < track_count; ++t) { // instruments' zones trimmed (round 3 "instrument C"): pad, slot, zone, cents, tenths of a dB
-        const auto& tr = project.tracks[t];
-        auto live = [&](const ZoneTrim& z) { return z.used() && tr.pads[z.pad % sampler_pads].sample == z.slot; }; // stale ones not kept
-        unsigned used = unsigned(std::count_if(tr.zone_trims.begin(), tr.zone_trims.end(), live));
-        if (!used) continue;
-        at = w.begin("ZTRM");
-        w.u8(t); w.u8(used);
-        for (const auto& z : tr.zone_trims) if (live(z)) { w.u8(z.pad); w.u8(z.slot); w.u16(z.zone); w.u8(uint8_t(z.tune)); w.i16(z.level); }
-        w.end(at);
-    }
+    // Instruments' zones trimmed (round 3 "instrument C"): pad, slot, zone, cents, tenths of a dB. ZTRM names the slot
+    // in a byte; the trims of an instrument in a slot past legacy_sample_slots go in ZTRX, the slot in two.
+    for (unsigned t = 0; t < track_count; ++t)
+        for (bool wide : {false, true}) {
+            const auto& tr = project.tracks[t];
+            auto live = [&](const ZoneTrim& z) { // stale ones not kept
+                return z.used() && tr.pads[z.pad % sampler_pads].sample == z.slot && (z.slot >= legacy_sample_slots) == wide;
+            };
+            unsigned used = unsigned(std::count_if(tr.zone_trims.begin(), tr.zone_trims.end(), live));
+            if (!used) continue;
+            at = w.begin(wide ? "ZTRX" : "ZTRM");
+            w.u8(t); w.u8(used);
+            for (const auto& z : tr.zone_trims) {
+                if (!live(z)) continue;
+                w.u8(z.pad);
+                if (wide) w.u16(z.slot); else w.u8(z.slot);
+                w.u16(z.zone); w.u8(uint8_t(z.tune)); w.i16(z.level);
+            }
+            w.end(at);
+        }
     for (unsigned t = 0; t < track_count; ++t) { // the four sends of a track that sends to more than one bus (round 2)
         const auto& sends = project.tracks[t].mix.sends;
         if (std::count_if(sends.begin(), sends.end(), [](uint8_t v) { return v > 0; }) < 2) continue; // TRAK says it already
@@ -738,11 +748,15 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
         w.end(at);
     }
     // A sample's chop is kept in its WAV file (shell/mpc_wav_slices.h), not here; older files' CHOP is read.
+    // SMPL names its slot in a byte and holds the first legacy_sample_slots, as it always has; the slots past them
+    // go in SMPX, the slot in two. A build that holds 64 samples a project skips SMPX and loads the pads that name
+    // those slots empty (its read_pad() takes a slot past its own as none).
     for (unsigned n = 0; n < sample_slots; ++n) {
         const auto& s = project.samples[n];
         if (!s.used()) continue;
-        at = w.begin("SMPL");
-        w.u8(n); w.text(s.path); w.text(s.name);
+        if (n < legacy_sample_slots) { at = w.begin("SMPL"); w.u8(n); }
+        else { at = w.begin("SMPX"); w.u16(n); }
+        w.text(s.path); w.text(s.name);
         w.end(at);
     }
     if (prints)
@@ -853,7 +867,7 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
             }
             if (count) c.slices.stop[count - 1] = last;
             c.unwritten = true;
-            if (r.ok && sorted && n < sample_slots) project->chops[n] = c; // a damaged one is cut afresh
+            if (r.ok && sorted && n < sample_slots) project->chops.edit(n) = c; // a damaged one is cut afresh
         } else if (name == "MODS") { // modulators (roadmap P4); without it none
             unsigned used = r.u8();
             for (unsigned k = 0; k < used && r.ok; ++k) {
@@ -931,12 +945,13 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
             if (t >= track_count) continue;
             unsigned used = r.u8();
             for (unsigned k = 0; k < used && r.ok; ++k) read_layers(r, project->tracks[t].pads.data(), sampler_pads, sample_slots);
-        } else if (name == "ZTRM") { // instruments' zones trimmed (round 3 "instrument C"); without it none are
+        } else if (name == "ZTRM" || name == "ZTRX") { // instruments' zones trimmed (round 3 "instrument C"); without it none are
+            const bool wide = name == "ZTRX"; // the slot in two bytes
             unsigned t = r.u8();
             if (t >= track_count) continue;
             unsigned used = r.u8();
             for (unsigned k = 0; k < used && r.ok; ++k) {
-                unsigned pad = r.u8(), slot = r.u8(), zone = r.u16();
+                unsigned pad = r.u8(), slot = wide ? r.u16() : r.u8(), zone = r.u16();
                 int tune = int8_t(uint8_t(r.u8())), level = r.i16();
                 if (r.ok && pad < sampler_pads && slot < sample_slots) set_trim(project->tracks[t].zone_trims, pad, zone, slot, tune, level);
             }
@@ -1433,11 +1448,12 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
             if (!r.done()) { c.sidechain = r.u8() != 0; c.key = uint8_t(r.u8() % track_count); }
             c.key_pad = MasterComp::whole_kit;
             if (!r.done()) { unsigned pad = r.u8(); c.key_pad = pad < sampler_pads ? uint8_t(pad) : MasterComp::whole_kit; }
-        } else if (name == "SMPL") {
-            unsigned n = r.u8();
+        } else if (name == "SMPL" || name == "SMPX") { // SMPX: a slot past the first 64, named in two bytes
+            unsigned n = name == "SMPX" ? r.u16() : r.u8();
             if (n >= sample_slots) continue;
-            r.text(project->samples[n].path, sizeof(project->samples[n].path));
-            r.text(project->samples[n].name, sizeof(project->samples[n].name));
+            auto& ref = project->samples.edit(n);
+            r.text(ref.path, sizeof(ref.path));
+            r.text(ref.name, sizeof(ref.name));
         }
         if (!r.ok) return "damaged section " + name;
     }

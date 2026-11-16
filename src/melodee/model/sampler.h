@@ -15,7 +15,13 @@ namespace melodee {
 
 constexpr unsigned sampler_banks = 8, sampler_pads = 16 * sampler_banks;
 constexpr unsigned legacy_pads = 64;     // banks A-D: the pads a project file's TRAK section holds
-constexpr unsigned sample_slots = 64;     // samples a project holds
+// The places a project has for samples: one for each layer of each pad of each track (16 tracks, 128 pads, 4
+// layers), so the pads run out before the places do. What a project can hold is what fits in memory
+// (shell/sample_memory.h); the tables kept for each place hold only those in use (model/slot_table.h).
+constexpr unsigned sample_slots = 8192;
+// The slots a project file's SMPL section names, and all an older build holds (64 samples a project): the slots
+// past them are kept in SMPX, which such a build skips (model/project_file.cpp).
+constexpr unsigned legacy_sample_slots = 64;
 // One more slot on the engine's side only: the browser's preview of a file
 // (B3 on Samples), never a pad's sample and never in the project.
 constexpr unsigned preview_slot = sample_slots;
@@ -195,7 +201,7 @@ constexpr int zone_trim_cents = 100;                  // TUNE: -100..100 cents
 constexpr int zone_trim_low = -240, zone_trim_high = 120; // LEVEL: tenths of a dB
 struct ZoneTrim {
     uint8_t pad = 0xff;  // kit pad 0..127
-    uint8_t slot = 0;    // the project's sample slot holding the instrument
+    uint16_t slot = 0;   // the project's sample slot holding the instrument
     uint16_t zone = 0;   // the zone's place in its instrument
     int8_t tune = 0;     // cents
     int16_t level = 0;   // tenths of a dB
@@ -217,7 +223,7 @@ inline bool set_trim(ZoneTrims& trims, unsigned pad, unsigned zone, unsigned slo
     const bool none = !tune && !level;
     if (!free) return none;
     if (none) { if (free->used()) *free = ZoneTrim {}; return true; }
-    free->pad = uint8_t(pad); free->zone = uint16_t(zone); free->slot = uint8_t(slot);
+    free->pad = uint8_t(pad); free->zone = uint16_t(zone); free->slot = uint16_t(slot);
     free->tune = int8_t(std::clamp(tune, -zone_trim_cents, zone_trim_cents));
     free->level = int16_t(std::clamp(level, zone_trim_low, zone_trim_high));
     return true;

@@ -92,8 +92,8 @@ std::string instrument_zone_file(const std::string& instrument, const std::strin
 struct SampleJob {
     enum class Kind : uint8_t { Save, Derive };
     Kind kind = Kind::Save;
-    uint8_t source = 0;   // the slot the audio comes from
-    uint8_t target = 0;   // Derive: the slot the new file goes into
+    uint16_t source = 0;  // the slot the audio comes from
+    uint16_t target = 0;  // Derive: the slot the new file goes into
     uint32_t from = 0, to = 0; // frames; to 0: the end
     bool edges = false;   // Extract: 2 ms fades where the slice was cut inside the source (shell/chop.h)
     char name[40] {};     // the file's name, without .wav; a free one is found
@@ -119,6 +119,9 @@ public:
     SlotLoad slot_load(unsigned slot) const;
     // True for a path the library loads as a multisampled instrument (an .sfz, a keygroup program, an .sf2 preset...).
     static bool instrument_path(const std::string& path);
+    // MIDI thread: whether slot `slot` may hold anything: a file was asked for it, or a sample made here was put in
+    // it, since it was last emptied. A project switched to asks nothing of the slots it leaves empty that hold nothing.
+    bool held(unsigned slot) const { return slot < sample_slots && slot_held[slot].load(std::memory_order_relaxed); }
     // The slot a load last began work for; -1 while nothing loads.
     int loading_now() const { return now_loading.load(std::memory_order_relaxed); }
     void rescan() { scan_wanted.store(true); }
@@ -172,11 +175,11 @@ public:
     // about to play: into slot `slot` (Resample, Samples/Recorded/RESAMPLE
     // n.wav), or straight into Melodee/Mixdowns/<name>.wav on the card (the
     // song). `frames`: how long it should run, to make room up front.
-    bool recall(unsigned slot, const RecallOptions& options) { return recalls.push({uint8_t(slot), options}); }
+    bool recall(unsigned slot, const RecallOptions& options) { return recalls.push({uint16_t(slot), options}); }
     // Roadmap P4: a mixdown's file as 32-bit float (bits 32) or integer PCM (24, 16: dithered); stems beside it (each
     // track and bus the engine host's StemRing takes, as Melodee/Stems/<name>/NN <stem>.wav, the mix as Mix.wav).
     struct Render {
-        bool to_file = false; uint8_t slot = 0; uint32_t frames = 0; char name[40] {};
+        bool to_file = false; uint16_t slot = 0; uint32_t frames = 0; char name[40] {};
         uint8_t bits = 32;
         bool stems = false;
         std::array<std::array<char, 24>, StemRing::stem_count> stem_names {};
@@ -189,7 +192,7 @@ public:
     // drums, bass, music and vocals, as Samples/Stems/<name> DRUMS.wav, <name> BASS.wav, <name> MUSIC.wav and
     // <name> VOCALS.wav (the same free <name> for the four). take_stems() hands back the files written, or why
     // there are none ("stopped": it was called off). One job at a time; stop_stems() and stems_progress() from any thread.
-    struct StemsRequest { uint8_t source = 0; char name[24] {}; };
+    struct StemsRequest { uint16_t source = 0; char name[24] {}; };
     bool separate(const StemsRequest& job) { return stems_wanted.push(job); }
     void stop_stems() { separator.cancel(); }
     StemsProgress stems_progress() const { return separator.progress(); }
@@ -202,13 +205,14 @@ public:
     // The Looper (docs/LOOPER.md, shell/looper_files.cpp). Commit to pad: loop `loop` into slot `slot`, as
     // Samples/Looper/L<n> Loop m.wav, once the audio thread lets it be read. A project's loops: written as
     // <dir>/Loop N.wav for the loops in `mask` (the others' files go), or read back into the Looper.
-    struct LoopCommit { uint8_t slot = 0, loop = 0; };
+    struct LoopCommit { uint16_t slot = 0; uint8_t loop = 0; };
     bool commit_loop(const LoopCommit& job) { return commits.push(job); }
     struct LoopFiles { bool save = true; std::string dir; uint8_t mask = 0; std::array<LoopTrack, loop_tracks> loops {}; };
     void loop_files(LoopFiles job);
     bool loops_busy() const; // loop files still being written (leaving waits)
 
-    // Any thread but audio: a copy of what is known.
+    // Any thread but audio: a copy of what is known of the browser. The loaded samples are read a slot at a time
+    // (slot(), measure()): each is several kilobytes with its waveform and hits.
     struct View {
         std::string root;  // the card's Samples folder, where Melodee writes; empty: no card
         Drive drive = Drive::Card;
@@ -216,10 +220,12 @@ public:
         bool top = true;    // nothing above it to go back to
         std::vector<SampleFile> files; // folders first, then WAV files, each by name
         int came_from = -1; // after going up: the folder it came out of
-        std::array<LoadedSample, sample_slots> slots;
     };
     void view(View& out) const;
     LoadedSample slot(unsigned n) const;
+    // What the project keeps of slot `n`'s sample once it is loaded: its length and, an instrument's, its zones.
+    struct Measure { uint32_t frames = 0; std::vector<ZoneShape> shapes; };
+    Measure measure(unsigned n) const;
     // Round 3 "instrument C": the zone of slot `n`'s instrument a press of `key` at `velocity` reaches (-1 none),
     // and zone `zone`'s file as its regions name it ("" none). Under the lock.
     int zone_at(unsigned n, int key, int velocity) const;
@@ -250,7 +256,7 @@ public:
     static std::vector<std::string> internal_tops();
 
 private:
-    struct Request { uint8_t slot = 0; char path[sizeof(SampleRef::path)] {}; };
+    struct Request { uint16_t slot = 0; char path[sizeof(SampleRef::path)] {}; };
     void scan();
     void make(const SampleJob& job);
     void hear(const std::string& path);
@@ -279,7 +285,7 @@ private:
     // An instrument whose files are landing (sample_library_instruments.cpp). The pool's threads read it and write
     // only the part and the zones of the file each was given; the rest is the service thread's.
     struct Landing {
-        uint8_t slot = 0;
+        uint16_t slot = 0;
         std::string folder;
         std::string sf2;                        // roadmap P3: an .sf2's preset, its sounds taken from this file
         SfzRead read;
@@ -296,9 +302,10 @@ private:
     // thread hands it to the audio thread in the order it arrives, as that thread's queue has room. Each load of a
     // slot has a serial; one still on its way when the slot is asked for again is dropped when it arrives.
     struct Handover { // a sample read (or none: the slot emptied), waiting for the audio thread's queue
-        uint8_t slot = 0;
+        uint16_t slot = 0;
         uint32_t serial = 0;
         bool clear = false;
+        bool refused = false; // not read: it would have left memory short (shell/sample_memory.h)
         std::unique_ptr<SampleData> data;
         LoadedSample loaded;
     };
@@ -314,6 +321,7 @@ private:
     bool handover_refused = false;
     std::array<uint32_t, sample_slots> slot_serial {};             // service thread
     std::array<std::atomic<uint32_t>, sample_slots> slot_state {}; // a SlotLoad packed (slot_load())
+    std::array<std::atomic<bool>, sample_slots> slot_held {};      // held()
     std::atomic<int> now_loading {-1};
     void set_slot_state(unsigned slot, bool settled, bool instrument = false, unsigned parts = 0, unsigned parts_in = 0);
     void dispatch(const Request& request);     // a file asked for: its load begun on the pool
@@ -325,7 +333,7 @@ private:
     std::mutex long_layout; // an instrument's long file is decoded whole to be laid out: one of those at a time
     SampleCache cache;
     bool cache_tidied = false;
-    std::vector<std::pair<uint8_t, std::string>> away; // the instruments put down for SD card access
+    std::vector<std::pair<uint16_t, std::string>> away; // the instruments put down for SD card access
 
     EngineHost& host;
     MidiQueue<16, Request> requests; // MIDI thread produces, service thread consumes
@@ -339,7 +347,7 @@ private:
     std::atomic<unsigned> take_count {0};
     void save_take();
     // Recall and renders (shell/sample_capture.cpp).
-    struct RecallJob { uint8_t slot = 0; RecallOptions options; };
+    struct RecallJob { uint16_t slot = 0; RecallOptions options; };
     MidiQueue<4, RecallJob> recalls;
     MidiQueue<4, Render> renders;
     void save_recall(const RecallJob& job);
@@ -380,7 +388,12 @@ private:
     std::array<const SampleData*, sample_slots> data_of {}; // under `lock`: what each slot holds now, for peak()
     unsigned print_holds = 0;                                // under `lock`: hold_samples() not released yet
     std::vector<std::unique_ptr<SampleData>> held_back;      // service thread: let go of by the audio thread while held
-    std::array<std::vector<std::string>, sample_slots> part_names; // under `lock`: an instrument's files (zone_file)
+    // Under `lock`: each slot's sample as the pages see it and, an instrument's, its files (zone_file()). Kept only
+    // for the slots that hold or held one: none reads as an empty LoadedSample.
+    struct Shown { LoadedSample sample; std::vector<std::string> parts; };
+    std::array<std::unique_ptr<Shown>, sample_slots> slot_shown;
+    const LoadedSample& shown_at(unsigned slot) const;
+    Shown& show(unsigned slot);
     std::string root_seen, card_top;
     unsigned ticks = 0;
     mutable std::mutex lock;
@@ -401,6 +414,7 @@ private:
         bool open = false;
         std::chrono::steady_clock::time_point since;
         unsigned files = 0, instruments = 0, parts = 0, laid_out = 0, failed = 0;
+        unsigned refused = 0; // samples not read for want of memory: the first is told (a notice), the rest counted
     } load_log;
     // What the pool's threads spent on each step of it, added up over the threads (microseconds): samples read and
     // converted, analysed (waveform and hits), instruments' texts read, their files landed.

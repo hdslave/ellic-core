@@ -63,8 +63,8 @@ void print_project(Project& project, PatternBank& bank, unsigned track, unsigned
         bool used = false;
         for (const auto& pad : tr.pads) used |= pad.plays(uint16_t(n));
         if (!used) continue;
-        out->samples[n] = project.samples[n];
-        out->chops[n] = project.chops[n];
+        out->samples.edit(n) = project.samples[n];
+        if (project.chops[n].used()) out->chops.edit(n) = project.chops[n];
     }
     for (unsigned e = 0; e < max_plugins; ++e) {
         bool used = tr.engine == EngineKind::Plugin && tr.plugin == e;

@@ -14,6 +14,7 @@
 #include "melodee/model/progression_data.h"
 #include "melodee/model/pattern.h"
 #include "melodee/model/sampler.h"
+#include "melodee/model/slot_table.h"
 #include <algorithm>
 #include <array>
 #include <iterator>
@@ -376,6 +377,8 @@ struct PluginRef {
     bool used() const { return path[0] != 0; }
 };
 
+static_assert(sample_slots >= track_count * sampler_pads * pad_layers, "a sample slot for every layer of every pad");
+
 struct Project {
     char name[32] = "Untitled";
     uint16_t tempo = 1200;  // tenths of a BPM; the global tempo
@@ -400,8 +403,10 @@ struct Project {
     MasterComp compressor;  // Shift + Pad 5 (parity phase 7)
     Song song;              // (Motion is each pattern's own since roadmap P1: Pattern::motion)
     std::array<Bus, bus_count> buses {};
-    std::array<SampleRef, sample_slots> samples {};
-    std::array<SampleChop, sample_slots> chops {}; // roadmap P3: each sample's chop, as Chop left it (CHOP)
+    // Its samples, a slot each (PadSound::sample), in tables that keep only the slots written (model/slot_table.h):
+    // samples[n] reads slot n, samples.edit(n) is the slot to write.
+    SlotTable<SampleRef> samples;
+    SlotTable<SampleChop> chops; // roadmap P3: each sample's chop, as Chop left it (CHOP)
     std::array<PluginRef, max_plugins> plugins {};
     Chain master {{}, master_slots};
     // The Looper (docs/LOOPER.md): its settings, and its four tracks' strips and chains.
