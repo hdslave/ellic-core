@@ -11,6 +11,7 @@
 #include "melodee/model/sampler.h"
 #include "melodee/shell/load_pool.h"
 #include "melodee/shell/sample_cache.h"
+#include "melodee/shell/stems.h"
 #include "melodee/shell/zone_shapes.h"
 #include "surface/midi.h"
 #include <array>
@@ -23,6 +24,7 @@
 #include <vector>
 
 struct Hardware;
+class Platform;
 
 // The samples on the drives and the ones loaded, run on the service thread:
 // it finds the card's Samples folder (or $MELODEE_SAMPLES on a host), lists
@@ -183,6 +185,19 @@ public:
     StemRing* stem_ring(); // MIDI thread: made the first time stems are wanted (21 MB), kept after
     std::string card() const; // the card's top folder; empty without one
 
+    // Stems (shell/stems.h, shell/sample_library_stems.cpp). MIDI thread: slot `source`'s sample separated into its
+    // drums, vocals and music, as Samples/Stems/<name> DRUMS.wav, <name> VOCALS.wav and <name> MUSIC.wav (the same
+    // free <name> for the three). take_stems() hands back the files written, or why there are none ("stopped": it
+    // was called off). One job at a time; stop_stems() and stems_progress() from any thread.
+    struct StemsRequest { uint8_t source = 0; char name[24] {}; };
+    bool separate(const StemsRequest& job) { return stems_wanted.push(job); }
+    void stop_stems() { separator.cancel(); }
+    StemsProgress stems_progress() const { return separator.progress(); }
+    bool take_stems(StemsResult& out);
+    // Where the separating program is: the release's folder on the card (autorun/melodee/stems), else the folder
+    // `device.py install-sd` starts the app from (sample-base/stems); or $MELODEE_STEMS_ENGINE.
+    static std::string stems_program(const std::string& card_top);
+
     // The Looper (docs/LOOPER.md, shell/looper_files.cpp). Commit to pad: loop `loop` into slot `slot`, as
     // Samples/Looper/L<n> Loop m.wav, once the audio thread lets it be read. A project's loops: written as
     // <dir>/Loop N.wav for the loops in `mask` (the others' files go), or read back into the Looper.
@@ -328,6 +343,11 @@ private:
     MidiQueue<4, Render> renders;
     void save_recall(const RecallJob& job);
     void drain_render();
+    // Stems: the job asked for, the one running, and what came of the last (under `lock`).
+    MidiQueue<2, StemsRequest> stems_wanted;
+    StemSeparator separator;
+    std::vector<StemsResult> stems_done;
+    void stems_service(const Platform& platform);
     // A sample made here, `data`'s left and right at `rate` Hz (a take, a recall or a render at the device's): written
     // so, as Samples/<folder>/<stem> n.wav when there is a card, kept as written (adopt(): its own frames play, its
     // 44.1 kHz frames are what the project counts), offered to `slot` and listed; `what` names it in a failure.
