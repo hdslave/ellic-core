@@ -43,9 +43,9 @@ uint64_t stems_memory(uint32_t frames) {
 }
 
 unsigned stems_seconds(uint32_t frames) {
-    // A guess until the job's own pace is known (separate()): the model read from the card, a pass of each of the
-    // four networks for every 11.9 s (3.5 s a pass on the MPC, three at a time), then the four files written.
-    return unsigned(std::ceil(9.0 + 0.75 * seconds_of(frames)));
+    // Until the job's own pace is known (separate()). Measured on the MPC: the program alone 13 s for 13 s of
+    // sound and 36 s for 60 s; a whole job 15 s for 13 s, with the four files written to the card after.
+    return unsigned(std::ceil(8.0 + 0.55 * seconds_of(frames)));
 }
 
 StemSeparator::~StemSeparator() {

@@ -25,6 +25,9 @@
 // reads one WAV file and writes four beside it (44.1 kHz, 32-bit float,
 // stereo, the input's length to the frame); those are written to the card as
 // write_wav() keeps a sample. It prints how far it is, a line a step.
+//
+// Measured on the MPC with three threads: 13 s of sound in 13 s, 60 s in
+// 36 s; at its fullest 478 MB for 13 s and 656 MB for 60 s.
 namespace melodee {
 
 constexpr unsigned stem_count = 4;
