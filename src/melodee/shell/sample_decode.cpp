@@ -37,8 +37,8 @@ juce::AudioFormatManager& formats() { // service thread only
 }
 } // namespace
 
-std::string read_audio(const std::string& path, SampleData& out, unsigned max_seconds, WavInfo* info, float play_at) {
-    if (!juce_kind(path)) return read_wav(path, out, max_seconds, info, play_at);
+std::string read_audio(const std::string& path, SampleData& out, unsigned max_seconds, WavInfo* info) {
+    if (!juce_kind(path)) return read_wav(path, out, max_seconds, info);
     AudioReader reader;
     auto error = reader.open(path, max_seconds, info);
     if (!error.empty()) return error;
@@ -47,8 +47,7 @@ std::string read_audio(const std::string& path, SampleData& out, unsigned max_se
     r.resize(l.size());
     if (reader.failed()) return "cannot read it";
     if (l.empty()) return "no audio";
-    // To the project's rate, band-limited, as read_wav does (roadmap P2).
-    adopt(out, std::move(l), std::move(r), reader.rate(), play_at);
+    adopt(out, std::move(l), std::move(r), reader.rate()); // at its own rate, as read_wav keeps it
     return {};
 }
 

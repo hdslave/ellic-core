@@ -76,20 +76,19 @@ void SamplerEngine::start(Voice& v, const PadSound& sound, int pad, int velocity
     v = Voice {};
     v.pad = pad; v.trigger = trigger >= 0 ? trigger : pad; v.sample = data; v.slot = sound.sample;
     v.velocity = uint8_t(std::clamp(velocity, 0, 127)); v.semis = semitones; v.levels_cutoff = int16_t(cutoff); v.accent = accent;
-    // Roadmap P2: a sample made ready at the device's rate plays from that copy, a frame each device frame (only its
-    // pitch moves the read on), the pad's 44.1 kHz frames scaled there; else (an instrument's zones, or no copy made)
-    // from its 44.1 kHz frames, each device frame reading that much further on.
-    // A zone's part has a rate of its own: 44.1 kHz laid out in the cache, its file's when that is read in place.
-    v.native = !part && data->plays_at(dsp::sample_rate());
-    v.scale = part ? double(part->rate) / dsp::model_rate : v.native ? double(data->play_rate) / dsp::model_rate : 1.0;
-    auto at_rate = [&](uint32_t frame) { return v.native ? uint32_t(std::llround(frame * v.scale)) : frame; };
-    const uint32_t total = part ? part->total : v.native ? data->play_frames : data->frames;
+    // A sample's frames are at its own rate (the file's, or the capture's), and so is a zone's part (44.1 kHz laid
+    // out in the cache, its file's when that is read in place): the pad's 44.1 kHz positions are scaled there, and each
+    // device frame reads that much further on (aim()), however the rates stand.
+    v.rate = part ? part->rate : float(data->rate);
+    v.scale = double(v.rate) / dsp::model_rate;
+    auto at_rate = [&](uint32_t frame) { return v.scale == 1.0 ? frame : uint32_t(std::llround(frame * v.scale)); };
+    const uint32_t total = part ? part->total : data->frames;
     v.start = std::min(zone ? zone->start : at_rate(sound.start), total - 1);
     uint32_t end = zone ? zone->end : at_rate(sound.end);
     v.end = end && end <= total ? end : total;
     if (v.end <= v.start + 1) { v.pad = -1; return; }
-    v.l = part ? part->left : v.native ? data->play_left.data() : data->left.data();
-    v.r = part ? part->right : v.native ? data->play_right.data() : data->right.data();
+    v.l = part ? part->left : data->left.data();
+    v.r = part ? part->right : data->right.data();
     v.reverse = sound.reverse;
     v.position = v.reverse ? v.end - 1 : v.start;
     v.total = total;
@@ -172,9 +171,8 @@ void SamplerEngine::aim(Voice& v, const PadSound& sound, const SampleZone* zone,
     else if (p[Follow] && sound.own_tempo) { rate = double(tempo) / sound.own_tempo; v.follows = true; }
     const bool keep_length = p[PitchHow] == 1 || (warped && !tape);
     const bool shifted = std::fabs(step - 1.0) > 1e-6;
-    // At 44.1 kHz (no copy at the device's rate) each output frame reads that much further along; a zone's part by
-    // its own rate over the device's.
-    const double per_frame = v.native ? 1.0 : dsp::model_rate * v.scale / dsp::sample_rate();
+    // Each output frame reads its frames that much further along: their rate over the device's.
+    const double per_frame = double(v.rate) / dsp::sample_rate();
     v.aim.step = (tape ? step * rate : step) * per_frame;             // what it reads at (a stretch's taps)
     v.aim.advance = rate * (keep_length ? 1.0 : step) * per_frame;    // how fast the sound moves on
     if (bend != 0.0f && pad < int(sampler_pads)) { // the pitch wheel (not Chop's audition): a stretched voice keeps its length, the rest move with it as tape does
@@ -1417,7 +1415,7 @@ bool SamplerEngine::admit(Voice& v, unsigned frames) {
 // out early, or it is no longer wanted), it plays up to there and ends.
 bool SamplerEngine::admit_grown(Voice& v, unsigned frames) {
     const bool cut = v.grow->cut.load(std::memory_order_acquire); // first: what it reads below is then all that comes
-    const uint32_t limit = (v.native ? v.grow->play_frames : v.grow->frames).load(std::memory_order_acquire);
+    const uint32_t limit = v.grow->frames.load(std::memory_order_acquire);
     bool enough = limit >= v.end, plenty = enough;
     if (!enough && !v.reverse && !v.loop && !v.xfade_kind) {
         const double at = v.stretch ? v.place : v.position;
@@ -1748,7 +1746,7 @@ void SamplerEngine::taps(TrackTaps& out) const {
         if (v.wait) flags |= tap::Waiting;
         if (v.choked) flags |= tap::Choked;
         t.flags = flags;
-        if (v.scale != 1) { // a copy at the device's rate: back to the 44.1 kHz frames the pages draw (roadmap P2)
+        if (v.scale != 1) { // frames at another rate: back to the 44.1 kHz frames the pages draw
             auto model = [&](uint32_t f) { return uint32_t(std::llround(f / v.scale)); };
             t.from = model(t.from); t.to = model(t.to); t.loop_at = model(t.loop_at); t.at = model(t.at);
             t.step = float(t.step / v.scale);

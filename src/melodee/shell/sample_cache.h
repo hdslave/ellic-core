@@ -7,8 +7,9 @@
 #include <string>
 
 // A multisampled instrument's frames laid out once on the card, as
-// melodee-ios's mapped audio: 32-bit float at the project's rate, the left
-// side, then the right starting on a chunk boundary, so chunks are whole pages
+// melodee-ios's mapped audio: 32-bit float at the source's own rate (decoded,
+// never converted), the left side, then the right starting on a chunk boundary,
+// so chunks are whole pages
 // to pin. A 64 KB header says what the file holds, so opening it again reads
 // nothing else. Named by the source's path on the card, size and date and the
 // cache version; a change misses it by itself. Service thread only.
@@ -23,8 +24,8 @@ struct LaidOut {
 constexpr uint64_t cache_most_bytes = 4000000000ull; // least lately played go first past this
 constexpr int cache_unplayed_days = 30;               // not played for this long: removed
 // Raise when what a source reads as changes (a decoder or loop fix, the layout):
-// every older file then misses and ages out.
-constexpr unsigned cache_version = 2;
+// every older file then misses and ages out. 3: at the source's own rate (2 was 44.1 kHz).
+constexpr unsigned cache_version = 3;
 
 class SampleCache {
 public:

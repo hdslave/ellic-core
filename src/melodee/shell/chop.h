@@ -61,8 +61,11 @@ inline uint32_t zero_crossing(const float* left, const float* right, uint32_t fr
     }
     return found ? best : quiet;
 }
+// The same on a sample, `frame` and what comes back as the project counts them (44.1 kHz), read in its own frames.
 inline uint32_t zero_crossing(const SampleData& sample, uint32_t frame) {
-    return zero_crossing(sample.left.data(), sample.right.data(), std::min<uint32_t>(sample.frames, uint32_t(sample.left.size())), frame);
+    const uint32_t own = sample.own(frame);
+    const uint32_t at = zero_crossing(sample.left.data(), sample.right.data(), std::min<uint32_t>(sample.frames, uint32_t(sample.left.size())), own);
+    return at == own ? frame : sample.model(at);
 }
 
 // The wheel's Zero Snap: the first crossing at or past `frame` going `way` (+1 later, -1 earlier), within 50 ms;
@@ -85,8 +88,12 @@ inline uint32_t zero_crossing_toward(const float* left, const float* right, uint
     return frame;
 }
 inline uint32_t zero_crossing_toward(const SampleData& sample, uint32_t frame, int way) {
-    return zero_crossing_toward(sample.left.data(), sample.right.data(), std::min<uint32_t>(sample.frames, uint32_t(sample.left.size())), frame,
-                                way);
+    const uint32_t own = sample.own(frame);
+    const uint32_t at = zero_crossing_toward(sample.left.data(), sample.right.data(), std::min<uint32_t>(sample.frames, uint32_t(sample.left.size())),
+                                             own, way);
+    if (at == own) return frame;
+    const uint32_t model = sample.model(at);
+    return way > 0 ? std::max(model, frame) : std::min(model, frame); // never back past `frame`, as above
 }
 
 // The cut for a beat expected at `want`, a `step` after the cut before (`beat` frames a beat): the sample's tracked

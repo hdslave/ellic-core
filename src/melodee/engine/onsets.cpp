@@ -66,14 +66,34 @@ float band_sum(const std::vector<float>& magnitude, const Band& b) {
     return sum;
 }
 
-// The hits in time order, every one found (the first frame 0), and the flux they were found in.
-void analyse(const SampleData& s, std::vector<Hit>& found, std::vector<float>& flux) {
+// The sample's two sides summed, at 44.1 kHz: the frames the project counts, which the hits are found in. Its own
+// frames when it is at that rate, else read between them (straight lines are enough to find hits by).
+std::vector<float> model_mono(const SampleData& s) {
     const uint32_t frames = std::min<uint32_t>(s.frames, uint32_t(std::min(s.left.size(), s.right.size())));
+    if (s.rate == 44100 || !s.rate) {
+        std::vector<float> mono(frames);
+        for (uint32_t n = 0; n < frames; ++n) mono[n] = s.left[n] + s.right[n];
+        return mono;
+    }
+    std::vector<float> mono(frames ? s.model(frames) : 0);
+    const double step = double(s.rate) / 44100.0;
+    for (size_t n = 0; n < mono.size(); ++n) {
+        const double at = double(n) * step;
+        const auto i = uint32_t(at);
+        if (i + 1 >= frames) { mono[n] = i < frames ? s.left[i] + s.right[i] : 0.0f; continue; }
+        const float t = float(at - i);
+        mono[n] = (s.left[i] + s.right[i]) * (1.0f - t) + (s.left[i + 1] + s.right[i + 1]) * t;
+    }
+    return mono;
+}
+
+// The hits in time order, every one found (the first frame 0), and the flux they were found in, from the sample's
+// sides summed at 44.1 kHz (model_mono()).
+void analyse(const std::vector<float>& mono, std::vector<Hit>& found, std::vector<float>& flux) {
+    const auto frames = uint32_t(mono.size());
     found.assign(1, Hit {0, 255});
     flux.clear();
     if (frames > fine * 4) {
-        std::vector<float> mono(frames); // the two sides summed
-        for (uint32_t n = 0; n < frames; ++n) mono[n] = s.left[n] + s.right[n];
 
         // The bands of frames centred hop apart, two frames an FFT: one as the real part, one as the
         // imaginary, parted again by the spectrum's symmetry.
@@ -413,16 +433,16 @@ BeatGrid track_beats(const std::vector<float>& flux, const std::vector<Hit>& hit
 unsigned find_hits(const SampleData& s, std::array<Hit, max_hits>& out, BeatGrid& beats) {
     std::vector<Hit> found;
     std::vector<float> flux;
-    analyse(s, found, flux);
+    const auto mono = model_mono(s);
+    analyse(mono, found, flux);
     // Whether it starts with an attack: a peak in its first 10 ms at least a quarter of its highest.
-    const uint32_t frames = std::min<uint32_t>(s.frames, uint32_t(std::min(s.left.size(), s.right.size())));
     float peak = 0, opening = 0;
-    for (uint32_t n = 0; n < frames; ++n) {
-        float v = std::fabs(s.left[n] + s.right[n]);
+    for (size_t n = 0; n < mono.size(); ++n) {
+        float v = std::fabs(mono[n]);
         peak = std::max(peak, v);
         if (n < 441) opening = std::max(opening, v);
     }
-    beats = track_beats(flux, found, s.frames, peak > 0 && opening >= 0.25f * peak);
+    beats = track_beats(flux, found, uint32_t(mono.size()), peak > 0 && opening >= 0.25f * peak);
     if (found.size() > out.size()) { // keep the strongest, then put them back in time order
         std::sort(found.begin() + 1, found.end(), [](const Hit& a, const Hit& b) { return a.strength > b.strength; });
         found.resize(out.size());

@@ -187,7 +187,8 @@ private:
         uint8_t group = 0;
         float gain = 0, left = 0.7071f, right = 0.7071f, fade = 1;
         uint32_t age = 0;
-        double scale = 1; // its frames a 44.1 kHz frame: above 1 when it plays a copy at the device's rate (roadmap P2)
+        float rate = 44100; // Hz: its frames' (its sample's own, or its zone part's)
+        double scale = 1;   // its frames a 44.1 kHz frame: `rate` over 44.1 kHz
         uint32_t sounded = 0;   // output frames it has played (Offset's wait not counted), for its tap
         bool wrapped = false;   // went round its loop in this block
         dsp::Envelope env;
@@ -235,7 +236,6 @@ private:
         int8_t layer = -1;                  // the pad's layer it plays (layers_on), -1 the pad itself
         int16_t levels_cutoff = -1;         // 16 Levels' cutoff it was hit with, -1 the pad's own
         float accent = 1, fall = 1;         // the sequencer's accent; a release sample's rt_decay
-        bool native = false;                // reads the sample's copy at the device's rate (roadmap P2)
         const SampleGrowth* grow = nullptr; // its sample is still being read: it reads only what landed (admit_grown)
         bool follows = false;               // its speed comes from the tempo (Warp's Seq, Follow)
         Multisample* multi = nullptr;       // a zone's instrument, and the zone's place in it

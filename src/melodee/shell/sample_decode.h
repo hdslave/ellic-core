@@ -7,8 +7,8 @@
 
 namespace melodee {
 
-// An instrument's audio file, whatever its kind, at the project's rate; empty on success.
-std::string read_audio(const std::string& path, SampleData& out, unsigned max_seconds, WavInfo* info, float play_at = 0); // play_at: read_wav's
+// A sound file, whatever its kind, at its own rate; empty on success.
+std::string read_audio(const std::string& path, SampleData& out, unsigned max_seconds, WavInfo* info);
 
 // A sound file a piece at a time, as read_audio() reads it whole (it is read_audio()'s reader): WAV by WavReader,
 // FLAC, Ogg, AIFF and MP3 by JUCE's (an MP3's encoder delay and padding left out). open() finds its rate and its

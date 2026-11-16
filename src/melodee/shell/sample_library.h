@@ -276,12 +276,9 @@ private:
     void cancel_landing(unsigned slot);
     void hear_instrument(const std::string& path);
     bool reap();       // what the audio thread has let go of; true if anything went
-    // Roadmap P2: a sample handed to the audio thread with its copy at the device's rate made first (while every
-    // copy together stays under playback_budget; past it the sampler converts that sample as it plays); and, when the
-    // device's rate has changed, one slot's sample a pass handed over again with its copy made anew.
-    static constexpr size_t playback_budget = size_t(256) << 20;
+    // A sample handed to the audio thread for slot `slot` (nullptr: none); false while its queue is full. A sample is
+    // handed over at its own rate, as it was read or recorded: a voice converts as it reads (engine/sampler.cpp).
     bool offer(unsigned slot, SampleData* data);
-    void refresh_playback();
     // An instrument whose files are landing (sample_library_instruments.cpp). The pool's threads read it and write
     // only the part and the zones of the file each was given; the rest is the service thread's.
     struct Landing {
@@ -358,8 +355,8 @@ private:
     std::vector<StemsResult> stems_done;
     void stems_service(const Platform& platform);
     // A sample made here, `data`'s left and right at `rate` Hz (a take, a recall or a render at the device's): written
-    // so, as Samples/<folder>/<stem> n.wav when there is a card, kept as written (adopt(): its own frames play, its
-    // 44.1 kHz frames are what the project counts), offered to `slot` and listed; `what` names it in a failure.
+    // so, as Samples/<folder>/<stem> n.wav when there is a card, kept as written at that rate (keep_capture()),
+    // offered to `slot` and listed; `what` names it in a failure.
     void land(unsigned slot, std::unique_ptr<SampleData> data, unsigned rate, const char* folder, const char* stem, const char* what);
     bool rendering = false;
     Render render_job;
