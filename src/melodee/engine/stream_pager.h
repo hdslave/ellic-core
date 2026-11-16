@@ -20,17 +20,34 @@
 //
 // A PCM WAV needs no copy laid out to be read so (read_in_place()): where a
 // mapped part's chunk is pinned, its chunk is read from the file and turned
-// to floats in memory, and where that one is let go its memory is given back.
-// The voice reads floats below the published limit either way.
+// to floats in memory. The voice reads floats below the published limit
+// either way.
+//
+// A chunk read from a file stays in memory once nothing counts on it: a pad
+// hit again, a loop come round and a voice that follows another through the
+// same sample read none of it from the card twice. All such chunks together
+// take up to stream_cache_bytes; past that the chunks nothing counts on are
+// given back, the one longest unused first. The file stays open between
+// reads (up to stream_files_open of them, the one opened first closed for the
+// next), and the pager's thread reads the card ahead of every other reader
+// (the real-time I/O class).
 namespace melodee {
+
+constexpr uint64_t stream_cache_bytes = uint64_t(200) << 20;
+constexpr unsigned stream_files_open = 256;
+// The chunks read in place and in memory now, in bytes, and how much they may take (tests set less).
+uint64_t stream_cache_held();
+void stream_cache_budget(uint64_t bytes);
+// Every such chunk nothing counts on given back now, for a load that needs the memory: the bytes that went.
+uint64_t stream_cache_give_back();
 
 struct WavLayout; // engine/sample_data.h
 
 // A part read in place from the PCM WAV at `path`, as `layout` says it lies there: no copy of it is laid out on the
 // card. Room is set aside for its frames as floats at the file's own rate, none of it memory until a chunk is
 // wanted: the pager then reads that chunk of the file and turns it to floats (a tenth of a millisecond) where for a
-// mapped part it pins pages, and gives the memory back when no voice needs it. False when the file cannot be read;
-// the part is then as it was.
+// mapped part it pins pages, and the chunk stays until the memory is wanted for another. False when the file cannot
+// be read; the part is then as it was.
 bool read_in_place(const std::string& path, const WavLayout& layout, ZonePart& part);
 // `frames` frames of such a part from `from` on, straight from its file into `left` and `right` (a mono file's on
 // both), its memory not touched: a few frames looked at by a thread that is not the audio's. False when the file
@@ -74,7 +91,8 @@ public:
     // memory for as long as the part does. False when they could not be pinned.
     bool hold(ZonePart& part, uint32_t frame, uint32_t frames);
     // A part read in place, any thread but audio and the pager's (its chunks are counted under its source's lock):
-    // one chunk held (its count raised, read from the file when it was 0), or let go (its memory given back at 0).
+    // one chunk held (its count raised, read from the file when it is not in memory), or let go (at 0 it stays in
+    // memory, the first to go when the memory is wanted).
     bool hold_chunk(ZonePart& part, uint32_t chunk) { return chunk < part.pins.size() && pin_chunk(part, chunk); }
     void let_go(ZonePart& part, uint32_t chunk) { if (chunk < part.pins.size()) unpin_chunk(part, chunk); }
 

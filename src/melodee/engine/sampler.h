@@ -288,6 +288,7 @@ private:
     void follow_stream(Voice& v); // and after its block: where it reads, or round its loop
     void came_round(Voice& v);          // a zone's loop went back to its start
     bool admit(Voice& v, unsigned frames); // whether its next frames are safe to read
+    void pass(Voice& v, unsigned frames);  // a block with nothing safe to read: its time goes on
     bool admit_grown(Voice& v, unsigned frames); // the same for a sample still being read (SampleGrowth)
     void play_zone(Voice& v, float* to_l, float* to_r, unsigned from, unsigned frames);
     float frames_left(const Voice& v, double at, double speed) const; // output frames to the end, for the fades

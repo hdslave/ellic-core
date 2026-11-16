@@ -1411,9 +1411,37 @@ void SamplerEngine::came_round(Voice& v) {
     else v.head_end = v.loop_at + stream_chunk;
 }
 
+// A streamed voice with nothing safe to read for this block (admit()): its time goes on all the same, as the MPC's
+// own streaming has it, so it comes back where it would have been by now, in time with what else plays. Its place
+// moves on by the block, round its loop or out at its end, and the pager reads ahead of where it is now. A stretched
+// voice holds its place (its taps start from where they are), as does one with no stream.
+void SamplerEngine::pass(Voice& v, unsigned frames) {
+    if (v.stretch || v.cloud || v.stream < 0) return;
+    const double moved = double(frames) * v.step;
+    v.position += v.reverse ? -moved : moved;
+    if (v.zone) {
+        const bool round = v.loop && (!v.loop_held || v.held);
+        if (round && v.position >= v.loop_hi && v.loop_hi > v.loop_at) {
+            v.position = v.loop_at + std::fmod(v.position - v.loop_at, double(v.loop_hi - v.loop_at));
+            came_round(v);
+        } else if (!round && (v.reverse ? v.position < v.start : v.position >= v.end - 1)) { v.pad = -1; return; }
+        if (v.stream >= 0) pager->place(v.stream, uint32_t(std::max(0.0, v.position)));
+        return;
+    }
+    if (v.loop) {
+        const double span = double(v.end - v.loop_at);
+        if (span > 0) {
+            if (v.reverse) while (v.position < v.loop_at) { v.position += span; v.wrapped = v.turned = true; }
+            else while (v.position >= v.end) { v.position -= span; v.wrapped = v.turned = true; }
+        }
+    } else if (v.reverse ? v.position < v.start : v.position >= v.end - 1) { v.pad = -1; return; }
+    follow_stream(v);
+}
+
 // Whether a streamed voice may read its next block. Short of what it needs it
-// ducks out over this block; with none safe it holds its place, silent, and
-// comes back when the pager catches up: a gap on the audio, never a wait on the card.
+// ducks out over this block; with none safe it is silent while its time goes
+// on (pass()), and comes back when the pager has caught up with where it is by
+// then: a gap on the audio, in time, never a wait on the card.
 bool SamplerEngine::admit(Voice& v, unsigned frames) {
     if (v.stream < 0 && !v.capped) { v.duck_to = 1; v.played = true; return true; }
     const double at = v.stretch ? v.place : v.position;
@@ -1439,6 +1467,7 @@ bool SamplerEngine::admit(Voice& v, unsigned frames) {
         v.duck = 0;
         for (unsigned f = 0; f < frames; ++f) { v.env.next(v.shape); if (v.filter != PadFilter::Off) v.filter_env.next(v.filter_shape); }
         if (!v.env.active() || v.choked) v.pad = -1;
+        else if (v.played) pass(v, frames); // one that has not sounded yet waits for its start
         return false;
     }
     v.starved = false; v.played = true;

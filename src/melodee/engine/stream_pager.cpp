@@ -5,10 +5,15 @@
 #include <algorithm>
 #include <chrono>
 #include <fcntl.h>
+#include <list>
+#include <map>
 #include <pthread.h>
 #include <sys/mman.h>
 #include <thread>
 #include <unistd.h>
+#if defined(__linux__)
+#include <sys/syscall.h>
+#endif
 
 namespace melodee {
 namespace {
@@ -17,35 +22,25 @@ uint32_t chunk_count(uint32_t frames) { return frames ? (frames - 1) / stream_ch
 size_t chunk_bytes(uint32_t frames, uint32_t chunk) { return std::min<uint32_t>(stream_chunk, frames - chunk * stream_chunk) * sizeof(float); }
 } // namespace
 
-ZonePart::~ZonePart() { if (mapping) munmap(mapping, mapping_bytes); }
-
 namespace {
 // A side's room in a part read in place: whole chunks, so each chunk of each side is whole pages to let go of.
 size_t side_bytes(uint32_t frames) { return (size_t(frames) * sizeof(float) + stream_chunk_bytes - 1) / stream_chunk_bytes * stream_chunk_bytes; }
+// What a chunk of a part read in place takes in memory: both sides.
+uint64_t kept_bytes(const ZonePart& part, uint32_t chunk) { return uint64_t(chunk_bytes(part.total, chunk)) * (part.right != part.left ? 2 : 1); }
 
-// A chunk of a part read in place, from its file into the part's memory as floats. False when the file gives less.
-bool fill_chunk(ZonePart& part, uint32_t chunk) {
-    const ZoneSource& source = *part.source;
-    const uint32_t first = chunk * stream_chunk, frames = std::min<uint32_t>(stream_chunk, part.total - first);
-    WavLayout layout;
-    layout.channels = source.channels; layout.bits = source.bits; layout.floating = source.floating;
-    const size_t block = layout.block();
-    static thread_local std::vector<uint8_t> bytes; // the pager's thread, and a landing thread's hold()
-    bytes.resize(size_t(frames) * block);
-    const int file = open(source.path.c_str(), O_RDONLY | O_CLOEXEC);
-    if (file < 0) return false; // the card is gone
-    size_t done = 0;
-    while (done < bytes.size()) {
-        const ssize_t got = pread(file, bytes.data() + done, bytes.size() - done, off_t(source.data_at + uint64_t(first) * block + done));
-        if (got <= 0) break; // the file is shorter than it said
-        done += size_t(got);
-    }
-    close(file);
-    if (done < bytes.size()) return false;
-    float* left = const_cast<float*>(part.left) + first;
-    wav_frames(layout, bytes.data(), frames, left, part.right != part.left ? const_cast<float*>(part.right) + first : nullptr);
-    return true;
-}
+// The chunks read in place and in memory, of every part and every pager (the live one's and a print's). `idle`: the
+// ones nothing counts on, the longest so first; `at`: where each is in it. `open`: the sources whose file is open,
+// the first opened first. A source's lock is taken before `lock`, never after it but by a try: trim() and
+// close_one() pass over a source that is being read.
+struct Idle { ZonePart* part; uint32_t chunk; };
+struct StreamCache {
+    std::mutex lock;
+    std::list<Idle> idle;
+    std::map<std::pair<const ZonePart*, uint32_t>, std::list<Idle>::iterator> at;
+    uint64_t bytes = 0, budget = stream_cache_bytes;
+    std::vector<ZoneSource*> open;
+};
+StreamCache& cache() { static StreamCache c; return c; }
 
 // The same chunk given back: its pages go, and read as silence until it is filled again.
 void empty_chunk(ZonePart& part, uint32_t chunk) {
@@ -53,7 +48,133 @@ void empty_chunk(ZonePart& part, uint32_t chunk) {
     madvise(const_cast<float*>(part.left) + first, stream_chunk_bytes, MADV_DONTNEED);
     if (part.right != part.left) madvise(const_cast<float*>(part.right) + first, stream_chunk_bytes, MADV_DONTNEED);
 }
+
+// Under the part's source's lock. A chunk nothing counts on any more: the latest of the idle.
+void now_idle(ZonePart& part, uint32_t chunk) {
+    StreamCache& c = cache();
+    std::lock_guard<std::mutex> guard(c.lock);
+    c.at[{&part, chunk}] = c.idle.insert(c.idle.end(), {&part, chunk});
+}
+// Under the part's source's lock. An idle chunk counted on again.
+void now_wanted(ZonePart& part, uint32_t chunk) {
+    StreamCache& c = cache();
+    std::lock_guard<std::mutex> guard(c.lock);
+    auto found = c.at.find({&part, chunk});
+    if (found == c.at.end()) return;
+    c.idle.erase(found->second);
+    c.at.erase(found);
+}
+// Under the part's source's lock. A chunk read into memory.
+void now_kept(ZonePart& part, uint32_t chunk) {
+    StreamCache& c = cache();
+    std::lock_guard<std::mutex> guard(c.lock);
+    c.bytes += kept_bytes(part, chunk);
+}
+// With no source's lock held. Past the budget (`all`: past nothing), the idle chunks given back, the longest idle
+// first; one whose part is being read or counted now is passed over.
+void trim(bool all = false) {
+    StreamCache& c = cache();
+    std::lock_guard<std::mutex> guard(c.lock);
+    for (auto idle = c.idle.begin(); c.bytes > (all ? 0 : c.budget) && idle != c.idle.end();) {
+        ZonePart& part = *idle->part;
+        const uint32_t chunk = idle->chunk;
+        std::unique_lock<std::mutex> own(part.source->lock, std::try_to_lock);
+        if (!own.owns_lock()) { ++idle; continue; }
+        empty_chunk(part, chunk);
+        part.source->kept[chunk] = 0;
+        c.bytes -= std::min(c.bytes, kept_bytes(part, chunk));
+        c.at.erase({&part, chunk});
+        idle = c.idle.erase(idle);
+    }
+}
+// A part's mapping is going: its chunks are in memory no more.
+void forget(ZonePart& part) {
+    StreamCache& c = cache();
+    std::lock_guard<std::mutex> guard(c.lock);
+    for (auto idle = c.idle.begin(); idle != c.idle.end();) {
+        if (idle->part != &part) { ++idle; continue; }
+        c.at.erase({&part, idle->chunk});
+        idle = c.idle.erase(idle);
+    }
+    for (uint32_t chunk = 0; chunk < part.source->kept.size(); ++chunk)
+        if (part.source->kept[chunk]) c.bytes -= std::min(c.bytes, kept_bytes(part, chunk));
+}
+
+// Under the source's lock. Its file, opened at its first read and kept open: a read then needs no look through the
+// card's folders, which the card may have to be read for. With stream_files_open open, the one opened first is closed.
+int file_of(ZoneSource& source) {
+    if (source.file >= 0) return source.file;
+    source.file = open(source.path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (source.file < 0) return -1; // the card is gone
+    StreamCache& c = cache();
+    std::lock_guard<std::mutex> guard(c.lock);
+    c.open.push_back(&source);
+    for (size_t n = 0; c.open.size() > stream_files_open && n + 1 < c.open.size(); ++n) {
+        ZoneSource& other = *c.open[n];
+        std::unique_lock<std::mutex> own(other.lock, std::try_to_lock);
+        if (!own.owns_lock()) continue; // being read now: the next
+        close(other.file);
+        other.file = -1;
+        c.open.erase(c.open.begin() + std::ptrdiff_t(n));
+        break;
+    }
+    return source.file;
+}
+// Under the source's lock (or at its end). Its file closed: a read failed, or the source is going.
+void close_file(ZoneSource& source) {
+    StreamCache& c = cache();
+    std::lock_guard<std::mutex> guard(c.lock); // file_of() may be closing it for another's
+    if (source.file < 0) return;
+    close(source.file);
+    source.file = -1;
+    c.open.erase(std::remove(c.open.begin(), c.open.end(), &source), c.open.end());
+}
+
+// A chunk of a part read in place, from its file into the part's memory as floats. False when the file gives less.
+bool fill_chunk(ZonePart& part, uint32_t chunk) {
+    ZoneSource& source = *part.source;
+    const uint32_t first = chunk * stream_chunk, frames = std::min<uint32_t>(stream_chunk, part.total - first);
+    WavLayout layout;
+    layout.channels = source.channels; layout.bits = source.bits; layout.floating = source.floating;
+    const size_t block = layout.block();
+    static thread_local std::vector<uint8_t> bytes; // the pager's thread, and a landing thread's hold()
+    bytes.resize(size_t(frames) * block);
+    const int file = file_of(source);
+    if (file < 0) return false;
+    size_t done = 0;
+    while (done < bytes.size()) {
+        const ssize_t got = pread(file, bytes.data() + done, bytes.size() - done, off_t(source.data_at + uint64_t(first) * block + done));
+        if (got <= 0) break; // the file is shorter than it said, or the card is gone
+        done += size_t(got);
+    }
+    if (done < bytes.size()) { close_file(source); return false; } // opened again at the next read: a card put back in
+    float* left = const_cast<float*>(part.left) + first;
+    wav_frames(layout, bytes.data(), frames, left, part.right != part.left ? const_cast<float*>(part.right) + first : nullptr);
+    return true;
+}
 } // namespace
+
+ZonePart::~ZonePart() {
+    if (source) forget(*this);
+    if (mapping) munmap(mapping, mapping_bytes);
+}
+ZoneSource::~ZoneSource() { close_file(*this); }
+
+uint64_t stream_cache_held() {
+    StreamCache& c = cache();
+    std::lock_guard<std::mutex> guard(c.lock);
+    return c.bytes;
+}
+void stream_cache_budget(uint64_t bytes) {
+    { StreamCache& c = cache(); std::lock_guard<std::mutex> guard(c.lock); c.budget = bytes; }
+    trim();
+}
+uint64_t stream_cache_give_back() {
+    const uint64_t was = stream_cache_held();
+    trim(true);
+    const uint64_t now = stream_cache_held();
+    return was > now ? was - now : 0;
+}
 
 bool read_frames(const ZonePart& part, uint32_t from, uint32_t frames, float* left, float* right) {
     if (!part.source || from >= part.total) return false;
@@ -96,6 +217,7 @@ bool read_in_place(const std::string& path, const WavLayout& layout, ZonePart& p
     part.left = static_cast<const float*>(start);
     part.right = layout.channels > 1 ? part.left + side / sizeof(float) : part.left;
     part.pins.assign((layout.frames - 1) / stream_chunk + 1, 0);
+    source->kept.assign(part.pins.size(), 0);
     part.rate = float(layout.rate);
     part.total = layout.frames;
     part.source = std::move(source);
@@ -120,6 +242,11 @@ void StreamPager::run() {
     sched_param priority {};
     priority.sched_priority = 20;
     pthread_setschedparam(pthread_self(), SCHED_FIFO, &priority); // best effort
+#if defined(__linux__) && defined(SYS_ioprio_set)
+    // Its reads go to the card before any other thread's (a load, a save, a folder listed): the real-time I/O class,
+    // its first level, for this thread. Best effort: the card's scheduler has to know classes (bfq does).
+    syscall(SYS_ioprio_set, 1 /* this thread */, 0, (1 /* real-time */ << 13) | 0);
+#endif
     while (running.load(std::memory_order_relaxed))
         if (!pump()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
 }
@@ -187,11 +314,21 @@ void StreamPager::flush() {
 }
 
 bool StreamPager::pin_chunk(ZonePart& part, uint32_t chunk) {
-    if (part.source) { // read in place: the first to want a chunk fills it from the file
-        std::lock_guard<std::mutex> guard(part.source->lock);
-        if (part.pins[chunk]) { ++part.pins[chunk]; return true; }
-        if (!fill_chunk(part, chunk)) return false;
-        part.pins[chunk] = 1;
+    if (part.source) { // read in place: the first to want a chunk not in memory fills it from the file
+        {
+            std::lock_guard<std::mutex> guard(part.source->lock);
+            if (part.pins[chunk]) { ++part.pins[chunk]; return true; }
+            if (part.source->kept[chunk]) { // read before and still here: nothing to read
+                now_wanted(part, chunk);
+                part.pins[chunk] = 1;
+                return true;
+            }
+            if (!fill_chunk(part, chunk)) return false;
+            part.source->kept[chunk] = 1;
+            now_kept(part, chunk);
+            part.pins[chunk] = 1;
+        }
+        trim(); // room for it: the chunks longest unused go
         return true;
     }
     if (part.pins[chunk]) { ++part.pins[chunk]; return true; }
@@ -206,10 +343,13 @@ bool StreamPager::pin_chunk(ZonePart& part, uint32_t chunk) {
 }
 
 void StreamPager::unpin_chunk(ZonePart& part, uint32_t chunk) {
-    if (part.source) { // read in place: the last to need it gives its memory back
-        std::lock_guard<std::mutex> guard(part.source->lock);
-        if (--part.pins[chunk]) return;
-        empty_chunk(part, chunk);
+    if (part.source) { // read in place: it stays in memory, the first to go when the memory is wanted
+        {
+            std::lock_guard<std::mutex> guard(part.source->lock);
+            if (--part.pins[chunk]) return;
+            now_idle(part, chunk);
+        }
+        trim();
         return;
     }
     if (--part.pins[chunk]) return;
@@ -252,6 +392,13 @@ bool StreamPager::step(unsigned n) {
     const uint32_t at = slot.at.load(std::memory_order_relaxed);
     const uint32_t ahead = uint32_t(stream_chunk * std::max(1.0f, w.speed) * 2);
     auto publish = [&](uint32_t limit) { slot.ready.store(uint64_t(w.serial) << 32 | limit, std::memory_order_release); };
+    // A voice that went on while its reads were late (SamplerEngine::pass()) is past everything pinned for it: what
+    // lies between is let go unread, and the reading goes on from where the voice is.
+    const uint32_t here = std::min(at, frames ? frames - 1 : 0) / stream_chunk;
+    if (!w.reverse ? here > w.hi : here + 1 < w.lo) {
+        release(w);
+        w.lo = w.hi = w.reverse ? here + 1 : here;
+    }
     if (!w.reverse) {
         uint32_t want = std::min<uint64_t>(chunks, (uint64_t(at) + ahead) / stream_chunk + 1);
         if (w.hi < want) {

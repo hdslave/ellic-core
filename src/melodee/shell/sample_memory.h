@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #pragma once
+#include "melodee/engine/stream_pager.h"
 #include <algorithm>
 #include <cstdint>
 #include <fstream>
@@ -17,12 +18,25 @@ namespace melodee {
 // FLAC, Ogg, AIFF) is read whole, as memory allows.
 constexpr unsigned stream_seconds = 10;
 constexpr unsigned stream_most_seconds = 6 * 3600;
+// A shorter PCM WAV is read into memory while memory has room for it: it then plays and is edited with no card under
+// it. With no room, one longer than stream_least_seconds is read from the card as it plays instead of being refused
+// (the MPC's own app streams every sample longer than that); a shorter one is refused.
+constexpr unsigned stream_least_seconds = 2;
 constexpr uint64_t memory_headroom = uint64_t(256) << 20;  // left free after a load: the app's own work and the system's
+
+// What is held in memory where a pad on a streamed sample starts, loops and (reversed) ends, in the file's own
+// frames at `rate` Hz: half a second, and a chunk at the least.
+inline uint32_t stream_head_frames(float rate) { return std::max<uint32_t>(stream_chunk, uint32_t(rate / 2)); }
 
 // What a kit pad's sample of `frames` frames at `rate` Hz holds once read: its own frames, left and right as floats.
 inline uint64_t kit_sample_bytes(uint64_t frames, unsigned rate) {
     if (!rate) return 0;
     return std::min<uint64_t>(frames, uint64_t(stream_most_seconds) * rate) * 2 * sizeof(float);
+}
+
+// Whether a PCM WAV of `frames` frames at `rate` Hz is read from the card as it plays. `room`: memory would take it.
+inline bool streams_from_card(uint64_t frames, unsigned rate, bool room) {
+    return frames > uint64_t(stream_seconds) * rate || (!room && frames > uint64_t(stream_least_seconds) * rate);
 }
 
 // Whether a load that takes `wanted` bytes leaves the headroom, with `free` bytes free now (0: the system does not
@@ -42,6 +56,13 @@ inline uint64_t memory_free() {
         std::getline(info, rest);
     }
     return 0;
+}
+
+// Whether a load that takes `wanted` bytes may go ahead now. Where memory is short, what the pager keeps of the
+// files it has read (engine/stream_pager.h: up to stream_cache_bytes, nothing counting on it) is given back first.
+inline bool memory_for(uint64_t wanted) {
+    if (memory_allows(memory_free(), wanted)) return true;
+    return stream_cache_give_back() && memory_allows(memory_free(), wanted);
 }
 
 } // namespace melodee

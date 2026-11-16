@@ -17,8 +17,8 @@
 namespace melodee {
 
 struct HeldRange {
-    uint32_t from = 0, to = 0; // [from, to), and at least a chunk from `from` on
-    bool back = false;         // the chunk below `to` instead (a reversed start)
+    uint32_t from = 0, to = 0; // [from, to), and at least half a second from `from` on (stream_head_frames())
+    bool back = false;         // the half second below `to` instead (a reversed start)
     bool operator==(const HeldRange& o) const { return from == o.from && to == o.to && back == o.back; }
     bool operator<(const HeldRange& o) const { return from != o.from ? from < o.from : to != o.to ? to < o.to : back < o.back; }
 };

@@ -79,15 +79,22 @@ inline float zone_crossfade(const SampleZone& z, int key, int velocity) {
 
 // A PCM WAV read in place (engine/stream_pager.h): the file and how its frames lie in it. The part's `left` and
 // `right` then point into memory of the part's own, empty until the pager turns a chunk of the file to floats there
-// as a voice nears it, and emptied again once no voice needs it. The file is opened for the length of a read only:
-// an instrument of a thousand files holds none open. More than one pager may read a part (the live one and a
-// print's), so its chunks are counted, filled and let go under `lock`.
+// as a voice nears it. A chunk read stays in memory after the voice has gone (`kept`), for the next hit, until the
+// memory all such chunks may take is used up and it is the one longest unused. The file stays open from its first
+// read, as one of the few the pager keeps open: an instrument of a thousand files holds only its latest. More than
+// one pager may read a part (the live one and a print's), so its chunks are counted, filled and let go under `lock`.
 struct ZoneSource {
+    ZoneSource() = default;
+    ZoneSource(const ZoneSource&) = delete;
+    ZoneSource& operator=(const ZoneSource&) = delete;
+    ~ZoneSource(); // its file closed (engine/stream_pager.cpp)
     std::string path;
     uint64_t data_at = 0;             // bytes from the file's start to its first frame
     uint8_t channels = 0, bits = 0;
     bool floating = false;
     std::mutex lock;
+    int file = -1;                    // open: under `lock`
+    std::vector<uint8_t> kept;        // a chunk: its frames are in memory, counted (ZonePart::pins) or not; under `lock`
 };
 
 // One audio file of an instrument: its frames, mapped from the card's cache,
