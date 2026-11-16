@@ -64,11 +64,15 @@ AudioReader::~AudioReader() = default;
 
 std::string AudioReader::open(const std::string& path, unsigned max_seconds, WavInfo* info) {
     juce.reset();
-    hz = count = done = 0;
-    broken = false;
+    hz = count = done = sides = depth = 0;
+    broken = floats = false;
     if (!juce_kind(path)) {
         auto error = wav.open(path, max_seconds, info);
-        if (error.empty()) { hz = wav.rate(); count = wav.frames(); }
+        if (error.empty()) {
+            const WavLayout layout = wav.layout();
+            hz = wav.rate(); count = wav.frames();
+            sides = layout.channels; depth = layout.bits; floats = layout.floating;
+        }
         return error;
     }
     auto j = std::make_unique<Juce>();
@@ -94,6 +98,10 @@ std::string AudioReader::open(const std::string& path, unsigned max_seconds, Wav
     }
     hz = unsigned(std::lround(reader->sampleRate));
     count = uint32_t(frames);
+    sides = j->channels;
+    // The bits a FLAC or an AIFF keeps a value in; an MP3 and an Ogg keep none (their readers name the floats they decode to).
+    const auto kind = juce::File(path).getFileExtension().toLowerCase();
+    if (kind == ".flac" || kind == ".aif" || kind == ".aiff") { depth = reader->bitsPerSample; floats = reader->usesFloatingPointData; }
     juce = std::move(j);
     return {};
 }

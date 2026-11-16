@@ -60,8 +60,9 @@ struct SampleFile {
 struct LoadedSample {
     std::string name, path, error;
     uint32_t frames = 0;
-    bool streamed = false;   // a long WAV read from the card as it plays (SampleData::stream): its overview and hits come
-                             // a moment after it plays (`shaped`)
+    bool streamed = false;   // a long sample read from the card as it plays (SampleData::stream; `path` is the file asked
+                             // for, which for an MP3, FLAC, Ogg or AIFF is not the WAV it plays from): its overview and
+                             // hits come a moment after it plays (`shaped`)
     bool shaped = false;
     Overview overview {};
     bool stereo = false;                 // its sides differ: the pages draw each side's waveform
@@ -334,6 +335,10 @@ private:
     std::vector<ShapeRead> shapes_read; // under loaded_lock
     void make_streamed(const SampleJob& job, const SampleData& source); // Save Sample, Trim, Extract on a long sample
     void stream_shape(const std::string& path, ShapeRead& out); // a pool thread
+    // A pool thread: a long MP3, FLAC, Ogg or AIFF as a PCM WAV in the card's cache, to be read from the card as it
+    // plays; "" where it is read into memory instead, or (`error`) not at all.
+    std::string card_copy(const std::string& path, const SampleCache& copies, std::string& error, bool& refused);
+    std::mutex copying; // one such WAV written at a time, and never while the cache is tidied
     std::atomic<bool> shapes_stopped {false}; // SD card access: a shape being read stops where it is
     // Held chunks of the long samples (hold()): what the MIDI thread asked (under `lock`), what is known (service
     // thread, kept across reloads) and the slots still to bring in line, a few chunks a pass.

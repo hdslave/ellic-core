@@ -8,17 +8,19 @@
 #include <string>
 
 // What limits a project's samples: memory. A kit pad's sample is read whole into memory, its frames at its own rate
-// and nothing more, unless it is a long WAV, read from the card as it plays; an instrument's files are streamed from
+// and nothing more, unless it is long: then it is read from the card as it plays; an instrument's files are streamed from
 // the card, only each zone's start kept. The MPC has 2 GB and no swap, so a load that would leave less than memory_headroom
 // free is refused (shell/sample_library.cpp, shell/sample_library_instruments.cpp). Pure but for memory_free().
 namespace melodee {
 
 // A PCM WAV longer than stream_seconds is not read into memory: it is read from the card as it plays (its pads'
-// starts held). Any sample, and a capture (a take, a render), up to stream_most_seconds; one of another kind (MP3,
-// FLAC, Ogg, AIFF) is read whole, as memory allows.
+// starts held). Any sample, and a capture (a take, a render), up to stream_most_seconds. A file of another kind
+// (MP3, FLAC, Ogg, AIFF) that long is decoded once, a piece at a time, into a PCM WAV in the card's Melodee/Cache
+// (shell/sample_cache.h's wav_copy()), and that WAV is read from the card as it plays; with no card, or no room on
+// it, the file is read whole, as memory allows.
 constexpr unsigned stream_seconds = 10;
 constexpr unsigned stream_most_seconds = 6 * 3600;
-// A shorter PCM WAV is read into memory while memory has room for it: it then plays and is edited with no card under
+// A shorter sample is read into memory while memory has room for it: it then plays and is edited with no card under
 // it. With no room, one longer than stream_least_seconds is read from the card as it plays instead of being refused
 // (the MPC's own app streams every sample longer than that); a shorter one is refused.
 constexpr unsigned stream_least_seconds = 2;
@@ -34,7 +36,7 @@ inline uint64_t kit_sample_bytes(uint64_t frames, unsigned rate) {
     return std::min<uint64_t>(frames, uint64_t(stream_most_seconds) * rate) * 2 * sizeof(float);
 }
 
-// Whether a PCM WAV of `frames` frames at `rate` Hz is read from the card as it plays. `room`: memory would take it.
+// Whether a sample of `frames` frames at `rate` Hz is read from the card as it plays. `room`: memory would take it.
 inline bool streams_from_card(uint64_t frames, unsigned rate, bool room) {
     return frames > uint64_t(stream_seconds) * rate || (!room && frames > uint64_t(stream_least_seconds) * rate);
 }

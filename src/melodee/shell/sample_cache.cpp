@@ -42,8 +42,10 @@ uint64_t SampleCache::bytes_of(uint32_t frames, uint32_t channels) {
 }
 
 std::string SampleCache::file_of(const std::string& source) const { return file_of(source, {}); }
+std::string SampleCache::file_of(const std::string& source, const std::string& part) const { return name_of(source, part, ".f32"); }
+std::string SampleCache::wav_of(const std::string& source) const { return name_of(source, {}, ".wav"); }
 
-std::string SampleCache::file_of(const std::string& source, const std::string& part) const {
+std::string SampleCache::name_of(const std::string& source, const std::string& part, const char* kind) const {
     if (folder_.empty()) return {};
     struct stat st {};
     if (stat(source.c_str(), &st)) return {};
@@ -53,10 +55,10 @@ std::string SampleCache::file_of(const std::string& source, const std::string& p
     fs::path where = whole.lexically_relative(fs::path(folder_).parent_path().parent_path());
     if (where.empty() || *where.begin() == "..") where = whole;
     char name[32];
-    std::snprintf(name, sizeof(name), "%016llx.f32", (unsigned long long)fnv(where.generic_string() + "|" + std::to_string(st.st_size) + "|"
+    std::snprintf(name, sizeof(name), "%016llx", (unsigned long long)fnv(where.generic_string() + "|" + std::to_string(st.st_size) + "|"
                   + std::to_string(st.st_mtime) + "|" + std::to_string(unsigned(dsp::model_rate)) + "|v" + std::to_string(cache_version)
                   + (part.empty() ? "" : "|" + part)));
-    return folder_ + "/" + name;
+    return folder_ + "/" + name + kind;
 }
 
 bool SampleCache::ready(const std::string& file, LaidOut& out) const {
@@ -133,7 +135,7 @@ void SampleCache::tidy(uint64_t most) const {
     for (auto it = fs::directory_iterator(folder_, error); !error && it != fs::directory_iterator(); it.increment(error)) {
         const auto kind = it->path().extension();
         if (kind == ".part") { gone.push_back(it->path()); continue; }
-        if (kind != ".f32") continue;
+        if (kind != ".f32" && kind != ".wav") continue;
         std::error_code e;
         uint64_t bytes = it->file_size(e);
         auto used = it->last_write_time(e);
@@ -149,6 +151,61 @@ void SampleCache::tidy(uint64_t most) const {
         fs::remove(k.path, error); // one still mapped plays on: its frames go when the mapping does
         total -= k.bytes;
     }
+}
+
+uint32_t SampleCache::wav_most_frames(const WavCopy& what) {
+    return (0xffffffffu - 4096) / ((what.bits == 16 ? 2 : what.bits == 24 ? 3 : 4) * (what.channels == 1 ? 1 : 2));
+}
+
+uint64_t SampleCache::wav_bytes(const WavCopy& what) {
+    return 58 + uint64_t(what.frames) * (what.bits == 16 ? 2 : what.bits == 24 ? 3 : 4) * (what.channels == 1 ? 1 : 2);
+}
+
+bool SampleCache::wav_ready(const std::string& file) const {
+    WavReader wav;
+    if (file.empty() || !wav.open(file, 24 * 3600).empty()) return false;
+    utimes(file.c_str(), nullptr); // played lately, as tidy() goes by
+    return true;
+}
+
+std::string SampleCache::wav_copy(const std::string& source, const WavCopy& asked, const FrameReader& read, bool* made) const {
+    if (made) *made = false;
+    const std::string file = wav_of(source);
+    if (file.empty() || !asked.rate || !asked.frames) return {};
+    if (wav_ready(file)) return file;
+    WavCopy what = asked;
+    what.channels = asked.channels == 1 ? 1 : 2;
+    what.bits = asked.bits == 16 || asked.bits == 24 ? asked.bits : 32;
+    what.frames = std::min(asked.frames, wav_most_frames(what));
+    std::error_code error;
+    fs::create_directories(folder_, error); // before the room is asked after: a card that has no Melodee folder yet
+    if (!has_room(wav_bytes(what))) return {};
+    const std::string writing = file + ".part";
+    bool ok = false;
+    {
+        WavStream out;
+        out.set_dither(what.dither && what.bits != 32);
+        ok = out.open(writing, what.rate, what.bits, 0, what.channels);
+        constexpr uint32_t piece = stream_chunk;
+        std::vector<float> left(piece), right(piece), both(what.channels > 1 ? size_t(piece) * 2 : 0);
+        for (uint32_t done = 0; ok && done < what.frames;) {
+            const uint32_t want = std::min(piece, what.frames - done), got = std::min(want, read(left.data(), right.data(), want));
+            for (uint32_t k = 0; k < got && what.channels > 1; ++k) { both[2 * size_t(k)] = left[k]; both[2 * size_t(k) + 1] = right[k]; }
+            if (got) ok = out.add(what.channels > 1 ? both.data() : left.data(), got);
+            done += got;
+            if (got < want) break; // the source's end
+        }
+        ok = out.close() && ok && out.frames() > 0;
+    }
+    if (ok) { // on the card before it has its name: a stop after that finds it whole
+        const int written = open(writing.c_str(), O_RDONLY);
+        ok = written >= 0 && fsync(written) == 0;
+        if (written >= 0) close(written);
+    }
+    if (ok) { fs::rename(writing, file, error); ok = !error; }
+    if (!ok) { fs::remove(writing, error); return {}; }
+    if (made) *made = true;
+    return file;
 }
 
 } // namespace melodee
