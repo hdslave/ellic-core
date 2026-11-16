@@ -46,6 +46,9 @@ inline const char* pad_filter_name(PadFilter f) {
 constexpr uint8_t warp_off = 0, warp_seq = 1, warp_min = 50, warp_max = 200;
 constexpr unsigned max_pad_beats = 64; // # Beats: 0 works it out from the length
 constexpr unsigned max_loop_xfade = 250; // ms: a loop's seam crossfade (roadmap P3)
+// A CLOUD pad on a long sample read from the card takes its grains from the first this many seconds of its region,
+// held in memory while it is a cloud (shell/stream_holds.h, engine/sampler.cpp spawn()).
+constexpr unsigned cloud_most_seconds = 30;
 
 // Volume as the MPC shows it: 0 is -inf, 1..100 run -74..0 dB, 100..127
 // run 0..+6 dB. Pad volume and kit volume both use it.

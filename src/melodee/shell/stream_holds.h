@@ -11,8 +11,9 @@
 // A long sample (SampleRef::streamed) is read from the card as it plays: the pager reads ahead of each voice, but a
 // hit must sound at once, so the chunks where a pad starts are held in memory (SampleLibrary::hold()). Where each pad
 // on such a sample needs them, in the project's 44.1 kHz frames: each layer's start (its end, reversed); its loop
-// point and, with a crossfaded seam, the frames read across it; Chop's slices while Chop holds the sample; and a zoomed
-// view of one up to view_most frames wide (Trim's, Chop's), drawn from its frames in memory. Pure.
+// point and, with a crossfaded seam, the frames read across it; a CLOUD pad's region, up to cloud_most_seconds of it;
+// Chop's slices while Chop holds the sample; and a zoomed view of one up to view_most frames wide (Trim's, Chop's),
+// drawn from its frames in memory. Pure.
 namespace melodee {
 
 struct HeldRange {
@@ -46,6 +47,10 @@ inline StreamHolds stream_holds(const Project& project, const Slices* chop = nul
                 const uint32_t start = std::min(layer.start, ref.frames - 1);
                 const uint32_t end = layer.end && layer.end <= ref.frames ? layer.end : ref.frames;
                 if (end <= start) continue;
+                if (pad.cloud && n == 0) { // its grains, anywhere in the first of its region
+                    add(layer.sample, {start, std::min(end, start + cloud_most_seconds * 44100), false});
+                    continue;
+                }
                 if (pad.reverse) add(layer.sample, {end, end, true});
                 else add(layer.sample, {start, start, false});
                 if (!pad.loop) continue;

@@ -102,7 +102,7 @@ void SamplerEngine::start(Voice& v, const PadSound& sound, int pad, int velocity
     } else loop_setup(v, sound);
     // A sample still being read (the browser's preview) plays what has landed, as a stream plays what is pinned.
     if (!part && data->growth && !data->growth->whole.load(std::memory_order_acquire)) v.grow = data->growth.get();
-    v.cloud = sound.cloud && pad < int(sampler_pads) && !v.grow && !streamed; // not for Chop's audition, nor before all is there
+    v.cloud = sound.cloud && pad < int(sampler_pads) && !v.grow; // not for Chop's audition, nor before all is there
     v.held = true; v.gate = sound.play == PadPlay::Gate && !(zone && zone->one_shot); v.group = sound.group;
     if (zone && zone->on_release) v.held = v.gate = v.loop = false; // a release sample plays out once
     aim(v, sound, zone, multi, key);
@@ -119,7 +119,7 @@ void SamplerEngine::start(Voice& v, const PadSound& sound, int pad, int velocity
     v.env.gate(true);
     v.filter_env.gate(true);
     v.since_tune = 1u << 30; // the filter tuned on its first frame
-    if ((part || streamed) && pager) {
+    if ((part || streamed) && pager && !(streamed && v.cloud)) { // a long sample's cloud reads only what is held
         // A zone's start is held, its end is not; a long sample's pads hold where they start, and end when reversed.
         const uint32_t safe = part && v.reverse ? 0 : stream_chunk;
         v.stream = pager->open(part ? *part : *streamed, uint32_t(v.position), v.reverse, float(std::max(v.advance, v.step)), safe);
@@ -814,7 +814,10 @@ void SamplerEngine::spawn(Voice& v) {
     if (!g) return;
     seed = seed * 1664525u + 1013904223u;
     float random = int32_t(seed) / 2147483648.0f;
-    double span = v.zone ? std::min(v.end - v.start, stream_chunk) : v.end - v.start; // an instrument's clouds stay in what is held
+    // An instrument's clouds stay in what is held of a zone; a long sample's in the first of its region, held while a cloud.
+    const bool streamed = !v.zone && v.sample && v.sample->stream;
+    double span = v.zone ? std::min(v.end - v.start, stream_chunk)
+                : streamed ? std::min<double>(v.end - v.start, double(v.rate) * cloud_most_seconds) : v.end - v.start;
     const PadSound& own = pads[size_t(v.pad) % sampler_pads]; // the pad's cloud, as it is now (Motion moves it)
     double at = v.start + span * (own.cloud_position / 100.0) + v.scan + random * span * 0.05;
     at = std::fmod(std::fmod(at - v.start, span) + span, span) + v.start;
