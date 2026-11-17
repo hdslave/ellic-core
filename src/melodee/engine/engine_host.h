@@ -441,7 +441,7 @@ private:
         // Roadmap P5: a follow action (model/follow.h) due on tick `follow_at` (follow_do: the action, 0 none), planned
         // as its pattern starts; it waits while a launch is queued, and a chained track's never come.
         bool chained = false;
-        uint32_t loop_from = 0, loop_ticks = 0; // an editor's loop (Command::EditLoop): only these ticks play
+        uint32_t loop_from = 0, loop_ticks = 0; // an editor's loop (Command::EditLoop): only these ticks play; as written (edit_loop())
         uint8_t follow_do = 0;
         uint32_t follow_at = 0;
         // Freeze plan F2b: the track's prints (none: it plays live), and ones unfrozen whose voices still fade; the
@@ -778,6 +778,10 @@ private:
     // Track t's pattern at `at`, in a loop ending at `end`: punches kept there.
     void play_pattern_punches(unsigned t, const Pattern& pattern, uint32_t at, uint32_t end);
     void sound_kept(Kept& k);                                       // a kept punch heard (again)
+    // Track t's editor's loop in its pattern as it plays (`length` ticks): where it starts and how long it is. The
+    // shell sends it in the pattern's ticks as written; a track at another speed plays them scaled. False with none
+    // set, or one that starts past the pattern's end.
+    bool edit_loop(unsigned t, uint32_t length, uint32_t& from, uint32_t& span) const;
     void fit_kept(unsigned t);                                      // track t's pattern or loop changed under its punches
     void drop_kept(unsigned t);                                     // track t left its pattern: its punches end on this tick
     void drop_punches();                                            // the transport stops: the song's punch and the kept ones let go

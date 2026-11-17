@@ -120,6 +120,7 @@ void EngineHost::reload(ProjectPack& pack, bool keep_loops) {
     for (auto& l : live) { l.pending.waiting = false; l.punch.stop(); l.punch.clear(); }
     for (auto& k : kept) { k.punch.clear(); k.target = 255; } // pad-fx C
     flex.clear(); flex_pad = 0; flex_waiting = false; flex_now.store(0, std::memory_order_relaxed);
+    if (!keep_loops) for (auto& s : slots) s.loop_from = s.loop_ticks = 0; // another project: the last one's editor's loop is not its own
     load_state(pack.project, keep_loops);
     snap_mix = true; // its levels from the first block, not eased in from the last project's
     reformatting = false;
@@ -1905,8 +1906,8 @@ void EngineHost::arp_write(unsigned t, Slot& slot, int key, int velocity, unsign
     const int64_t elapsed = int32_t(arp_origin + arp_ticks - slot.start);
     auto in = [&](uint32_t loop) { int64_t n = elapsed % int64_t(loop); return uint32_t(n < 0 ? n + int64_t(loop) : n); };
     const uint32_t length = std::max<uint32_t>(p.length, 1), lane = p.lane_length(unsigned(key) & 0xff);
-    uint32_t at = in(length);
-    if (slot.loop_ticks && slot.loop_from < length) at = slot.loop_from + in(std::min(slot.loop_ticks, length - slot.loop_from));
+    uint32_t at = in(length), from = 0, span = 0;
+    if (edit_loop(t, length, from, span)) at = from + in(span);
     if (lane && lane < length) at = in(lane);
     ArpWritten w;
     w.track = uint8_t(t); w.pattern = slot.pattern; w.key = uint16_t(key); w.cutoff = uint8_t(key >> 16); w.velocity = uint8_t(std::clamp(velocity, 1, 127));
@@ -2331,10 +2332,8 @@ void EngineHost::fit_kept(unsigned t) {
     const auto& slot = slots[t % track_count];
     const Pattern& pattern = *patterns[t % track_count][slot.pattern % pattern_count];
     uint32_t length = std::max<uint32_t>(pattern.length, 1), elapsed = tick_now - slot.start, at = elapsed % length, end = length;
-    if (slot.loop_ticks && slot.loop_from < length) {
-        uint32_t span = std::min(slot.loop_ticks, length - slot.loop_from);
-        at = slot.loop_from + elapsed % span; end = slot.loop_from + span;
-    }
+    uint32_t from = 0, span = 0;
+    if (edit_loop(t % track_count, length, from, span)) { at = from + elapsed % span; end = from + span; }
     for (auto& k : kept) {
         if (!k.due || k.track != t) continue;
         uint32_t until = tick_now;
@@ -2344,6 +2343,17 @@ void EngineHost::fit_kept(unsigned t) {
         }
         k.until = until;
     }
+}
+
+bool EngineHost::edit_loop(unsigned t, uint32_t length, uint32_t& from, uint32_t& span) const {
+    const auto& slot = slots[t % track_count];
+    if (!slot.loop_ticks) return false;
+    Speed sp = speed_of(speeds_now[t % track_count].load(std::memory_order_relaxed));
+    auto played = [&](uint32_t ticks) { return uint32_t((uint64_t(ticks) * sp.den + sp.num / 2) / sp.num); }; // as speed_pattern()
+    from = played(slot.loop_from);
+    if (from >= length) return false;
+    span = std::min(std::max<uint32_t>(played(slot.loop_ticks), 1), length - from);
+    return true;
 }
 
 void EngineHost::drop_kept(unsigned t) {
@@ -2502,10 +2512,8 @@ void EngineHost::tick() {
         uint32_t elapsed = tick_now - slot.start;
         uint32_t at = elapsed % length, end = length; // where its loop ends
         uint32_t pass = elapsed / length; // trig conditions count the pattern's passes from where it began
-        if (slot.loop_ticks && slot.loop_from < length) { // an editor's loop: its bars over and over
-            uint32_t span = std::min(slot.loop_ticks, length - slot.loop_from);
-            at = slot.loop_from + elapsed % span; pass = elapsed / span; end = slot.loop_from + span;
-        }
+        uint32_t from = 0, span = 0;
+        if (edit_loop(t, length, from, span)) { at = from + elapsed % span; pass = elapsed / span; end = from + span; } // its bars over and over
         Speed sp = speed_of(speeds_now[t].load(std::memory_order_relaxed)); // published as written (its pattern plays scaled)
         positions_now[t].store(int(uint64_t(at) * sp.num / sp.den), std::memory_order_relaxed);
         if (!pattern.punches.empty()) play_pattern_punches(t, pattern, at, end); // pad-fx C: punches kept with it
