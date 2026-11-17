@@ -10,32 +10,38 @@
 #include <algorithm>
 #include <array>
 
-// Erase + an empty kit pad (stopped): the pads after it in its bank move down one and close the gap; the bank's last
-// pad is left empty. What names a pad goes with it: its sound, chain and mute, its zone trims, its notes, motion,
-// lane lengths and Euclidean rhythms in every pattern of the track, the modulators' and macros' pad lanes, Knob FX's
-// pads and the compressor's key pad. Notes and lanes still on the empty pad (a pad deleted keeps its notes) go.
-// Other banks stay. Plain data, no Context, so the host tests run it.
+// Erase + an empty kit pad (stopped): the pads after it move down one and close the gap, through its bank and the
+// next one (bank A's gap takes B's pad 1 onto A16 and B's pads down one; C stays; bank H's gap stays in H, never
+// A); the last pad of the two is left empty. What names a pad goes with it: its sound, chain and mute, its zone
+// trims, its notes, motion, lane lengths and Euclidean rhythms in every pattern of the track, the modulators' and
+// macros' pad lanes, Knob FX's pads and the compressor's key pad. Notes and lanes still on the empty pad (a pad
+// deleted keeps its notes) go. Plain data, no Context, so the host tests run it.
 namespace melodee {
 
-// Kit pad `n` once the gap at `gap` is closed: one lower after it in its bank, -1 for the gap itself, else as it is.
-constexpr int gap_closed(unsigned n, unsigned gap) {
-    const unsigned end = (gap / bank_pads + 1) * bank_pads;
-    if (n == gap) return -1;
-    return n > gap && n < end ? int(n - 1) : int(n);
+// The pad after the last one a gap at `gap` moves: the end of the bank after its own, or of bank H.
+constexpr unsigned gap_end(unsigned gap) {
+    const unsigned end = (gap % sampler_pads / bank_pads + 2) * bank_pads;
+    return end < sampler_pads ? end : sampler_pads;
 }
 
-// Whether closing the gap at `gap` moves a pad: it is empty and a pad after it in its bank holds a sample.
+// Kit pad `n` once the gap at `gap` is closed: one lower between it and gap_end(), -1 for the gap itself, else as it is.
+constexpr int gap_closed(unsigned n, unsigned gap) {
+    if (n == gap) return -1;
+    return n > gap && n < gap_end(gap) ? int(n - 1) : int(n);
+}
+
+// Whether closing the gap at `gap` moves a pad: it is empty and a pad after it, up to gap_end(), holds a sample.
 inline bool gap_closes(const Track& t, unsigned gap) {
     gap %= sampler_pads;
     if (t.pads[gap].used()) return false;
-    for (unsigned n = gap + 1; n < (gap / bank_pads + 1) * bank_pads; ++n) if (t.pads[n].used()) return true;
+    for (unsigned n = gap + 1; n < gap_end(gap); ++n) if (t.pads[n].used()) return true;
     return false;
 }
 
 // The track's kit and its patterns.
 inline void close_pad_gap(Track& t, std::array<Pattern, pattern_count>& patterns, unsigned gap) {
     gap %= sampler_pads;
-    const unsigned end = (gap / bank_pads + 1) * bank_pads;
+    const unsigned end = gap_end(gap);
     for (unsigned n = gap; n + 1 < end; ++n) {
         t.pads[n] = t.pads[n + 1];
         t.pad_fx.at[n] = t.pad_fx.at[n + 1];
