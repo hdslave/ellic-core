@@ -123,7 +123,19 @@ SampleChop read_mpc_slices(const std::string& path) {
     const auto& whole = value["defaultSlice"];
     chop.from = whole.isObject() ? model(number(whole, "Start")) : 0;
     chop.to = whole.isObject() && whole.hasProperty("End") ? end_of(number(whole, "End")) : 0;
-    chop.mode = ChopMode::Manual;
+    chop.mode = ChopMode::Manual; // the MPC's chops say no type: Manual
+    // Melodee's own chunk ("mlch", which other software passes over): the chop's type and amount, and the cuts made or
+    // taken out by hand, so a chop opened again after a restart is told apart as it was left.
+    for (const auto& c : chunks) {
+        if (!is(c, "mlch")) continue;
+        const auto ours = juce::JSON::parse(juce::String::fromUTF8(body_of(file, c).c_str()));
+        if (!ours.isObject()) break;
+        chop.mode = ChopMode(std::clamp(int(number(ours, "Type")), 0, int(ChopMode::Count) - 1));
+        chop.amount = int16_t(number(ours, "Amount"));
+        if (const auto* hand = ours["Hand"].getArray()) for (const auto& at : *hand) chop.hand.pin(model(double(at)));
+        if (const auto* out = ours["Out"].getArray()) for (const auto& at : *out) chop.hand.take_out(model(double(at)));
+        break;
+    }
     return chop;
 }
 
@@ -167,6 +179,19 @@ bool write_mpc_slices(const std::string& path, const SampleChop& chop, bool in_p
         put(uint32_t(start), 4); put(uint32_t(end), 4); put(uint32_t(start), 4); put(0, 2);
     }
     const std::string atem = juce::JSON::toString(doc).toStdString();
+    // Melodee's own chunk: the type, its amount, the cuts made by hand and the ones taken out (at the file's rate).
+    std::string mlch;
+    if (sl.count) {
+        auto* ours = new juce::DynamicObject();
+        ours->setProperty("Type", int(chop.mode));
+        ours->setProperty("Amount", int(chop.amount));
+        juce::Array<juce::var> hand, out;
+        for (unsigned n = 0; n < chop.hand.pin_count; ++n) hand.add(juce::int64(file_frame(chop.hand.pins[n])));
+        for (unsigned n = 0; n < chop.hand.drop_count; ++n) out.add(juce::int64(file_frame(chop.hand.drops[n])));
+        ours->setProperty("Hand", hand);
+        ours->setProperty("Out", out);
+        mlch = juce::JSON::toString(juce::var(ours), true).toStdString();
+    }
 
     if (in_place) {
         // The two chunks as they go in the file, each with its pad byte.
@@ -178,12 +203,12 @@ bool write_mpc_slices(const std::string& path, const SampleChop& chop, bool in_p
             if (body.size() & 1) blob.push_back('\0');
         };
         if (sl.count || had_atem) chunk("atem", atem); // no slices: the file's key and tempo still kept
-        if (sl.count) chunk("slic", slic);
+        if (sl.count) { chunk("slic", slic); chunk("mlch", mlch); }
         size_t data = chunks.size();
         for (size_t n = 0; n < chunks.size() && data == chunks.size(); ++n) if (is(chunks[n], "data")) data = n;
         if (data == chunks.size()) return false;
         in.close();
-        auto ours = [](const Chunk& c) { return is(c, "atem") || is(c, "slic") || is(c, "JUNK"); };
+        auto ours = [](const Chunk& c) { return is(c, "atem") || is(c, "slic") || is(c, "mlch") || is(c, "JUNK"); };
         // The room right before the audio: the atem, slic and JUNK chunks there.
         const std::streamoff audio = chunks[data].body - 8;
         std::streamoff room_at = audio;
@@ -201,7 +226,7 @@ bool write_mpc_slices(const std::string& path, const SampleChop& chop, bool in_p
         if (!file) return false;
         auto word = [&](uint32_t v) { for (int b = 0; b < 4; ++b) file.put(char((v >> (8 * b)) & 0xff)); };
         for (const auto& c : chunks) // the old ones, wherever they are
-            if ((is(c, "atem") || is(c, "slic")) && uint64_t(c.body - 8) < tail) { file.seekp(c.body - 8); file.write("JUNK", 4); }
+            if ((is(c, "atem") || is(c, "slic") || is(c, "mlch")) && uint64_t(c.body - 8) < tail) { file.seekp(c.body - 8); file.write("JUNK", 4); }
         if (before) {
             file.seekp(room_at);
             file.write(blob.data(), std::streamsize(blob.size()));
@@ -248,10 +273,10 @@ bool write_mpc_slices(const std::string& path, const SampleChop& chop, bool in_p
         std::vector<char> block(1 << 16);
         bool placed = false;
         for (const auto& c : chunks) {
-            if (is(c, "atem") || is(c, "slic")) continue;
+            if (is(c, "atem") || is(c, "slic") || is(c, "mlch")) continue;
             if (is(c, "data") && !placed) {
                 if (sl.count || had_atem) chunk("atem", atem); // no slices: the file's key and tempo still kept
-                if (sl.count) chunk("slic", slic);
+                if (sl.count) { chunk("slic", slic); chunk("mlch", mlch); }
                 placed = true;
             }
             out.write(c.id, 4); word(c.size);

@@ -143,12 +143,6 @@ struct HandCuts {
     }
 };
 
-
-// A Manual chop read back from its WAV: every cut in it was made by hand, but the file keeps the slices, not which
-// cuts were pinned. Pinned again, a change of type keeps them as it did before the project was closed.
-inline void pin_manual_cuts(HandCuts& hand, const Slices& slices) {
-    for (unsigned n = 1; n < slices.count; ++n) hand.pin(slices.start[n]);
-}
 // A sample's chop (roadmap P3): the region of it Chop cut (to 0: the sample's end), how, and the slices.
 struct SampleChop {
     uint32_t from = 0, to = 0;

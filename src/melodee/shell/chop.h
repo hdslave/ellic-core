@@ -226,8 +226,16 @@ inline Slices chop(ChopMode mode, int amount, uint32_t from, uint32_t to, uint32
     return s;
 }
 // A new chop with the cuts made by hand (Simpler's manual slices kept whatever the sensitivity): those first, then
-// each of `cut`'s own not taken out by hand (none within 20 ms of a hand cut: Slices::add keeps them apart). The
-// region stays `cut`'s. `capped` as chop()'s: set when a cut found no room.
+// each of `cut`'s own not taken out by hand and not near a hand cut: closer to one than a quarter of the type's own
+// spacing there (the shorter way to its neighbours in `cut`), it is that cut, placed by hand, and gives way, so no
+// sliver is left between a beat line and a hand cut just after it. The region stays `cut`'s. `capped` as chop()'s:
+// set when a cut found no room.
+// How near a hand cut the type's cut n (of `cut`) gives way to it: a quarter of the type's own spacing there, 20 ms at least.
+inline uint32_t give_way_reach(const Slices& cut, unsigned n, uint32_t frames) {
+    const uint32_t at = cut.start[n], next = n + 1 < cut.count ? cut.start[n + 1] : cut.end(cut.count - 1, frames);
+    const uint32_t step = std::min(at - cut.start[n - 1], next > at ? next - at : 0);
+    return std::max<uint32_t>(2 * hand_reach, step / 4);
+}
 inline Slices with_hand(const Slices& cut, const HandCuts& hand, uint32_t frames, bool* capped = nullptr) {
     if (hand.empty() || !cut.count) return cut;
     Slices s;
@@ -235,10 +243,33 @@ inline Slices with_hand(const Slices& cut, const HandCuts& hand, uint32_t frames
     for (unsigned n = 0; n < hand.pin_count; ++n) s.add(hand.pins[n], frames);
     for (unsigned n = 1; n < cut.count; ++n) {
         if (hand.dropped(cut.start[n])) continue;
+        const uint32_t at = cut.start[n], reach = give_way_reach(cut, n, frames);
+        bool near_hand = false;
+        for (unsigned k = 0; k < hand.pin_count && !near_hand; ++k)
+            near_hand = (hand.pins[k] > at ? hand.pins[k] - at : at - hand.pins[k]) < reach;
+        if (near_hand) continue;
         if (s.count >= max_slices) { if (capped) *capped = true; break; }
         s.add(cut.start[n], frames);
     }
     return s;
+}
+
+// A chop read back from its WAV keeps its slices, not which cuts were made by hand. Against `autos` (what its type and
+// amount cut now): a cut of its own with none of the type's within 20 ms (Zero Snap moves cuts a little) was made or
+// moved by hand and is pinned again; one of the type's with none of its own near, and no cut of its own it gave way
+// to, was taken out by hand. A Manual chop's type cuts nothing: every cut by hand.
+inline void infer_hand(HandCuts& hand, const Slices& kept, const Slices& autos, uint32_t frames) {
+    auto nearest = [](const Slices& s, uint32_t at) {
+        uint32_t best = UINT32_MAX;
+        for (unsigned n = 1; n < s.count; ++n) best = std::min(best, s.start[n] > at ? s.start[n] - at : at - s.start[n]);
+        return best;
+    };
+    for (unsigned n = 1; n < kept.count; ++n)
+        if (nearest(autos, kept.start[n]) > 2 * hand_reach) hand.pin(kept.start[n]);
+    for (unsigned n = 1; n < autos.count; ++n) {
+        const uint32_t d = nearest(kept, autos.start[n]);
+        if (d > 2 * hand_reach && d >= give_way_reach(autos, n, frames)) hand.take_out(autos.start[n]);
+    }
 }
 
 // TO PADS' playback, as Simpler's Playback: POLY the slices overlap (as before), MONO they share a mute group so one
