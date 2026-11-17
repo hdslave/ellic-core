@@ -12,7 +12,7 @@
 // Chop: where the slices of a pad's region start and end, as the MPC's Chop
 // Mode cuts it (parity phase 5). THRESHOLD keeps the hits at least as strong
 // as the threshold asks; REGIONS cuts it into equal parts; BEATS puts a
-// slice on every beat (or every 2 ... 8) at the sample's own tempo, counted
+// slice on every division (1/16 ... 4 bars, as Simpler's) at the sample's own tempo, counted
 // from its beat nearest the region's start (a lead-in before that beat a
 // slice of its own), each cut on its tracked beat or a hit near it, or at the
 // project's tempo from the region's start where the sample has none
@@ -21,6 +21,21 @@
 // ends where the next starts, the last at `last`. The result lands on pads as
 // regions of the same file, or one slice as a file of its own (Extract).
 namespace melodee {
+
+// Beats' divisions, as Simpler's Division: 1/16, 1/8, 1/4 (a beat), 1/2, 1 bar, 2 bars, 4 bars. Shift + K3 picks
+// one; the slice is that many 16ths long, a bar as many as the project's time signature holds.
+constexpr unsigned beat_divisions = 7, quarter_division = 2;
+inline unsigned division_sixteenths(unsigned division, unsigned bar_sixteenths) {
+    static constexpr unsigned notes[] {1, 2, 4, 8};
+    division = std::min(division, beat_divisions - 1);
+    return division < 4 ? notes[division] : std::max(1u, bar_sixteenths) << (division - 4);
+}
+// Its name on the card: the value, and "bar" or "bars" after it from 1 bar on.
+inline const char* division_value(unsigned division) {
+    static const char* names[] {"1/16", "1/8", "1/4", "1/2", "1", "2", "4"};
+    return names[std::min(division, beat_divisions - 1)];
+}
+inline const char* division_unit(unsigned division) { return division < 4 ? "" : division == 4 ? "bar" : "bars"; }
 
 // The cut nearest a tapped frame: the strongest hit from 50 ms before it to
 // 10 ms after, else the tap itself (a tap comes a little after the sound).
@@ -100,8 +115,8 @@ inline uint32_t zero_crossing_toward(const SampleData& sample, uint32_t frame, i
 // beat within an eighth of a beat of it and within 6% of the step, or within an eighth of a beat of `on_grid`, the
 // same beat counted on the region's grid (so the slices follow a take that drifts, and a beat a drummer played
 // late after one played early, yet a tracker that found the off-beats, a 16th or more away, or squeezed its last
-// beats to reach a hit, never pulls them off the region's own beat), else the hit within 30 ms, else `want`
-// itself. `tracked`: it was a beat.
+// beats to reach a hit, never pulls them off the region's own beat), else the hit within 30 ms (a quarter of the step
+// where that is less), else `want` itself. `tracked`: it was a beat.
 inline uint32_t beat_cut(double want, double step, double beat, const BeatGrid& grid, const std::array<Hit, max_hits>& hits,
                          unsigned hit_count, bool& tracked, double on_grid = -1) {
     auto gap = [&](uint32_t frame) { return std::fabs(double(frame) - want); };
@@ -115,7 +130,7 @@ inline uint32_t beat_cut(double want, double step, double beat, const BeatGrid& 
             nearest = gap(*it); best = *it; tracked = true;
         }
     if (tracked) return best;
-    nearest = 1323; // 30 ms
+    nearest = std::min(1323.0, step / 4); // 30 ms, or a quarter of the step where that is less (a fast 1/16)
     for (unsigned n = 0; n < hit_count; ++n)
         if (hits[n].frame && gap(hits[n].frame) <= nearest) { nearest = gap(hits[n].frame); best = hits[n].frame; }
     return best;
@@ -123,19 +138,25 @@ inline uint32_t beat_cut(double want, double step, double beat, const BeatGrid& 
 
 // The slices of [from, to) of a sample of `frames`. `amount`: THRESHOLD
 // 0..100 (as on the MPC, the higher, the fewer slices: 0 keeps every hit), REGIONS the number of slices 2..64, BEATS
-// beats a slice 1..8 (`grid`: the sample's own, else `tempo_tenths`, the project's). MANUAL starts as one slice, the whole region.
+// 16ths a slice 1..256 (division_sixteenths(); `grid`: the sample's own, else `tempo_tenths`, the project's). MANUAL starts as one slice, the whole region.
+// `capped`: set when a cut was left out because the slices were full (64), so the last slice runs on past where it should end.
 inline Slices chop(ChopMode mode, int amount, uint32_t from, uint32_t to, uint32_t frames, const std::array<Hit, max_hits>& hits,
-                   unsigned hit_count, unsigned tempo_tenths, const BeatGrid* grid = nullptr) {
+                   unsigned hit_count, unsigned tempo_tenths, const BeatGrid* grid = nullptr, bool* capped = nullptr) {
     Slices s;
+    if (capped) *capped = false;
     if (!frames) return s;
     to = to && to <= frames ? to : frames;
     from = std::min(from, to > min_slice ? to - min_slice : 0);
     s.whole(from, to);
+    auto cut = [&](uint32_t frame) { // a cut, or a note that there was no room for it
+        if (s.count >= max_slices) { if (capped) *capped = true; return; }
+        s.add(frame, frames);
+    };
     switch (mode) {
     case ChopMode::Threshold: {
         int threshold = std::clamp(amount, 0, 100) * 255 / 100;
         for (unsigned n = 0; n < hit_count; ++n)
-            if (hits[n].frame > from && hits[n].strength >= threshold) s.add(hits[n].frame, frames);
+            if (hits[n].frame > from && hits[n].strength >= threshold) cut(hits[n].frame);
         break;
     }
     case ChopMode::Regions: {
@@ -145,7 +166,7 @@ inline Slices chop(ChopMode mode, int amount, uint32_t from, uint32_t to, uint32
     }
     case ChopMode::Beats: {
         if (grid && grid->found()) { // a slice every `amount` of the sample's beats, from the beat nearest the region's start
-            const double beat = 44100.0 * 600 / grid->tempo, step = beat * std::clamp(amount, 1, 8);
+            const double beat = 44100.0 * 600 / grid->tempo, step = beat * std::clamp(amount, 1, 256) / 4;
             const double reach = std::min(beat / 8, step * 0.06); // a beat this near the end is the end
             // Counted from the beat nearest the region's start, or where the steady beat starts if that is later
             // (a free intro before it is one slice); the last cut where its last beat ends (a free outro after it
@@ -156,20 +177,20 @@ inline Slices chop(ChopMode mode, int amount, uint32_t from, uint32_t to, uint32
             bool on_beat = false;
             uint32_t anchor = beat_cut(at, step, beat, *grid, hits, hit_count, on_beat);
             if (on_beat) at = anchor;
-            if (at > from + reach && at + reach < to) s.add(anchor, frames); // a lead-in before that beat: a slice of its own
+            if (at > from + reach && at + reach < to) cut(anchor); // a lead-in before that beat: a slice of its own
             double counted = at; // the same beats on the region's grid
             for (at += step; at + reach < last;) {
                 bool tracked = false;
                 counted += step;
-                uint32_t cut = beat_cut(at, step, beat, *grid, hits, hit_count, tracked, counted);
-                if (cut >= last) break;
-                s.add(cut, frames);
-                at = (tracked ? cut : at) + step; // the next from a tracked beat; from the grid past a hit
+                uint32_t frame = beat_cut(at, step, beat, *grid, hits, hit_count, tracked, counted);
+                if (frame >= last) break;
+                cut(frame);
+                at = (tracked ? frame : at) + step; // the next from a tracked beat; from the grid past a hit
             }
             break;
         }
-        double beat = 44100.0 * 60.0 / (std::max(tempo_tenths, 10u) / 10.0) * std::clamp(amount, 1, 8);
-        for (double at = from + beat; at < to; at += beat) s.add(uint32_t(at), frames);
+        double beat = 44100.0 * 60.0 / (std::max(tempo_tenths, 10u) / 10.0) * std::clamp(amount, 1, 256) / 4; // a slice's length
+        for (double at = from + beat; at < to; at += beat) cut(uint32_t(at));
         break;
     }
     default: break;
