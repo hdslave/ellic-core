@@ -26,6 +26,10 @@
 // stereo, the input's length to the frame); those are written to the card as
 // write_wav() keeps a sample. It prints how far it is, a line a step.
 //
+// BEST (the STEMS sheet's B2, a setting) has the networks look up to 16 kHz,
+// not 11, in two passes half a pass apart: the stems' highs are their own
+// and no seam is left where a pass ends, in about three times the time.
+//
 // Measured on the MPC with three threads: 13 s of sound in 13 s, 60 s in
 // 36 s; at its fullest 478 MB for 13 s and 656 MB for 60 s.
 namespace melodee {
@@ -37,10 +41,10 @@ inline const char* stem_name(unsigned n) {
     return names[n % stem_count];
 }
 
-// What a job takes for `frames` 44.1 kHz frames: memory at its fullest, the
-// program and its files in RAM with it, in bytes; and seconds on the MPC.
-uint64_t stems_memory(uint32_t frames);
-unsigned stems_seconds(uint32_t frames);
+// What a job takes for `frames` 44.1 kHz frames, BEST or not: memory at its
+// fullest, the program and its files in RAM with it, in bytes; and seconds on the MPC.
+uint64_t stems_memory(uint32_t frames, bool best);
+unsigned stems_seconds(uint32_t frames, bool best);
 // The shortest sample the program is given: under a second there is nothing for it to tell apart.
 constexpr uint32_t stems_least_frames = 44100;
 
@@ -55,6 +59,7 @@ struct StemsJob {
     std::string model;         // its model, on the card
     std::string work;          // a folder in RAM for its copy and its files: made here, removed after
     std::vector<float> left, right;             // the sample's 44.1 kHz frames
+    bool best = false;                          // up to 16 kHz in two passes (the program's "best")
     std::array<std::string, stem_count> paths;  // the files to write, in stem_name()'s order
 };
 

@@ -36,15 +36,19 @@ constexpr float program_share = 0.92f;
 double seconds_of(uint32_t frames) { return double(frames) / 44100.0; }
 } // namespace
 
-uint64_t stems_memory(uint32_t frames) {
+uint64_t stems_memory(uint32_t frames, bool best) {
     // The program at its fullest, measured: 478 MB for 13 s of sound, 544 MB for 30 s, 656 MB for 60 s (the model
-    // as floats, three networks at work, the mix's spectrum). Its input and four outputs in RAM: 1.7 MB a second.
+    // as floats, three networks at work, the mix's spectrum); BEST, 655 MB for 13 s and 841 MB for 60 s (wider
+    // networks, two passes' masks). Its input and four outputs in RAM: 1.7 MB a second.
+    if (best) return uint64_t((630.0 + 5.9 * seconds_of(frames)) * 1024.0 * 1024.0);
     return uint64_t((450.0 + 5.7 * seconds_of(frames)) * 1024.0 * 1024.0);
 }
 
-unsigned stems_seconds(uint32_t frames) {
+unsigned stems_seconds(uint32_t frames, bool best) {
     // Until the job's own pace is known (separate()). Measured on the MPC: the program alone 13 s for 13 s of
-    // sound and 36 s for 60 s; a whole job 15 s for 13 s, with the four files written to the card after.
+    // sound and 36 s for 60 s; a whole job 15 s for 13 s, with the four files written to the card after. BEST
+    // takes 2.7 times as long in the build container, for 13 s and for 60 s alike.
+    if (best) return unsigned(std::ceil(19.0 + 1.4 * seconds_of(frames)));
     return unsigned(std::ceil(8.0 + 0.55 * seconds_of(frames)));
 }
 
@@ -62,7 +66,7 @@ bool StemSeparator::start(StemsJob job) {
     if (worker.joinable()) worker.join();
     cancelled.store(false);
     fraction.store(0);
-    seconds_left.store(stems_seconds(uint32_t(std::min(job.left.size(), job.right.size()))));
+    seconds_left.store(stems_seconds(uint32_t(std::min(job.left.size(), job.right.size())), job.best));
     running.store(true, std::memory_order_release);
     worker = std::thread([this, held = std::move(job)]() mutable { run(std::move(held)); });
     return true;
@@ -145,7 +149,7 @@ std::string StemSeparator::separate(StemsJob& job) {
     posix_spawn_file_actions_adddup2(&actions, ends[1], 2);
     posix_spawn_file_actions_addclose(&actions, ends[0]);
     posix_spawn_file_actions_addclose(&actions, ends[1]);
-    const char* const args[] = {program.c_str(), job.model.c_str(), threads, input.c_str(), nullptr};
+    const char* const args[] = {program.c_str(), job.model.c_str(), threads, input.c_str(), job.best ? "best" : nullptr, nullptr};
     pid_t pid = 0;
     // posix_spawn, not fork(): no copy of Melodee's page tables is made (plugin/vst2_bridge_instance.cpp).
     const int spawned = posix_spawn(&pid, args[0], &actions, nullptr, const_cast<char* const*>(args), environ);
@@ -158,7 +162,7 @@ std::string StemSeparator::separate(StemsJob& job) {
     // bar on, then the job's own pace once a sixth of it is done.
     const auto began = Clock::now();
     auto elapsed = [&] { return std::chrono::duration<double>(Clock::now() - began).count(); };
-    double whole = std::max(1.0, double(stems_seconds(frames))), reported = 0;
+    double whole = std::max(1.0, double(stems_seconds(frames, job.best))), reported = 0, shown = 0;
     bool killed = false, reaped = false;
     int status = 0;
     std::string line;
@@ -187,7 +191,9 @@ std::string StemSeparator::separate(StemsJob& job) {
         }
         // It is over when the program is, not when the pipe closes: something it started may still hold the pipe.
         if (waitpid(pid, &status, WNOHANG) == pid) { reaped = true; break; }
-        const double at = elapsed(), shown = std::max(reported, std::min({at / whole, reported + 0.1, 0.99}));
+        // The bar never goes back, when the job's own pace turns out slower than the time measured.
+        const double at = elapsed();
+        shown = std::max({shown, reported, std::min({at / whole, reported + 0.1, 0.99})});
         fraction.store(program_share * float(shown), std::memory_order_relaxed);
         seconds_left.store(unsigned(std::ceil(std::max(1.0, whole - at))), std::memory_order_relaxed);
     }

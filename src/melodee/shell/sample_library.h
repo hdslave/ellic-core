@@ -197,7 +197,7 @@ public:
     // drums, bass, music and vocals, as Samples/Stems/<name> DRUMS.wav, <name> BASS.wav, <name> MUSIC.wav and
     // <name> VOCALS.wav (the same free <name> for the four). take_stems() hands back the files written, or why
     // there are none ("stopped": it was called off). One job at a time; stop_stems() and stems_progress() from any thread.
-    struct StemsRequest { uint16_t source = 0; char name[24] {}; };
+    struct StemsRequest { uint16_t source = 0; char name[24] {}; bool best = false; };
     bool separate(const StemsRequest& job) { return stems_wanted.push(job); }
     void stop_stems() { separator.cancel(); }
     StemsProgress stems_progress() const { return separator.progress(); }
