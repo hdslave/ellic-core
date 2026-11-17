@@ -85,4 +85,44 @@ KitImport import_bank(const BankFile& from, unsigned bank, Track& into, const st
     return result;
 }
 
+KitImport import_kit_bank(const Project& from, unsigned track, unsigned from_bank, unsigned bank, Track& into,
+                          const std::function<int(const SampleRef&)>& slot_for) {
+    KitImport result;
+    const auto& src = from.tracks[track % track_count];
+    std::array<int, sample_slots> mapped;
+    mapped.fill(-2); // -2 not asked yet
+    auto slot = [&](unsigned s) {
+        s %= sample_slots;
+        if (mapped[s] == -2) mapped[s] = from.samples[s].used() ? slot_for(from.samples[s]) : -1;
+        return mapped[s];
+    };
+    for (unsigned k = 0; k < bank_pads; ++k) {
+        const unsigned n = (from_bank % sampler_banks) * bank_pads + k, to = (bank % sampler_banks) * bank_pads + k;
+        PadSound pad = src.pads[n];
+        if (!pad.used()) continue; // an empty pad of the kit leaves this one as it is
+        int s = slot(pad.sample);
+        if (s < 0) { ++result.missing; continue; }
+        pad.sample = uint16_t(s);
+        for (auto& l : pad.layers) { // its layers' files too; a layer without a slot is left out
+            if (!l.used()) continue;
+            int ls = slot(l.sample);
+            if (ls < 0) l = PadLayer {};
+            else l.sample = uint16_t(ls);
+        }
+        if (into.pads[to].used()) ++result.replaced;
+        into.pads[to] = pad;
+        into.pad_fx.at[to] = src.pad_fx.at[n];
+        into.set_pad_muted(to, false);
+        ++result.pads;
+    }
+    into.drop_stale_trims();
+    return result;
+}
+
+std::array<uint8_t, sampler_banks> kit_bank_pads(const Track& kit) {
+    std::array<uint8_t, sampler_banks> count {};
+    for (unsigned n = 0; n < sampler_pads; ++n) if (kit.pads[n].used()) ++count[n / bank_pads];
+    return count;
+}
+
 } // namespace melodee
