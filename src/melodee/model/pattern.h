@@ -299,6 +299,10 @@ inline const char* speed_name(unsigned speed) {
     static const char* names[] {"\xc3\x97\xc2\xbd", "\xc3\x97\xc2\xbe", "\xc3\x97" "1", "\xc3\x97" "1\xc2\xbd", "\xc3\x97" "2"}; // x1/2 .. x2
     return names[speed < speed_count ? speed : speed_normal];
 }
+// A place in a pattern as written, in the transport's ticks of a track at `speed` (to the nearest, as speed_pattern()
+// scales), and back (as the audio thread publishes a track's place, EngineHost::position_of()).
+inline uint64_t played_ticks(uint64_t written, unsigned speed) { Speed s = speed_of(speed); return (written * s.den + s.num / 2) / s.num; }
+inline uint64_t written_ticks(uint64_t played, unsigned speed) { Speed s = speed_of(speed); return played * s.num / s.den; }
 Pattern speed_pattern(const Pattern& p, unsigned speed);
 // What the audio thread plays of a pattern on a track at `speed`: its feel laid on, then its speed.
 Pattern played_pattern(const Pattern& p, unsigned speed);

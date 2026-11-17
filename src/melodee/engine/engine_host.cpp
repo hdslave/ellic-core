@@ -2348,11 +2348,10 @@ void EngineHost::fit_kept(unsigned t) {
 bool EngineHost::edit_loop(unsigned t, uint32_t length, uint32_t& from, uint32_t& span) const {
     const auto& slot = slots[t % track_count];
     if (!slot.loop_ticks) return false;
-    Speed sp = speed_of(speeds_now[t % track_count].load(std::memory_order_relaxed));
-    auto played = [&](uint32_t ticks) { return uint32_t((uint64_t(ticks) * sp.den + sp.num / 2) / sp.num); }; // as speed_pattern()
-    from = played(slot.loop_from);
+    unsigned speed = speeds_now[t % track_count].load(std::memory_order_relaxed);
+    from = uint32_t(std::min<uint64_t>(played_ticks(slot.loop_from, speed), UINT32_MAX));
     if (from >= length) return false;
-    span = std::min(std::max<uint32_t>(played(slot.loop_ticks), 1), length - from);
+    span = uint32_t(std::clamp<uint64_t>(played_ticks(slot.loop_ticks, speed), 1, length - from));
     return true;
 }
 
