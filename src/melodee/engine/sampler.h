@@ -82,6 +82,9 @@ public:
     bool pad_muted(unsigned pad) const { return pad < sampler_pads && ((muted[pad / 64] >> (pad % 64)) & 1); }
     // A region of a sample on no pad, for Chop's audition (plays one shot).
     void audition(uint16_t sample, uint32_t start, uint32_t end, int velocity);
+    // The audition playing now ends at `end` (frames as the project counts them), or fades out at once when it has
+    // passed it: Chop's Pad Slicing let go.
+    void audition_end(uint32_t end);
     // A sample is about to change: whatever plays it stops now.
     void sample_gone(uint16_t sample);
     // A kit pad shifted by `semitones`, its filter at `cutoff` (0..100; -1 its
