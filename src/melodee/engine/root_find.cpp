@@ -4,6 +4,7 @@
 #include "melodee/engine/dsp.h"
 #include "melodee/engine/fft.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <complex>
 
@@ -12,10 +13,17 @@
 // engine/auto_probe.cpp, here through the FFT), read at half of 44.1 kHz. A
 // window counts when its sound repeats clearly; the sample has a note when most
 // of its loud windows count and most of those agree on one pitch class (an
-// octave either way is the same note). A drum, a noise, a phrase of several
-// notes, a sound whose pitch glides and most chords have none: they play as a
-// C, never as a wrong note. On 172 multisampled synth notes (the auto sampler's,
-// named by their keys) 150 came out right and 22 none, none wrong.
+// octave either way is the same note). A sound with no one pitch, such as a
+// chord (a minor chord never repeats exactly), is read as a chord instead: the
+// pitch classes of its spectrum's peaks matched to chord shapes window by
+// window, its root where the chord holds steady. A drum, a noise, a phrase of
+// several notes and a sound whose pitch glides have none: they play as a C.
+// Measured: of 172 multisampled synth notes (the auto sampler's, named by their
+// keys) 150 right, 22 none, none wrong; of 222 MPC factory basses, keys, pads
+// and stabs named with a note 203 right, 14 none, 5 another note (three of
+// them sit half a semitone off the name, one is a phrase, one a chord on
+// another root of the key named); of 337 factory drums, cymbals and effects
+// the pitched kicks, toms and congas have a note and no hat, snare or noise.
 namespace melodee {
 namespace {
 
@@ -106,6 +114,119 @@ float apart(float a, float b) {
     return std::min(d, 12.0f - d);
 }
 
+
+// A chord's root (chord_root()): each window 186 ms, Hann, padded to twice that, its peaks from 50 Hz to 5 kHz.
+constexpr unsigned chord_span = 4096, chord_size = 2 * chord_span;
+constexpr float chord_fit = 0.8f;   // how closely a window's pitch classes fit a chord shape (cosine, 1: exactly)
+constexpr float bass_band = 0.05f;  // shapes within this of the best fit: the one whose root the bass plays wins
+constexpr float steady = 0.95f;     // how alike one window's pitch classes are to the next's (cosine): a held chord
+constexpr float low_share = 0.2f;   // of the sound under 5 kHz at least: a hat or a noise is mostly over it
+
+// Pitch classes over the root: major, minor, seventh, minor seventh, major seventh, sus4, sus2, a fifth, minor ninth
+// and major ninth.
+const std::array<std::vector<int>, 10>& chord_shapes() {
+    static const std::array<std::vector<int>, 10> shapes {{
+        {0, 4, 7}, {0, 3, 7}, {0, 4, 7, 10}, {0, 3, 7, 10}, {0, 4, 7, 11}, {0, 5, 7}, {0, 2, 7}, {0, 7}, {0, 2, 3, 7, 10}, {0, 2, 4, 7, 11},
+    }};
+    return shapes;
+}
+
+// The chord a sound holds where it has no one pitch: its spectrum's peaks as pitch classes, moved by how far they
+// sit between semitones on the whole (its tuning), fitted to the chord shapes in each window; of shapes that fit
+// about as well (Am7 and C6 hold the same notes), the one on the bass's note. A root when the windows hold the same
+// pitch classes from one to the next and most of them agree.
+SampleRoot chord_root(const std::vector<float>& x, const std::vector<unsigned>& chosen) {
+    if (chosen.size() < 3) return {};
+    std::vector<Complex> twiddle(chord_size / 2), buffer(chord_size);
+    for (unsigned k = 0; k < chord_size / 2; ++k) twiddle[k] = std::polar(1.0f, float(-2 * M_PI * k / chord_size));
+    struct Peak { float note, weight; };
+    std::vector<std::vector<Peak>> heard;
+    std::vector<float> lows;
+    std::vector<float> magnitude(chord_size / 2 + 1);
+    const float bin_hz = rate / chord_size;
+    const unsigned from = std::max(2u, unsigned(50 / bin_hz)), to = std::min(unsigned(5000 / bin_hz), chord_size / 2 - 1);
+    for (unsigned w : chosen) {
+        const size_t start = size_t(w) * hop;
+        for (unsigned k = 0; k < chord_size; ++k) {
+            const float v = k < chord_span && start + k < x.size() ? x[start + k] * float(0.5 - 0.5 * std::cos(2 * M_PI * k / chord_span)) : 0.0f;
+            buffer[k] = Complex(v, 0.0f);
+        }
+        fft(buffer, twiddle);
+        float top = 0;
+        double under = 0, all = 0;
+        for (unsigned k = 0; k <= chord_size / 2; ++k) {
+            magnitude[k] = std::abs(buffer[k]);
+            top = std::max(top, magnitude[k]);
+            const double power = double(magnitude[k]) * magnitude[k];
+            all += power;
+            if (k < to) under += power;
+        }
+        lows.push_back(all > 0 ? float(under / all) : 0.0f);
+        std::vector<Peak> peaks;
+        for (unsigned k = from; k < to; ++k) {
+            if (magnitude[k] <= magnitude[k - 1] || magnitude[k] < magnitude[k + 1] || magnitude[k] < 0.01f * top) continue; // -40 dB
+            const float a = std::log(magnitude[k - 1] + 1e-12f), b = std::log(magnitude[k] + 1e-12f), c = std::log(magnitude[k + 1] + 1e-12f);
+            const float d = a - 2 * b + c, shift = std::fabs(d) > 1e-9f ? std::clamp(0.5f * (a - c) / d, -0.5f, 0.5f) : 0.0f;
+            peaks.push_back({69.0f + 12.0f * std::log2((float(k) + shift) * bin_hz / 440.0f), magnitude[k] / top});
+        }
+        heard.push_back(std::move(peaks));
+    }
+    std::sort(lows.begin(), lows.end());
+    if (lows[lows.size() / 2] < low_share) return {};
+    double re = 0, im = 0;
+    for (const auto& peaks : heard)
+        for (const auto& p : peaks) {
+            const double off = p.note - std::round(p.note);
+            re += p.weight * std::cos(2 * M_PI * off);
+            im += p.weight * std::sin(2 * M_PI * off);
+        }
+    const float tuning = float(std::atan2(im, re) / (2 * M_PI)); // semitones, -0.5 .. 0.5
+    std::vector<int> roots;
+    std::array<float, 12> before {};
+    double alike = 0;
+    unsigned compared = 0;
+    for (size_t w = 0; w < heard.size(); ++w) {
+        std::array<float, 12> chroma {}, bass {};
+        for (const auto& p : heard[w]) {
+            const auto pc = size_t((std::lround(p.note - tuning) % 12 + 12) % 12);
+            chroma[pc] += p.weight;
+            if (p.note - tuning < 55) bass[pc] += p.weight; // under G3
+        }
+        double norm = 0, dot = 0, norm_before = 0;
+        for (size_t k = 0; k < 12; ++k) { norm += double(chroma[k]) * chroma[k]; dot += double(chroma[k]) * before[k]; norm_before += double(before[k]) * before[k]; }
+        if (w && norm > 0 && norm_before > 0) { alike += dot / std::sqrt(norm * norm_before); ++compared; }
+        before = chroma;
+        if (norm <= 0) continue;
+        norm = std::sqrt(norm);
+        float best = 0;
+        std::array<float, 12> fit {}; // each root's best shape
+        for (int r = 0; r < 12; ++r)
+            for (const auto& shape : chord_shapes()) {
+                double sum = 0;
+                for (int t : shape) sum += chroma[size_t((r + t) % 12)];
+                fit[size_t(r)] = std::max(fit[size_t(r)], float(sum / (norm * std::sqrt(double(shape.size())))));
+                best = std::max(best, fit[size_t(r)]);
+            }
+        if (best < chord_fit) continue;
+        int root = int(std::max_element(fit.begin(), fit.end()) - fit.begin());
+        float bass_sum = 0;
+        for (float v : bass) bass_sum += v;
+        const int bass_pc = int(std::max_element(bass.begin(), bass.end()) - bass.begin());
+        if (bass_sum > 0 && bass[size_t(bass_pc)] > 0.3f * bass_sum && fit[size_t(bass_pc)] >= best - bass_band) root = bass_pc;
+        roots.push_back(root);
+    }
+    if (!compared || alike / compared < steady) return {}; // what it holds changes: a phrase, a hit, a noise
+    if (roots.size() < 3 || float(roots.size()) < counted * float(chosen.size())) return {};
+    std::array<unsigned, 12> votes {};
+    for (int r : roots) ++votes[size_t(r)];
+    const auto top = size_t(std::max_element(votes.begin(), votes.end()) - votes.begin());
+    if (float(votes[top]) < agreeing * float(roots.size())) return {};
+    SampleRoot out;
+    out.pitch_class = int(top);
+    out.cents = int(std::lround(tuning * 100));
+    return out;
+}
+
 } // namespace
 
 SampleRoot find_root(const std::vector<float>& model_mono) {
@@ -137,7 +258,7 @@ SampleRoot find_root(const std::vector<float>& model_mono) {
         const float note = 69.0f + 12.0f * std::log2(heard.hz / 440.0f);
         classes.push_back(std::fmod(std::fmod(note, 12.0f) + 12.0f, 12.0f));
     }
-    if (classes.size() < 3 || float(classes.size()) < counted * float(chosen.size())) return {}; // mostly no pitch
+    if (classes.size() < 3 || float(classes.size()) < counted * float(chosen.size())) return chord_root(x, chosen); // mostly no one pitch
     // The pitch class most windows lie within half a semitone of, then their mean (around it, not across 0).
     size_t most = 0;
     float centre = 0;
@@ -146,7 +267,7 @@ SampleRoot find_root(const std::vector<float>& model_mono) {
         for (float o : classes) near += apart(c, o) <= 0.5f;
         if (near > most) { most = near; centre = c; }
     }
-    if (float(most) < agreeing * float(classes.size())) return {}; // several notes
+    if (float(most) < agreeing * float(classes.size())) return chord_root(x, chosen); // several notes: a chord, or a phrase
     double sum = 0;
     for (float o : classes) {
         if (apart(centre, o) > 0.5f) continue;
