@@ -197,6 +197,22 @@ inline Slices chop(ChopMode mode, int amount, uint32_t from, uint32_t to, uint32
     }
     return s;
 }
+// A new chop with the cuts made by hand (Simpler's manual slices kept whatever the sensitivity): those first, then
+// each of `cut`'s own not taken out by hand (none within 20 ms of a hand cut: Slices::add keeps them apart). The
+// region stays `cut`'s. `capped` as chop()'s: set when a cut found no room.
+inline Slices with_hand(const Slices& cut, const HandCuts& hand, uint32_t frames, bool* capped = nullptr) {
+    if (hand.empty() || !cut.count) return cut;
+    Slices s;
+    s.whole(cut.start[0], cut.stop[cut.count - 1]);
+    for (unsigned n = 0; n < hand.pin_count; ++n) s.add(hand.pins[n], frames);
+    for (unsigned n = 1; n < cut.count; ++n) {
+        if (hand.dropped(cut.start[n])) continue;
+        if (s.count >= max_slices) { if (capped) *capped = true; break; }
+        s.add(cut.start[n], frames);
+    }
+    return s;
+}
+
 // The whole sample, as before parity phase 5.
 inline Slices chop(ChopMode mode, int amount, uint32_t frames, const std::array<Hit, max_hits>& hits, unsigned hit_count, unsigned tempo_tenths,
                    const BeatGrid* grid = nullptr) {

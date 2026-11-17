@@ -89,12 +89,67 @@ struct Slices {
     }
 };
 
+// Cuts made or moved by hand on Chop, as Simpler keeps its manual slices: a new chop by type or amount keeps them,
+// and leaves out the automatic cuts that were moved away or taken out by hand. Kept with the chop while the project
+// is open, not in the WAV file (the MPC has no such mark).
+constexpr uint32_t hand_reach = 441; // 10 ms: an automatic cut this near a dropped one is that one (Zero Snap moves cuts a little)
+struct HandCuts {
+    std::array<uint32_t, max_slices> pins {}; // cuts made or moved by hand
+    std::array<uint32_t, 32> drops {};        // automatic cuts moved away or taken out (the oldest goes when full)
+    uint8_t pin_count = 0, drop_count = 0;
+    static bool near(uint32_t a, uint32_t b) { return (a > b ? a - b : b - a) <= hand_reach; }
+    bool pinned(uint32_t frame) const {
+        for (unsigned n = 0; n < pin_count; ++n) if (near(pins[n], frame)) return true;
+        return false;
+    }
+    bool dropped(uint32_t frame) const {
+        for (unsigned n = 0; n < drop_count; ++n) if (near(drops[n], frame)) return true;
+        return false;
+    }
+    bool empty() const { return !pin_count && !drop_count; }
+    void clear() { pin_count = drop_count = 0; pins = {}; drops = {}; }
+    bool same(const HandCuts& o) const {
+        if (pin_count != o.pin_count || drop_count != o.drop_count) return false;
+        for (unsigned n = 0; n < pin_count; ++n) if (pins[n] != o.pins[n]) return false;
+        for (unsigned n = 0; n < drop_count; ++n) if (drops[n] != o.drops[n]) return false;
+        return true;
+    }
+    void pin(uint32_t frame) {
+        unpin(frame);
+        if (pin_count < max_slices) pins[pin_count++] = frame;
+    }
+    void unpin(uint32_t frame) {
+        unsigned kept = 0;
+        for (unsigned n = 0; n < pin_count; ++n) if (!near(pins[n], frame)) pins[kept++] = pins[n];
+        for (unsigned n = kept; n < pin_count; ++n) pins[n] = 0;
+        pin_count = uint8_t(kept);
+    }
+    void drop(uint32_t frame) {
+        if (dropped(frame)) return;
+        if (size_t(drop_count) == drops.size()) { // the oldest makes room
+            for (unsigned n = 1; n < drops.size(); ++n) drops[n - 1] = drops[n];
+            --drop_count;
+        }
+        drops[drop_count++] = frame;
+    }
+    // A cut taken out (Erase, Merge): whichever it was, a new chop leaves it out.
+    void take_out(uint32_t frame) { unpin(frame); drop(frame); }
+    // A cut moved (K1, K2, the wheel): it stays where it went, and an automatic one is not cut again where it was.
+    void move(uint32_t from, uint32_t to) {
+        if (from == to) return;
+        if (!pinned(from)) drop(from);
+        unpin(from);
+        pin(to);
+    }
+};
+
 // A sample's chop (roadmap P3): the region of it Chop cut (to 0: the sample's end), how, and the slices.
 struct SampleChop {
     uint32_t from = 0, to = 0;
     ChopMode mode = ChopMode::Threshold;
     int16_t amount = 0;
     Slices slices {};
+    HandCuts hand {}; // the cuts made by hand, while the project is open
     bool unwritten = false; // changed here (or read from an older project file) and not yet in its WAV file
     bool used() const { return slices.count > 0; }
 };
