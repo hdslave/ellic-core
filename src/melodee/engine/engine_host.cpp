@@ -876,6 +876,7 @@ void EngineHost::apply(const Command& c) {
                           (old->follow != c.data->follow || old->length != c.data->length);
             bool program = old && slot.kind == EngineKind::Midi && slot.pattern == c.pattern % pattern_count && old->program != c.data->program;
             retire(old);
+            if (running && slot.pattern == c.pattern % pattern_count) fit_kept(c.track % track_count); // pad-fx C: its punches as it holds them now
             if (replan) plan_follow(c.track % track_count);
             if (program) midi_program(c.track % track_count, frame_now, false); // its own program turned: sent now
         }
@@ -892,6 +893,7 @@ void EngineHost::apply(const Command& c) {
     case Type::EditLoop:
         slot.loop_from = c.position;
         slot.loop_ticks = uint32_t(c.index) | uint32_t(uint16_t(c.value)) << 16;
+        if (running) fit_kept(c.track % track_count); // pad-fx C: its punches in the loop as it is now
         break;
     case Type::Chained: // roadmap P5: a chain is its track's order, its patterns' follow actions wait
         slot.chained = c.value != 0;
@@ -1722,6 +1724,7 @@ void EngineHost::bar_start() {
             if (slot.queued == 255) continue;
             if (slot.kind == EngineKind::Midi && slot.queued != slot.pattern) midi_all_off(t, frame_now + block_at); // the old pattern's notes end
             slot.pattern = slot.queued; slot.queued = 255; slot.start = tick_now;
+            drop_kept(t); // pad-fx C: the old pattern's punches end here
             if (slot.kind == EngineKind::Midi) midi_program(t, frame_now + block_at, false); // roadmap P4: a pattern's own program, ahead of its notes
             patterns_now[t].store(slot.pattern, std::memory_order_relaxed);
             lead = slot.pattern;
@@ -1782,6 +1785,7 @@ void EngineHost::follow(unsigned t) {
     }
     if (slot.kind == EngineKind::Midi && unsigned(to) != slot.pattern) midi_all_off(t, frame_now + block_at); // as a launch
     slot.pattern = uint8_t(to); slot.start = tick_now;
+    drop_kept(t); // pad-fx C: the old pattern's punches end here
     if (slot.kind == EngineKind::Midi) midi_program(t, frame_now + block_at, false);
     patterns_now[t].store(slot.pattern, std::memory_order_relaxed);
     lead = slot.pattern;
@@ -1802,6 +1806,7 @@ void EngineHost::clips_at_bar(bool force) {
             // A clip starts (or the loop came back into it): its pattern from where the clip says.
             slot.clip = index;
             slot.pattern = clip.pattern;
+            drop_kept(t); // pad-fx C: the clip before's punches end here
             if (slot.kind == EngineKind::Midi) midi_program(t, frame_now + block_at, false); // roadmap P4
             slot.start = bar_tick - (song_bar_now - clip.bar) * bar;
             patterns_now[t].store(slot.pattern, std::memory_order_relaxed);
@@ -2278,25 +2283,55 @@ void EngineHost::play_song_punches() {
 }
 
 // pad-fx C (round 2): punches kept with a track's pattern, each due from its tick as the pattern plays, in a kept
-// slot of its own (a free one, else the one ending soonest), and let go after its length; heard at once unless a
-// live punch sounds (it wins).
-void EngineHost::play_pattern_punches(const Pattern& pattern, uint32_t at) {
-    bool hand = hand_punch();
+// slot of its own (a free one, else the one ending soonest), and let go after its length, at the end of the loop
+// (`end`: the pattern's, or an editor's) at the latest: a pattern made shorter never leaves one sounding round its
+// loop. The same punch ending on this tick (its part before the loop point, or the pass before) carries on in its
+// slot, not started again. tick() sounds them after every track's are due, unless a live punch sounds (it wins).
+void EngineHost::play_pattern_punches(unsigned t, const Pattern& pattern, uint32_t at, uint32_t end) {
     for (const auto& e : pattern.punches) {
         if (e.tick != at) continue;
+        uint32_t until = tick_now + std::clamp<uint32_t>(e.length, 1, std::max<uint32_t>(end > at ? end - at : 1, 1));
         Kept* slot = nullptr;
-        for (auto& k : kept) if (!k.due) { slot = &k; break; }
+        for (auto& k : kept) if (k.due && k.until <= tick_now && k.track == t && same_punch(k, e)) { slot = &k; break; }
+        if (slot) { slot->until = until; continue; }
+        for (auto& k : kept) if (!k.due || k.until <= tick_now) { slot = &k; break; }
         if (!slot) { slot = &kept[0]; for (auto& k : kept) if (k.until < slot->until) slot = &k; }
+        if (slot->on) { slot->punch.stop(); slot->on = false; } // another punch's slot: this one starts from its own start
         if (e.target != slot->target) { slot->punch.clear(); slot->target = e.target; } // a new signal: the old history is not its own
+        slot->track = uint8_t(t);
         slot->kind = PunchKind(e.kind % punch_count);
         slot->depth = e.depth / 100.0f;
         slot->snap = e.snap & 3u;
         slot->tail = e.tail % 3u;
         slot->due = true;
-        slot->until = tick_now + std::max<uint32_t>(1, e.length);
-        if (!hand) sound_kept(*slot);
-        else if (slot->on) { slot->punch.stop(); slot->on = false; }
+        slot->until = until;
     }
+}
+
+// The pattern track t plays, or its editor's loop, changed while its kept punches sound (Half Seq, a new length, Erase
+// + pad, an undo): one the pattern still holds where it plays next goes on to where it ends now; the others let go
+// on the next tick.
+void EngineHost::fit_kept(unsigned t) {
+    const auto& slot = slots[t % track_count];
+    const Pattern& pattern = *patterns[t % track_count][slot.pattern % pattern_count];
+    uint32_t length = std::max<uint32_t>(pattern.length, 1), elapsed = tick_now - slot.start, at = elapsed % length, end = length;
+    if (slot.loop_ticks && slot.loop_from < length) {
+        uint32_t span = std::min(slot.loop_ticks, length - slot.loop_from);
+        at = slot.loop_from + elapsed % span; end = slot.loop_from + span;
+    }
+    for (auto& k : kept) {
+        if (!k.due || k.track != t) continue;
+        uint32_t until = tick_now;
+        for (const auto& e : pattern.punches) {
+            uint64_t ends = std::min<uint64_t>(uint64_t(e.tick) + std::max<uint32_t>(e.length, 1), end);
+            if (same_punch(k, e) && e.tick < at && at < ends) until = tick_now + uint32_t(ends - at);
+        }
+        k.until = until;
+    }
+}
+
+void EngineHost::drop_kept(unsigned t) {
+    for (auto& k : kept) if (k.due && k.track == t) k.until = std::min(k.until, tick_now);
 }
 
 void EngineHost::sound_kept(Kept& k) {
@@ -2429,18 +2464,11 @@ void EngineHost::tick() {
             if (slot.follow_do && slot.queued == 255 && !slot.chained && !slot.silent && tick_now >= slot.follow_at) follow(t);
         }
     if (song_mode && tick_now % sixteenth_ticks == 0) play_song_punches();
-    { // pad-fx C: a kept punch's length; a live punch wins while it sounds, the kept ones back for the rest of theirs after
-        bool hand = hand_punch();
-        for (auto& k : kept) {
-            if (k.due && tick_now >= k.until) k.due = false;
-            if (k.on && (!k.due || hand)) { k.punch.stop(); k.on = false; }
-            else if (!k.on && k.due && !hand) sound_kept(k);
-        }
-    }
     for (unsigned t = 0; t < track_count; ++t) {
         auto& slot = slots[t];
         bool sound = slot.engine != nullptr, midi = out_channel[t] && out_mode[t]; // an empty track may still play MIDI out
         if ((!sound && !midi) || slot.silent) {
+            drop_kept(t); // pad-fx C: its pattern's punches stop with it
             if (slot.print_on || slot.print.playing()) { slot.print.release(dsp::sample_rate()); slot.print_on = false; } // a STOP, no clip
             if (slot.audio.player.playing()) slot.audio.player.release(dsp::sample_rate()); // freeze plan F3
             slot.audio_last = UINT32_MAX;
@@ -2449,15 +2477,15 @@ void EngineHost::tick() {
         const auto& pattern = *patterns[t][slot.pattern];
         uint32_t length = std::max<uint32_t>(pattern.length, 1);
         uint32_t elapsed = tick_now - slot.start;
-        uint32_t at = elapsed % length;
+        uint32_t at = elapsed % length, end = length; // where its loop ends
         uint32_t pass = elapsed / length; // trig conditions count the pattern's passes from where it began
         if (slot.loop_ticks && slot.loop_from < length) { // an editor's loop: its bars over and over
             uint32_t span = std::min(slot.loop_ticks, length - slot.loop_from);
-            at = slot.loop_from + elapsed % span; pass = elapsed / span;
+            at = slot.loop_from + elapsed % span; pass = elapsed / span; end = slot.loop_from + span;
         }
         Speed sp = speed_of(speeds_now[t].load(std::memory_order_relaxed)); // published as written (its pattern plays scaled)
         positions_now[t].store(int(uint64_t(at) * sp.num / sp.den), std::memory_order_relaxed);
-        if (!pattern.punches.empty()) play_pattern_punches(pattern, at); // pad-fx C: punches kept with it
+        if (!pattern.punches.empty()) play_pattern_punches(t, pattern, at, end); // pad-fx C: punches kept with it
         passes_now[t].store(pass, std::memory_order_relaxed);
         if (at == 0 && int(t) == cue_track) { take.go(block_at); cue_track = -1; } // Rec length Seq: the take starts with the pattern
         if (sound && (at == 0 || !pattern.motion.empty() || slot.locks_on)) play_motion(t, slot, pattern, at);
@@ -2478,6 +2506,15 @@ void EngineHost::tick() {
                 if (events[n].key == l.key) play_event(t, slot, pattern, n, lane_at, loop, elapsed / loop, seq, holding);
         }
         if (holding.key >= 0) slot.held = holding;
+    }
+    { // pad-fx C, after this tick's punches are due (one may carry on from the same punch ending here): a kept punch's
+      // length; a live punch wins while it sounds, the kept ones back for the rest of theirs after
+        bool hand = hand_punch();
+        for (auto& k : kept) {
+            if (k.due && tick_now >= k.until) k.due = false;
+            if (k.on && (!k.due || hand)) { k.punch.stop(); k.on = false; }
+            else if (!k.on && k.due && !hand) sound_kept(k);
+        }
     }
     // Where this tick fell, for a hit heard then (place_at): after the positions, which the release publishes too.
     uint32_t head = tick_head.load(std::memory_order_relaxed);

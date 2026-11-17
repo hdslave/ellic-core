@@ -9,6 +9,7 @@
 #include "melodee/engine/midi_engine.h"
 #include "melodee/engine/sampler.h"
 #include <algorithm>
+#include <bitset>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -347,10 +348,11 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
                 w.end(at);
             }
             if (!pattern.punches.empty()) { // punches kept with it (pad-fx C): tick, length, kind, target, depth, snap | tail << 4
-                at = w.begin("KEPT");
+                at = w.begin("KEPT");   // | 128: kept since they end with their pattern (one across the loop point in two parts)
                 w.u8(t); w.u8(p); w.u8(unsigned(pattern.punches.size()));
                 for (const auto& k : pattern.punches) {
-                    w.u32(k.tick); w.u32(k.length); w.u8(k.kind); w.u8(k.target); w.u8(k.depth); w.u8(unsigned(k.snap & 3) | unsigned(k.tail & 3) << 4);
+                    w.u32(k.tick); w.u32(k.length); w.u8(k.kind); w.u8(k.target); w.u8(k.depth);
+                    w.u8(unsigned(k.snap & 3) | unsigned(k.tail & 3) << 4 | 128);
                 }
                 w.end(at);
             }
@@ -789,6 +791,7 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
     PrintTable prints;
     unsigned file_version = 0;
     bool keygroups_known = false; // KGVR: saved since keygroup tracks
+    std::array<std::bitset<pattern_count>, track_count> played_on; // KEPT: patterns whose punches may reach past their end
     if (data.size() < 8 || std::memcmp(data.data(), magic, 8)) return "not a Melodee project";
     auto project = std::make_unique<Project>();
     auto patterns = std::make_unique<PatternBank>();
@@ -1068,6 +1071,7 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
                 unsigned grid = r.u8();
                 punch.snap = uint8_t(grid & 3); punch.tail = uint8_t(std::min(2u, (grid >> 4) & 3));
                 if (r.ok && pattern.punches.size() < max_pattern_punches) pattern.punches.push_back(punch);
+                if (r.ok && !(grid & 128)) played_on[t].set(p); // from before they ended with their pattern
             }
         } else if (name == "EUCL") { // Euclidean rhythms laid on kit lanes (roadmap P1); their notes are in EVNT either way
             unsigned t = r.u8(), p = r.u8();
@@ -1490,6 +1494,8 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
         m.tick = sixteenth * sixteenth_ticks; m.param = e.param; m.pad = e.pad; m.value = e.value;
         pattern.write_motion(m);
     }
+    for (unsigned t = 0; t < track_count; ++t) // kept punches from before they ended with their pattern, as they were heard
+        for (unsigned p = 0; p < pattern_count; ++p) if (played_on[t].test(p)) split_punches(patterns->at[t][p]);
     // From before keygroup tracks: each kit's instrument pad its own keygroup track (model/keygroup_track.h).
     if (!keygroups_known) migrate_instrument_pads(*project, *patterns);
     for (unsigned t = 0; t < track_count; ++t) // freeze plan F3: takes only on audio tracks' patterns

@@ -760,12 +760,14 @@ private:
     uint32_t song_punch_until = 0; // the tick a song punch lets go
     void play_song_punches();      // on each sixteenth of the song: punches written there
     // pad-fx C (round 2): punches kept with patterns, four at once, each in series on its target before the live
-    // ones and let go after its length (`due` until then). A live punch wins: while one sounds the kept ones are
-    // quiet, and they come back for the rest of their length when it lets go.
+    // ones and let go after its length (`due` until then), at the end of its track's loop at the latest. A live
+    // punch wins: while one sounds the kept ones are quiet, and they come back for the rest of their length when it
+    // lets go. `track`: whose pattern it came from; when that pattern is edited, changed for another or stops, the
+    // punch goes with it.
     struct Kept {
         explicit Kept(bool history = true) : punch(history) {}
         Punch punch;
-        uint8_t target = 255;
+        uint8_t target = 255, track = 255;
         uint32_t until = 0;
         bool on = false, due = false;
         PunchKind kind {};
@@ -773,8 +775,15 @@ private:
         unsigned snap = 2, tail = 1;
     };
     std::array<Kept, live_slots> kept;
-    void play_pattern_punches(const Pattern& pattern, uint32_t at); // a track's pattern at `at`: punches kept there
+    // Track t's pattern at `at`, in a loop ending at `end`: punches kept there.
+    void play_pattern_punches(unsigned t, const Pattern& pattern, uint32_t at, uint32_t end);
     void sound_kept(Kept& k);                                       // a kept punch heard (again)
+    void fit_kept(unsigned t);                                      // track t's pattern or loop changed under its punches
+    void drop_kept(unsigned t);                                     // track t left its pattern: its punches end on this tick
+    static bool same_punch(const Kept& k, const PatternPunch& e) {
+        return k.kind == PunchKind(e.kind % punch_count) && k.target == e.target && k.depth == e.depth / 100.0f && k.snap == (e.snap & 3u) &&
+               k.tail == e.tail % 3u;
+    }
     bool hand_punch() const;                                        // a live punch sounds
     void start_punch(const PendingPunch& p);
     double bar_length() const { return tick_length() * bar; }

@@ -157,6 +157,8 @@ struct Feel {
 // pad-fx C (round 2): a punch kept in a pattern, looping with it like Motion: from `tick` (of the pattern) for
 // `length` ticks, punch `kind` (engine/punch.h) on `target` (255 the master, else a track) at `depth` percent, on the
 // grid it was played with (`snap`, engine/punch.h punch_snaps) and letting go as it did (`tail`, punch_tails).
+// It ends with its pattern: one held across the loop point is kept in two parts (lay_punch), and the engine never
+// sounds one past the end of the loop playing, however the pattern was shortened since.
 struct PatternPunch {
     uint32_t tick = 0, length = sixteenth_ticks;
     uint8_t kind = 0, target = 255, depth = 100, snap = 2, tail = 1;
@@ -168,9 +170,21 @@ constexpr unsigned max_pattern_punches = 32;
 // A punch as it was heard, in the sequencer's ticks since Play (`until` 0: still sounding); `felt`: its pad's
 // pressure has set its depth (the deepest is kept).
 struct PunchSpan { uint64_t from = 0, until = 0; uint8_t kind = 0, target = 255, depth = 100, snap = 2, tail = 1; bool felt = false; };
+// A punch laid in a pattern `length` ticks long: one reaching past the end in two parts, up to the end and the rest
+// from the start (the engine carries on from the one into the other), never round to where it began.
+inline void lay_punch(std::vector<PatternPunch>& out, PatternPunch p, uint32_t length) {
+    if (p.tick >= length) return;
+    uint32_t room = length - p.tick, rest = p.length > room ? std::min(p.length - room, p.tick) : 0;
+    p.length = std::min(p.length, room);
+    out.push_back(p);
+    if (!rest || out.size() >= max_pattern_punches) return;
+    p.tick = 0; p.length = rest;
+    out.push_back(p);
+}
 // The take (what B3 KEEP keeps, and the page draws): the spans heard up to one pass (`length` ticks) back from where
 // the latest let go (now, while one still sounds), however long ago, as punches of the pattern playing `position`
-// ticks into its loop at `now`, so they fall where they were heard; at most max_pattern_punches, oldest first.
+// ticks into its loop at `now`, so they fall where they were heard (one across the loop point in two parts); at
+// most max_pattern_punches, oldest first.
 inline std::vector<PatternPunch> heard_punches(const PunchSpan* spans, unsigned count, uint64_t now, uint32_t position, uint32_t length) {
     std::vector<PatternPunch> out;
     if (!length || !count) return out;
@@ -186,7 +200,7 @@ inline std::vector<PatternPunch> heard_punches(const PunchSpan* spans, unsigned 
         p.tick = uint32_t(at);
         p.length = uint32_t(std::clamp<uint64_t>(until - from, 1, length));
         p.kind = spans[n].kind; p.target = spans[n].target; p.depth = spans[n].depth; p.snap = spans[n].snap; p.tail = spans[n].tail;
-        out.push_back(p);
+        lay_punch(out, p, length);
     }
     return out;
 }
@@ -230,7 +244,7 @@ struct Pattern {
     void set_step(unsigned s, const Step& value);
     // Keeps the events in order after they were moved in place.
     void sort();
-    // Drops every note (and Motion point) from `tick` on.
+    // Drops every note (and Motion point, and kept punch) from `tick` on; a kept punch reaching past it ends there.
     void cut(uint32_t tick);
 
     // Motion (roadmap P1). The first point at or after `tick`.
@@ -301,6 +315,9 @@ StepEvents step_events(const Pattern& pattern, unsigned step);
 bool double_pattern(Pattern& p, uint32_t max_length, bool copy = true); // Double Seq: twice as long, the notes twice (or the new half empty); false past max_length
 void half_pattern(Pattern& p);                        // Half Seq: the first half
 void scale_pattern(Pattern& p, bool slower);          // Half / Double Speed: every note twice as far apart, or half; the length stays
+// A file from before kept punches ended with their pattern: one reaching past the end was played on from the start.
+// Each as it was heard, in two parts (lay_punch); one longer than its pattern (left by Half Seq then) ends with it.
+void split_punches(Pattern& p);
 // The tick a recorded note lands on with Rec Quantize: the nearest step of
 // Q; past the last step, the first (next time round).
 uint32_t quantise_tick(const Pattern& p, uint32_t tick);
