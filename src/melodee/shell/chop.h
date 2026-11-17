@@ -4,6 +4,7 @@
 #include "melodee/engine/onsets.h"
 #include "melodee/engine/sample_data.h"
 #include "melodee/model/chop_slices.h"
+#include "melodee/model/pattern.h"
 #include "melodee/model/sampler.h"
 #include <algorithm>
 #include <array>
@@ -240,6 +241,43 @@ template <class Pads> inline uint8_t slice_group(const PadSound& parent, const P
     for (const auto& p : pads) if (p.used() && p.group) taken |= 1u << (p.group % 32);
     for (uint8_t g = 1; g <= 16; ++g) if (!(taken & (1u << g))) return g;
     return 16;
+}
+
+// TO PADS' pattern, as Live's Slice to New MIDI Track: a note for each slice where it falls in the region, so Play
+// gives the loop back as the slices' pads play it. Ticks a frame of the region at the pad's speed: Warp's Seq or
+// Follow plays it at the region's own tempo (by # Beats, else own_tempo) whatever the project's, 50..200 % that much
+// longer at the project's tempo, else as it was recorded at the project's tempo.
+inline double slice_ticks_per_frame(const PadSound& pad, bool follow, uint32_t region_frames, unsigned tempo_tenths) {
+    constexpr double per_second = ticks_per_quarter / 60.0, rate = 44100; // ticks a second at 1 BPM; frames a second
+    double own = 0; // the region's own tempo where the pad follows the project's
+    if (pad.warp == warp_seq) own = pad.beats && region_frames ? pad.beats * 60.0 * rate / region_frames : pad.own_tempo / 10.0;
+    else if (pad.warp < warp_min && follow) own = pad.own_tempo / 10.0;
+    if (own > 0) return own * per_second / rate;
+    const double longer = pad.warp >= warp_min ? pad.warp / 100.0 : 1.0;
+    return longer * (std::max(tempo_tenths, 10u) / 10.0) * per_second / rate;
+}
+// The pattern: slice n's note on `keys[n]` (-1 none) at velocity 127, as long as the slice; the length the region
+// at the nearest whole bar when within an eighth of one, else the bars that hold it all, at most `most` ticks.
+inline Pattern slice_pattern(const Slices& s, uint32_t frames, const std::array<int, max_slices>& keys, double ticks_per_frame,
+                             unsigned bar_ticks, uint32_t most) {
+    Pattern p;
+    if (!s.count || !bar_ticks) return p;
+    const uint32_t from = s.start[0], to = s.end(s.count - 1, frames);
+    const double bars = (to - from) * ticks_per_frame / bar_ticks;
+    double whole = std::round(bars);
+    if (whole < 1 || std::fabs(bars - whole) > 0.125) whole = std::ceil(bars);
+    p.length = uint32_t(std::min<double>(std::max(1.0, whole) * bar_ticks, most));
+    for (unsigned n = 0; n < s.count; ++n) {
+        if (keys[n] < 0 || keys[n] > 255) continue; // a kit's keys run 36 .. 163
+        const uint32_t tick = uint32_t(std::lround((s.start[n] - from) * ticks_per_frame));
+        if (tick >= p.length) break;
+        Event e;
+        e.tick = tick;
+        e.length = uint16_t(std::clamp<long>(std::lround((s.end(n, frames) - s.start[n]) * ticks_per_frame), 1, 0xffff));
+        e.key = uint8_t(keys[n]); e.velocity = 127;
+        p.add(e);
+    }
+    return p;
 }
 
 // The whole sample, as before parity phase 5.
