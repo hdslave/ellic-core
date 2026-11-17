@@ -214,9 +214,9 @@ inline Slices with_hand(const Slices& cut, const HandCuts& hand, uint32_t frames
     return s;
 }
 
-// Hold to fix: a slice's pad held this long fixes its cut. The wheel moves the cut while the first fix_attack of the
-// slice repeats every fix_period_ms (at once after each move), the view about fix_view wide round it.
-constexpr uint32_t fix_hold_ms = 400, fix_period_ms = 400;
+// Hold to fix: a slice's pad held this long fixes its cut. What plays stops; the wheel moves the cut, and once it has
+// been still for fix_settle_ms the slice's first fix_attack plays once (nothing repeats); the view about fix_view wide.
+constexpr uint32_t fix_hold_ms = 400, fix_settle_ms = 150;
 constexpr uint32_t fix_attack = 11025, fix_view = 5292; // 250 ms and 120 ms, as the project counts frames (44.1 kHz)
 
 // TO PADS' playback, as Simpler's Playback: POLY the slices overlap (as before), MONO they share a mute group so one
