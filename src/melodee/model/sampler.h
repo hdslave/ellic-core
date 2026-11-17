@@ -233,6 +233,9 @@ inline bool set_trim(ZoneTrims& trims, unsigned pad, unsigned zone, unsigned slo
 }
 inline void clear_trims(ZoneTrims& trims, unsigned pad) { for (auto& t : trims) if (t.used() && t.pad == pad) t = ZoneTrim {}; }
 
+// SampleRef::root when no note is known: not looked for yet (its file still being read), or none (below).
+constexpr int8_t root_unread = -1, root_none = -2;
+
 struct SampleRef {
     char path[256] {};  // on the card; empty: free (255 characters: what a project file's text holds)
     char name[28] {};
@@ -243,6 +246,10 @@ struct SampleRef {
     std::array<uint64_t, 2> keys {};
     bool one_key_zones = false; // every zone a press plays on one key of its own, two keys or more: a drum or percussion layout
     bool streamed = false;      // a long sample read from the card as it plays, once loaded (shell/stream_holds.h); not kept in the file
+    // The note its sound holds (engine/root_find.h), found once when its file is first read into the slot and kept in
+    // the project: a pitch class, 0 C .. 11 B. root_none: no single note (a drum, a phrase, a chord, an instrument),
+    // and every sample of a project saved before, which plays as a C as it did; root_unread until its file is read.
+    int8_t root = root_unread;
     bool used() const { return path[0] != 0; }
     // A multisampled instrument, by what it is called: an .sfz, an MPC keygroup
     // program (.xpm, the MPC 3's .xty), a Logic EXS24 instrument (.exs), one

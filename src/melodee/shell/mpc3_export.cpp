@@ -13,6 +13,7 @@
 // of key zones, and a WAV pad its patterns play at other pitches (16 Levels,
 // Keys), become a Keygroup track of their own, the pad's notes going with them.
 #include "melodee/shell/mpc3_export.h"
+#include "melodee/model/scales.h"
 #include "melodee/engine/dsp.h"
 #include "melodee/engine/engine_info.h"
 #include "melodee/engine/keygroup.h"
@@ -742,6 +743,8 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
                 Keygroup all; // played at other pitches: one keygroup over every key, its own pitch at 60
                 all.one_shot = pad.play == PadPlay::OneShot;
                 all.layers = std::move(layers);
+                if (keyed) for (auto& layer : all.layers) layer.root = keyed_root(project, track); // a KEYGROUP track: its note
+
                 plan.keys.push_back(std::move(all));
                 continue;
             }

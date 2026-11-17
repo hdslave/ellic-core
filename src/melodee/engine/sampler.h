@@ -93,8 +93,16 @@ public:
     void release_layers() { held_layer.fill(-1); }
 
     // A KEYGROUP track's sampler (model/project.h): note k plays pad 1 at k - 60 semitones from its root, as a kit's
-    // instrument pad plays key 60 + its pitch + those (zones_on()); a kit's notes are pads (pad_note()).
+    // instrument pad plays key 60 + its pitch + those (zones_on()); a kit's notes are pads (pad_note()). A single
+    // sample with a note of its own plays from that note instead: k - set_keyed_root()'s key (model/scales.h keyed_root()).
     void set_keyed(bool on) { keyed = on; }
+    // A change lets go of what is held: its note offs would no longer find it.
+    void set_keyed_root(int key) {
+        key = std::clamp(key, 0, 127);
+        if (key == keyed_root) return;
+        if (keyed) all_notes_off();
+        keyed_root = key;
+    }
     bool is_keyed() const { return keyed; }
     void note_on(int key, int velocity) override;
     void set_accent(float gain) override { accent = gain; }
@@ -347,6 +355,8 @@ private:
     float bend = 0;   // semitones, set_bend
     bool pedal = false;
     bool keyed = false; // set_keyed()
+    int keyed_root = 60; // set_keyed_root()
+    int keyed_note(int key) const;
     void release_key(int key); // note_off() in the kit's encoding
     std::array<int32_t, max_voices> pedal_offs {}; // the note offs the sustain pedal holds back, in order
     unsigned pedal_count = 0;

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #include "melodee/engine/onsets.h"
+#include "melodee/engine/fft.h"
 #include <algorithm>
 #include <cmath>
 #include <complex>
@@ -17,54 +18,6 @@
 // the attack, in 1 ms steps, so the slice holds the whole attack; Zero Snap
 // (shell/chop.h) puts it on a crossing after that.
 namespace melodee {
-namespace {
-
-using Complex = std::complex<float>;
-constexpr unsigned fft_size = 2048, hop = 441; // 46 ms windows, 100 frames a second (at 44.1 kHz)
-constexpr unsigned fine = 44;                  // the attack search's steps: 1 ms
-constexpr unsigned spacing = 3;                // frames: hits at least 30 ms apart
-constexpr float delta = 1.0f;                  // how far a peak stands above the average around it
-
-// In-place radix-2 FFT of a.size() (a power of two) points; twiddle[k] = e^(-2πik/n), k < n/2.
-void fft(std::vector<Complex>& a, const std::vector<Complex>& twiddle) {
-    const size_t n = a.size();
-    for (size_t i = 1, j = 0; i < n; ++i) {
-        size_t bit = n >> 1;
-        for (; j & bit; bit >>= 1) j ^= bit;
-        j ^= bit;
-        if (i < j) std::swap(a[i], a[j]);
-    }
-    for (size_t len = 2; len <= n; len <<= 1) {
-        const size_t half = len / 2, step = n / len;
-        for (size_t i = 0; i < n; i += len)
-            for (size_t k = 0; k < half; ++k) {
-                Complex u = a[i + k], v = a[i + k + half] * twiddle[k * step];
-                a[i + k] = u + v;
-                a[i + k + half] = u - v;
-            }
-    }
-}
-
-// Semitone bands from 30 Hz to 16 kHz as triangles over the FFT's bins; low
-// bands that would share a bin merge, so each band has a bin of its own.
-struct Band { unsigned from, peak, to; };
-std::vector<Band> make_bands() {
-    std::vector<unsigned> centres;
-    for (double f = 30; f <= 16000; f *= std::pow(2.0, 1.0 / 12)) {
-        unsigned bin = unsigned(std::lround(f * fft_size / 44100));
-        if (centres.empty() || bin > centres.back()) centres.push_back(bin);
-    }
-    std::vector<Band> bands;
-    for (size_t n = 1; n + 1 < centres.size(); ++n) bands.push_back({centres[n - 1], centres[n], centres[n + 1]});
-    return bands;
-}
-
-float band_sum(const std::vector<float>& magnitude, const Band& b) {
-    float sum = 0;
-    for (unsigned k = b.from; k < b.to; ++k)
-        sum += magnitude[k] * (k < b.peak ? float(k - b.from) / float(b.peak - b.from) : float(b.to - k) / float(b.to - b.peak));
-    return sum;
-}
 
 // The sample's two sides summed, at 44.1 kHz: the frames the project counts, which the hits are found in. Its own
 // frames when it is at that rate, else read between them (straight lines are enough to find hits by).
@@ -85,6 +38,35 @@ std::vector<float> model_mono(const SampleData& s) {
         mono[n] = (s.left[i] + s.right[i]) * (1.0f - t) + (s.left[i + 1] + s.right[i + 1]) * t;
     }
     return mono;
+}
+
+namespace {
+
+using Complex = std::complex<float>;
+constexpr unsigned fft_size = 2048, hop = 441; // 46 ms windows, 100 frames a second (at 44.1 kHz)
+constexpr unsigned fine = 44;                  // the attack search's steps: 1 ms
+constexpr unsigned spacing = 3;                // frames: hits at least 30 ms apart
+constexpr float delta = 1.0f;                  // how far a peak stands above the average around it
+
+// Semitone bands from 30 Hz to 16 kHz as triangles over the FFT's bins; low
+// bands that would share a bin merge, so each band has a bin of its own.
+struct Band { unsigned from, peak, to; };
+std::vector<Band> make_bands() {
+    std::vector<unsigned> centres;
+    for (double f = 30; f <= 16000; f *= std::pow(2.0, 1.0 / 12)) {
+        unsigned bin = unsigned(std::lround(f * fft_size / 44100));
+        if (centres.empty() || bin > centres.back()) centres.push_back(bin);
+    }
+    std::vector<Band> bands;
+    for (size_t n = 1; n + 1 < centres.size(); ++n) bands.push_back({centres[n - 1], centres[n], centres[n + 1]});
+    return bands;
+}
+
+float band_sum(const std::vector<float>& magnitude, const Band& b) {
+    float sum = 0;
+    for (unsigned k = b.from; k < b.to; ++k)
+        sum += magnitude[k] * (k < b.peak ? float(k - b.from) / float(b.peak - b.from) : float(b.to - k) / float(b.to - b.peak));
+    return sum;
 }
 
 // The hits in time order, every one found (the first frame 0), and the flux they were found in, from the sample's

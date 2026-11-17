@@ -547,7 +547,7 @@ void SamplerEngine::porta_from(Voice& v, int from_key, float seconds) {
 void SamplerEngine::slide(int from, int to, int velocity, bool glide) {
     if (from == to) return;
     if (keyed) {
-        const int pad = 0, semis = std::clamp(to & 0xff, 0, 127) - 60, was = std::clamp(from & 0xff, 0, 127) - 60;
+        const int pad = 0, semis = std::clamp(to & 0xff, 0, 127) - keyed_root, was = std::clamp(from & 0xff, 0, 127) - keyed_root;
         const Multisample* multi = multi_of(pads[0]);
         bool held = false;
         for (const auto& v : voices) held |= v.zone && v.pad == pad && v.held && !v.choked && v.semis == was;
@@ -650,8 +650,9 @@ void SamplerEngine::hit(int pad, int velocity, int semitones, int cutoff) {
 
 // A note is a pad's key, and over it the semitones from the pad's root it plays at (an instrument's), and over those a
 // 16 Levels cutoff a pattern kept (roadmap P3: model/sampler.h pad_note).
-// A keyed sampler's note as the kit's encoding: pad 1 at the note's semitones from 60, any cutoff above dropped.
-static int keyed_note(int key) { return pad_note(int(sampler_first_note), std::clamp(key & 0xff, 0, 127) - 60); }
+// A keyed sampler's note as the kit's encoding: pad 1 at the note's semitones from its root (60, or a single
+// sample's note), any cutoff above dropped.
+int SamplerEngine::keyed_note(int key) const { return pad_note(int(sampler_first_note), std::clamp(key & 0xff, 0, 127) - keyed_root); }
 
 void SamplerEngine::note_on(int key, int velocity) {
     if (keyed) key = keyed_note(key);

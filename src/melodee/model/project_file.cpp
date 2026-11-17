@@ -759,6 +759,7 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
         if (n < legacy_sample_slots) { at = w.begin("SMPL"); w.u8(n); }
         else { at = w.begin("SMPX"); w.u16(n); }
         w.text(s.path); w.text(s.name);
+        w.u8(uint8_t(s.root)); // its note, after what older builds read
         w.end(at);
     }
     if (prints)
@@ -1460,6 +1461,9 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
             auto& ref = project->samples.edit(n);
             r.text(ref.path, sizeof(ref.path));
             r.text(ref.name, sizeof(ref.name));
+            // Its note; a file from before has none, and its samples play as the C they always did.
+            const int root = r.done() ? root_none : int(int8_t(r.u8()));
+            ref.root = int8_t(root >= 0 && root < 12 ? root : root == root_unread ? root_unread : root_none);
         }
         if (!r.ok) return "damaged section " + name;
     }

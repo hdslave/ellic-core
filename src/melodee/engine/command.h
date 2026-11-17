@@ -146,7 +146,10 @@ struct Command {
         // pass of the track's pattern from where the pattern next comes round), -1 lets one armed go, -2 ends it here.
         AudioRecord,
         // Freeze plan F3: audio track `track`'s takes heard (value 0) or not (1: its monitor hears the input instead).
-        AudioQuiet
+        AudioQuiet,
+        // A KEYGROUP track: value = the key that plays its pad 1 at the file's own pitch (model/scales.h keyed_root():
+        // a single sample's note nearest 60, else 60).
+        KeyedRoot
 
     };
     Command() = default;

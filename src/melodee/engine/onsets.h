@@ -22,5 +22,7 @@ unsigned find_hits(const SampleData& sample, std::array<Hit, max_hits>& out, Bea
 // The same from the sample's sides summed at 44.1 kHz (one value a frame as the project counts them), for a sample
 // not in memory (a long WAV read a piece at a time).
 unsigned find_hits_in(const std::vector<float>& model_mono, std::array<Hit, max_hits>& out, BeatGrid& beats);
+// The sample's sides summed at 44.1 kHz, as the hits (and its note, engine/root_find.h) are found in.
+std::vector<float> model_mono(const SampleData& sample);
 
 } // namespace melodee

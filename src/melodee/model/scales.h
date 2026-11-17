@@ -189,10 +189,30 @@ inline unsigned levels_types(const Track& track, std::array<LevelsKind, 5>& out)
 inline int level_between(int low, int high, unsigned pad) {
     return low + int(std::lround(double(high - low) * double(pad % 16) / 15.0));
 }
-// A kit's sample counts as a C: the semitones to the track's key root (the project's moved by its transpose), the
-// nearest way (−5 .. +6).
+// A sample's note (SampleRef::root) as the semitones from C to it, the nearest way (−5 .. +6): a kit pad playing it
+// in 16 Levels Scale and Chords, and a KEYGROUP track of that one file, count it as that note instead of a C. 0 (a C)
+// when it has none, is not read yet, or is an instrument (its zones have their own).
+inline int root_shift(const Project& project, unsigned slot) {
+    if (slot >= sample_slots) return 0;
+    const auto& ref = project.samples[slot];
+    if (!ref.used() || ref.root < 0 || ref.instrument()) return 0;
+    return ref.root > 6 ? ref.root - 12 : ref.root;
+}
+// The key a KEYGROUP track plays its pad 1 at that pad's own pitch: 60, or a single sample's note nearest it
+// (EngineHost: SamplerEngine::set_keyed_root()).
+inline int keyed_root(const Project& project, const Track& track) {
+    const auto& pad = track.pads[0];
+    return 60 + (track.engine == EngineKind::Keygroup && pad.used() ? root_shift(project, pad.sample) : 0);
+}
+// That of the kit pad on 16 Levels.
+inline int levels_root_shift(const Project& project, const Track& track) {
+    const auto& pad = track.pads[track.levels_pad % sampler_pads];
+    return pad.used() ? root_shift(project, pad.sample) : 0;
+}
+// A kit's sample counts as its note (levels_root_shift(); a C without one): the semitones from it to the track's key
+// root (the project's moved by its transpose), the nearest way (−5 .. +6).
 inline int kit_root_shift(const Project& project, const Track& track) {
-    int root = ((int(project.root) + track.transpose) % 12 + 12) % 12;
+    int root = ((int(project.root) + track.transpose - levels_root_shift(project, track)) % 12 + 12) % 12;
     return root > 6 ? root - 12 : root;
 }
 // A kit's 16 Levels octave (the track's, level_octave() below): 2 as it is.
@@ -254,8 +274,9 @@ inline unsigned levels_types(const Project& project, const Track& track, std::ar
 inline unsigned levels_chord(const Track& track, unsigned pad, std::array<int, notes_per_step>& out) {
     return prog_keys(track, track.engine == EngineKind::Sampler ? pad % 16 : prog_index(track, pad), out);
 }
-// A kit's chord note as the semitones its pad's sample moves: the sample counts as middle C (60), as Zones has it.
-inline int levels_chord_semitones(int key) { return std::clamp(key - 60, -64, 63); }
+// A kit's chord note as the semitones its pad's sample moves: the sample counts as middle C (60), as Zones has it,
+// moved to its own note the nearest way (`root`, levels_root_shift()).
+inline int levels_chord_semitones(int key, int root = 0) { return std::clamp(key - 60 - root, -64, 63); }
 // A kit pad's 16 Levels in pitch (Scale, Tune) an octave a step of the track's
 // octave, 2 as it is (− / + step it there); a synth's pads keep their own.
 inline int level_octave(const Track& track) { return track.engine == EngineKind::Sampler ? 12 * (track.octave - kit_level_octave) : 0; }
@@ -286,7 +307,7 @@ inline Level levels_of(const Project& project, const Track& track, unsigned pad)
     case LevelsKind::Chords: { // the chord's lowest note here; the rest with it (levels_chord())
         std::array<int, notes_per_step> keys {};
         if (!levels_chord(track, pad, keys)) { out.none = true; out.shown = -1; break; }
-        if (track.engine == EngineKind::Sampler) out.semitones = levels_chord_semitones(keys[0]);
+        if (track.engine == EngineKind::Sampler) out.semitones = levels_chord_semitones(keys[0], levels_root_shift(project, track));
         else out.key = keys[0];
         out.shown = keys[0];
         break;

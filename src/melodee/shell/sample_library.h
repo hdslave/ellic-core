@@ -70,6 +70,7 @@ struct LoadedSample {
     std::array<Hit, max_hits> hits {};
     unsigned hit_count = 0;
     BeatGrid beats;          // its own tempo and beats, for Chop's Beats type
+    int8_t root = root_unread; // its note (SampleRef::root): a pitch class or root_none; root_unread until it is found
     bool ready = false;
     // A multisampled instrument: no frames of its own, so nothing to trim or chop.
     bool instrument = false;
@@ -111,7 +112,8 @@ public:
     ~SampleLibrary();
 
     // MIDI thread: ask for `path` in project slot `slot`; ask for a fresh list.
-    bool load(unsigned slot, const std::string& path);
+    // `find_note`: look for its note (LoadedSample::root) too; a slot that keeps one already does not.
+    bool load(unsigned slot, const std::string& path, bool find_note = true);
     // MIDI thread: slots asked for by load() not yet read and offered to the audio thread, and instruments still
     // landing (a project's loading).
     unsigned loads_waiting() const {
@@ -232,6 +234,8 @@ public:
     // instrument's, its zones.
     struct Measure { uint32_t frames = 0; bool streamed = false; std::vector<ZoneShape> shapes; };
     Measure measure(unsigned n) const;
+    // Slot n's note (LoadedSample::root) once the file at `path` is read there, else root_unread.
+    int8_t root_of(unsigned n, const char* path) const;
     // MIDI thread: where the pads on slot `n`'s long sample start, end and loop (44.1 kHz frames), for its chunks
     // there to be held, so a hit sounds at once (shell/stream_holds.h). Those before are let go. Kept for the slot
     // across reloads (SD card access) until asked again.
@@ -270,7 +274,7 @@ public:
     static std::vector<std::string> internal_tops();
 
 private:
-    struct Request { uint16_t slot = 0; char path[sizeof(SampleRef::path)] {}; };
+    struct Request { uint16_t slot = 0; char path[sizeof(SampleRef::path)] {}; bool find_note = true; };
     void scan();
     void make(const SampleJob& job);
     void hear(const std::string& path);
@@ -330,11 +334,12 @@ private:
         std::array<Hit, max_hits> hits {};
         unsigned hit_count = 0;
         BeatGrid beats;
+        int8_t root = root_none;
         std::vector<float> peaks; // Shown::peaks
     };
     std::vector<ShapeRead> shapes_read; // under loaded_lock
     void make_streamed(const SampleJob& job, const SampleData& source); // Save Sample, Trim, Extract on a long sample
-    void stream_shape(const std::string& path, ShapeRead& out); // a pool thread
+    void stream_shape(const std::string& path, ShapeRead& out, bool find_note); // a pool thread
     // A pool thread: a long MP3, FLAC, Ogg or AIFF as a PCM WAV in the card's cache, to be read from the card as it
     // plays; "" where it is read into memory instead, or (`error`) not at all.
     std::string card_copy(const std::string& path, const SampleCache& copies, std::string& error, bool& refused);

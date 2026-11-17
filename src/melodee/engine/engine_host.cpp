@@ -5,6 +5,7 @@
 #include "melodee/engine/dsp.h"
 #include "melodee/engine/engine_info.h"
 #include "melodee/model/lane_value.h"
+#include "melodee/model/scales.h"
 #include <algorithm>
 #include <cmath>
 #if defined(__linux__)
@@ -187,6 +188,7 @@ void EngineHost::load_state(const Project& project, bool keep_loops) {
     seq_tempo = project.seq_tempo; pattern_tempo = project.pattern_tempo;
     bar = project.bar_ticks(); beat = project.beat_ticks();
     for (unsigned t = 0; t < track_count; ++t) load_track(t, project.tracks[t]);
+    for (unsigned t = 0; t < track_count; ++t) slots[t].sampler.set_keyed_root(keyed_root(project, project.tracks[t]));
     for (unsigned l = 0; l < loop_tracks; ++l) { // the Looper's tracks
         const auto& m = project.loop_mix[l];
         uint8_t t = uint8_t(track_count + l);
@@ -549,6 +551,7 @@ void EngineHost::apply(const Command& c) {
     case Type::ZoneTrim: // round 3 "instrument C"
         slot.sampler.set_trim(c.index, c.position, c.micros, int(c.pattern) - 128, c.value);
         break;
+    case Type::KeyedRoot: slot.sampler.set_keyed_root(c.value); break;
     case Type::PadMute:
         if (c.index == 0xffff) for (unsigned pad = 0; pad < sampler_pads; ++pad) slot.sampler.set_pad_mute(pad, c.value != 0);
         else slot.sampler.set_pad_mute(c.index, c.value != 0);
