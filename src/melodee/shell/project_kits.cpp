@@ -6,13 +6,12 @@
 #include <cstdio>
 
 namespace melodee {
-// A new project: one empty kit on track 1, every note in reach.
+// A new project: no tracks (the track types open on track 1), every note in reach.
 void starting_project(Project& project, PatternBank& patterns) {
     project = Project {};
     std::snprintf(project.name, sizeof(project.name), "Untitled");
     project.tempo = 1200;
     project.root = 0; project.scale = chromatic_scale; // C Chromatic
-    load_sound(project.tracks[0], EngineKind::Sampler, 0); // Sample Select fills its pads
     patterns = PatternBank {};
 }
 

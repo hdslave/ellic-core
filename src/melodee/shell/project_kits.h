@@ -11,7 +11,7 @@
 // no patterns; a bank file takes one bank of it. Pure.
 namespace melodee {
 
-// The project Melodee starts with: one empty kit on track 1, C Chromatic.
+// The project Melodee starts with: every track empty, C Chromatic.
 void starting_project(Project& project, PatternBank& patterns);
 
 // Load Kit: the track of `from` whose kit is taken (the first kit with a sample on a pad), -1 none.
