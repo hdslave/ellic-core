@@ -959,6 +959,7 @@ void EngineHost::apply(const Command& c) {
         drop_punches(); // the song's, and the patterns' (pad-fx C)
         song_mode = false;
         in_song.store(false, std::memory_order_relaxed);
+        if (scene_tempo) { global_tempo = scene_tempo; scene_tempo = 0; } // roadmap P5: a scene's, still waiting for its bar: with its patterns, below
         follow_lane(); // roadmap P5: the project's tempo again
         for (unsigned t = 0; t < track_count; ++t) {
             positions_now[t].store(-1, std::memory_order_relaxed);
