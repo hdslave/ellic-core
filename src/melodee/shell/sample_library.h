@@ -28,7 +28,7 @@ struct Hardware;
 class Platform;
 
 // The samples on the drives and the ones loaded, run on the service thread:
-// it finds the card's Samples folder (or $MELODEE_SAMPLES on a host), lists
+// it finds the card's Samples folder, Melodee/Samples (or $MELODEE_SAMPLES on a host), lists
 // the folder the browser is in, reads the files asked for, works out their
 // waveform and hits, hands the audio to the engine host, and writes the
 // files Melodee makes (Save Sample, Trim Sample, Extract, takes). The MIDI
@@ -221,7 +221,7 @@ public:
     // Any thread but audio: a copy of what is known of the browser. The loaded samples are read a slot at a time
     // (slot(), measure()): each is several kilobytes with its waveform and hits.
     struct View {
-        std::string root;  // the card's Samples folder, where Melodee writes; empty: no card
+        std::string root;  // the card's Samples folder (Melodee/Samples), where Melodee writes; empty: no card
         Drive drive = Drive::Card;
         std::string folder; // the folder listed; empty: the internal drive's top
         bool top = true;    // nothing above it to go back to

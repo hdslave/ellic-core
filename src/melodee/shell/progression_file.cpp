@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #include "melodee/shell/progression_file.h"
+#include "melodee/model/card_folders.h"
 #include "melodee/model/chords.h"
 #include "melodee/model/scales.h"
 #include <juce_core/juce_core.h>
@@ -129,7 +130,8 @@ std::vector<std::string> list_progressions(const std::string& card, size_t limit
     if (card.empty()) return out;
     collect(own_progression_folder(card), 0, out, limit);
     collect(fs::path(card) / "Progressions", 2, out, limit);
-    collect(fs::path(card) / "Samples" / "Expansions", 4, out, limit);
+    collect(fs::path(samples_folder(card)) / "Expansions", 4, out, limit);
+    collect(fs::path(old_samples_folder(card)) / "Expansions", 4, out, limit); // where older builds installed them
     return out;
 }
 
