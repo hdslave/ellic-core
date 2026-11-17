@@ -81,6 +81,13 @@ void Pattern::cut(uint32_t tick) {
     for (auto& e : punches) e.length = std::min(e.length, tick - e.tick); // one reaching past it ends there
 }
 
+bool Pattern::clear_notes_and_motion() {
+    if (events.empty() && motion.empty()) return false;
+    events.clear();
+    motion.clear();
+    return true;
+}
+
 namespace {
 bool motion_before(const MotionPoint& a, const MotionPoint& b) {
     return a.tick != b.tick ? a.tick < b.tick : a.param != b.param ? a.param < b.param : a.pad < b.pad;

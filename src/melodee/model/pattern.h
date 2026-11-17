@@ -246,6 +246,9 @@ struct Pattern {
     void sort();
     // Drops every note (and Motion point, and kept punch) from `tick` on; a kept punch reaching past it ends there.
     void cut(uint32_t tick);
+    // Clear pattern: its notes and its Motion go, as the question says (its length, Q, lanes, kept punches and the
+    // rest stay). False when it held neither.
+    bool clear_notes_and_motion();
 
     // Motion (roadmap P1). The first point at or after `tick`.
     size_t motion_lower(uint32_t tick) const {
