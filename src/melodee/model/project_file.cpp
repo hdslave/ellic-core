@@ -860,8 +860,6 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
             c.from = r.u32(); c.to = r.u32();
             c.mode = ChopMode(std::min(r.u8(), unsigned(ChopMode::Count) - 1));
             c.amount = int16_t(r.i16());
-            if (c.mode == ChopMode::Beats) // then beats a slice (1-8), now the division: 1/4, 1/2, 1 bar, 2 bars nearest
-                c.amount = int16_t(c.amount <= 1 ? 2 : c.amount <= 2 ? 3 : c.amount <= 5 ? 4 : 5);
             unsigned count = std::min(r.u8(), max_slices);
             c.slices.count = count;
             uint32_t last = r.u32();
