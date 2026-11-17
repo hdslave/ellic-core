@@ -205,7 +205,8 @@ public:
     StemsProgress stems_progress() const { return separator.progress(); }
     bool take_stems(StemsResult& out);
     // Where the separating program is: the release's folder on the card (autorun/melodee/stems), else the folder
-    // `device.py install-sd` starts the app from (sample-base/stems); or $MELODEE_STEMS_ENGINE. Its model is the
+    // `device.py install-sd` starts the app from (autorun/sample-base/stems, or sample-base/stems at the card's top
+    // for an install from before); or $MELODEE_STEMS_ENGINE. Its model is the
     // file spleeter-4stems.f16 beside it, or $MELODEE_STEMS_MODEL.
     static std::string stems_program(const std::string& card_top);
 
