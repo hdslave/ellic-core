@@ -17,6 +17,15 @@ inline uint32_t wrap_tick(int position, uint32_t length) {
     return uint32_t(at < 0 ? at + int64_t(length) : at);
 }
 
+// The same for a hit on a kit lane of its own length (`loop` ticks, shorter than the pattern's `length`): where the
+// lane was. It loops from where the pattern began, so it is `pass` passes of the pattern and `position` ticks on
+// (below 0: in the pass before), round the lane's loop.
+inline uint32_t lane_tick(int position, uint32_t pass, uint32_t length, uint32_t loop) {
+    if (!loop || loop >= length) return wrap_tick(position, length);
+    int64_t at = (int64_t(pass) * int64_t(length) + int64_t(position)) % int64_t(loop);
+    return uint32_t(at < 0 ? at + int64_t(loop) : at);
+}
+
 // `snapped` (the hit `heard` moved onto its grid) still to come for a playhead at `playhead` (the tick it last played).
 inline bool still_ahead(uint32_t heard, uint32_t snapped, int playhead, uint32_t length) {
     if (!length || playhead < 0) return false;

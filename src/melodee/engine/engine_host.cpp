@@ -1888,14 +1888,21 @@ void EngineHost::arp_tick() {
     ++arp_ticks;
 }
 
-// Seq Record: an arp or Note Repeat note written into the track's pattern at the step it plays.
+// Seq Record: an arp or Note Repeat note written into the track's pattern at the step it plays, counted as tick()
+// counts it: from where the pattern started (a clip's start may lie before tick 0), in an editor's loop, or round
+// its kit lane's own.
 void EngineHost::arp_write(unsigned t, Slot& slot, int key, int velocity, unsigned rate, unsigned gate) {
     const auto& p = *patterns[t][slot.pattern];
-    int64_t len = std::max<uint32_t>(p.length, 1), at = (int64_t(arp_origin) + arp_ticks - int64_t(slot.start)) % len;
+    const int64_t elapsed = int32_t(arp_origin + arp_ticks - slot.start);
+    auto in = [&](uint32_t loop) { int64_t n = elapsed % int64_t(loop); return uint32_t(n < 0 ? n + int64_t(loop) : n); };
+    const uint32_t length = std::max<uint32_t>(p.length, 1), lane = p.lane_length(unsigned(key) & 0xff);
+    uint32_t at = in(length);
+    if (slot.loop_ticks && slot.loop_from < length) at = slot.loop_from + in(std::min(slot.loop_ticks, length - slot.loop_from));
+    if (lane && lane < length) at = in(lane);
     ArpWritten w;
     w.track = uint8_t(t); w.pattern = slot.pattern; w.key = uint16_t(key); w.cutoff = uint8_t(key >> 16); w.velocity = uint8_t(std::clamp(velocity, 1, 127));
     Speed sp = speed_of(speeds_now[t].load(std::memory_order_relaxed)); // its pattern plays scaled: written as it reads
-    w.tick = uint32_t(uint64_t(at < 0 ? at + len : at) * sp.num / sp.den); w.length = uint16_t(std::max(1u, rate * gate * sp.num / sp.den / 100));
+    w.tick = uint32_t(uint64_t(at) * sp.num / sp.den); w.length = uint16_t(std::max(1u, rate * gate * sp.num / sp.den / 100));
     if (!arp_written.push(w)) {}
 }
 

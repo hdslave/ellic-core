@@ -325,7 +325,8 @@ uint32_t quantise_tick(const Pattern& p, uint32_t tick);
 uint32_t quantise_tick(const Pattern& p, uint32_t tick, unsigned grid);
 // Time Correct: notes `chosen` (a bit a key, 0..191) onto the nearest step
 // of Q, every second step of a straight Q late by swing (50..75 %), then
-// moved by shift ticks (wrapping inside the pattern).
+// moved by shift ticks (wrapping inside the pattern, or the note's kit lane
+// of its own length; a note hidden past either's end stays as it is).
 template <class Chosen> void time_correct(Pattern& p, Chosen&& chosen, unsigned swing, int shift);
 void time_correct_all(Pattern& p, const std::array<uint64_t, 3>* keys, unsigned swing, int shift); // keys nullptr: every note
 
@@ -335,14 +336,14 @@ namespace melodee {
 template <class Chosen> void time_correct(Pattern& p, Chosen&& chosen, unsigned swing, int shift) {
     unsigned q = p.q();
     double late = division_triplet(p.division) ? 0 : q * (double(swing) - 50) / 50.0;
-    int64_t length = std::max<uint32_t>(p.length, 1);
     std::vector<Event> moved;
     moved.reserve(p.events.size());
     for (auto e : p.events) {
-        if (e.tick < p.length && chosen(e.key)) {
+        int64_t loop = p.lane_length(e.key); // the loop it plays in: the pattern's, or its kit lane's own
+        if (e.tick < loop && chosen(e.key)) {
             uint32_t step = (e.tick + q / 2) / q;
             int64_t at = int64_t(step) * q + (step % 2 ? int64_t(late + 0.5) : 0) + shift;
-            e.tick = uint32_t(((at % length) + length) % length);
+            e.tick = uint32_t(((at % loop) + loop) % loop);
         }
         moved.push_back(e);
     }

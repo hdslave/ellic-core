@@ -228,7 +228,7 @@ Pattern feel_pattern(const Pattern& p) {
     out.events.clear();
     out.events.reserve(p.events.size());
     for (auto e : p.events) {
-        if (e.tick >= p.length) continue;
+        if (e.tick >= p.lane_length(e.key)) continue; // hidden past the pattern's end, or its kit lane's own
         double t = e.tick;
         if (f.strength) { // toward the nearest step of Q, the second of each pair late by the swing
             double step = std::floor(t / q + 0.5), target = step * q + (std::fmod(step, 2.0) == 1.0 ? late : 0.0);
