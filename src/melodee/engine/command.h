@@ -45,7 +45,7 @@ struct Command {
         Return,      // index = bus, value = 0..100
         Pressure,    // track, index = key, value = 0..127 (poly aftertouch)
         Pad,         // track, index = kit pad, pad
-        Audition,    // track, pad (sample, start, end), value = velocity: a region on no pad; index 1: the one playing ends at pad.end
+        Audition,    // track, pad (sample, start, end), value = velocity: a region on no pad
         PadNote,     // track, index = kit pad, value = velocity, pattern = semitones + 64, position = cutoff + 1 (0: the pad's): 16 Levels
         // track = InputSource, index = sample slot, value = threshold dB (-96: at once), pattern = rec length
         // (0 until stopped, 1..16 bars, 255 Seq: the pattern of track `position`, from where it comes round while playing)

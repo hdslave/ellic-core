@@ -773,18 +773,6 @@ void SamplerEngine::audition(uint16_t sample, uint32_t from, uint32_t to, int ve
     start(free_voice(), sound, int(sampler_pads), velocity);
 }
 
-void SamplerEngine::audition_end(uint32_t end) {
-    for (auto& v : voices) {
-        if (v.pad != int(sampler_pads) || v.choked || v.reverse) continue;
-        const double at = v.scale == 1.0 ? double(end) : std::round(end * v.scale);
-        if (at >= v.end) continue; // it ends there already
-        if (at < v.position + slice_edge * v.scale) { v.choked = true; continue; } // past it, or too close to fade: out now
-        v.end = uint32_t(at);
-        v.loop_hi = v.end;
-        v.edge_out = v.end < v.total; // the slice's end fades as a slice's does
-    }
-}
-
 void SamplerEngine::sample_gone(uint16_t slot) {
     for (auto& v : voices) if (v.slot == slot) { end_stream(v); v = Voice {}; }
     if (samples && slot <= preview_slot)
