@@ -1805,13 +1805,16 @@ void EngineHost::clips_at_bar(bool force) {
         slot.silent = index < 0 || song.clips[size_t(index)].muted;
         if (slot.silent) { slot.clip = -1; positions_now[t].store(-1, std::memory_order_relaxed); continue; }
         const auto& clip = song.clips[size_t(index)];
-        if (force || index != slot.clip || song_bar_now == clip.bar) {
-            // A clip starts (or the loop came back into it): its pattern from where the clip says.
+        // Where the clip's pattern began, the song being on this bar: the same bar after bar while the clip plays on.
+        const uint32_t start = bar_tick - (song_bar_now - clip.bar) * bar;
+        if (force || index != slot.clip || clip.pattern != slot.pattern || start != slot.start) {
+            // A clip starts, the loop came back (to its first bar, or inside it), or the clip was changed while it
+            // played: its pattern from where the clip says.
             slot.clip = index;
             slot.pattern = clip.pattern;
             drop_kept(t); // pad-fx C: the clip before's punches end here
             if (slot.kind == EngineKind::Midi) midi_program(t, frame_now + block_at, false); // roadmap P4
-            slot.start = bar_tick - (song_bar_now - clip.bar) * bar;
+            slot.start = start;
             patterns_now[t].store(slot.pattern, std::memory_order_relaxed);
         }
     }
