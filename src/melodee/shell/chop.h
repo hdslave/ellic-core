@@ -48,6 +48,24 @@ inline uint32_t snap_to_hit(uint32_t frame, const std::array<Hit, max_hits>& hit
     return best < 0 ? frame : hits[size_t(best)].frame;
 }
 
+// The hits Chop shows and SHIFT + the wheel jumps to: those Threshold would cut at with its amount (0..100, its
+// strength out of 255), so what counts as a hit is the one setting.
+inline uint8_t hit_floor(int threshold_amount) { return uint8_t(std::clamp(threshold_amount, 0, 100) * 255 / 100); }
+// The hit after (`way` > 0) or before `frame` at least 10 ms from it, as strong as `floor`; `frame` itself where there
+// is none. 10 ms: a cut pulled onto a zero crossing just before a hit still counts as on it, so the next turn moves on.
+inline uint32_t next_hit(uint32_t frame, int way, const std::array<Hit, max_hits>& hits, unsigned count, uint8_t floor) {
+    constexpr uint32_t clear = 441;
+    uint32_t best = frame;
+    bool found = false;
+    for (unsigned n = 0; n < count && n < max_hits; ++n) {
+        const uint32_t h = hits[n].frame;
+        if (!h || hits[n].strength < floor) continue;
+        if (way > 0 ? h > frame + clear : h + clear < frame)
+            if (!found || (way > 0 ? h < best : h > best)) { best = h; found = true; }
+    }
+    return best;
+}
+
 // Zero Snap (Melodee's, on unless turned off on Chop's B2): a cut pulled onto
 // the nearest place the wave crosses zero, so a slice starts and stops
 // without a click. The two sides are summed (left and right cross at
