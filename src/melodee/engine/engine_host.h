@@ -780,6 +780,7 @@ private:
     void sound_kept(Kept& k);                                       // a kept punch heard (again)
     void fit_kept(unsigned t);                                      // track t's pattern or loop changed under its punches
     void drop_kept(unsigned t);                                     // track t left its pattern: its punches end on this tick
+    void drop_punches();                                            // the transport stops: the song's punch and the kept ones let go
     static bool same_punch(const Kept& k, const PatternPunch& e) {
         return k.kind == PunchKind(e.kind % punch_count) && k.target == e.target && k.depth == e.depth / 100.0f && k.snap == (e.snap & 3u) &&
                k.tail == e.tail % 3u;

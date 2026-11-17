@@ -569,6 +569,7 @@ void EngineHost::apply(const Command& c) {
             }
             load_track(pack.track, pack.value);
             std::swap(patterns[pack.track % track_count], c.track_pack->patterns); // the pack takes the old ones back to be freed
+            if (running) fit_kept(pack.track % track_count); // pad-fx C: the punches of the pattern it played end with it
             if (!done_tracks.push(c.track_pack)) {} // the MIDI thread frees it; a full queue only leaks one
         }
         break;
@@ -955,8 +956,7 @@ void EngineHost::apply(const Command& c) {
         if (take.state() == TakeRecorder::State::Cued) take.stop();
         cue_track = -1;
         count_left = 0; count_beat.store(0, std::memory_order_relaxed); count_rest.store(0, std::memory_order_relaxed);
-        if (punch_from_song) { punch.stop(); punch_from_song = false; }
-        for (auto& k : kept) { if (k.on) k.punch.stop(); k.on = k.due = false; } // pad-fx C
+        drop_punches(); // the song's, and the patterns' (pad-fx C)
         song_mode = false;
         in_song.store(false, std::memory_order_relaxed);
         follow_lane(); // roadmap P5: the project's tempo again
@@ -999,6 +999,7 @@ void EngineHost::apply(const Command& c) {
         arp_ticks = 0; until_arp = 0; arp_origin = tick_now; // the repeats from it
         loop_restart = true;
         for (auto& s : slots) { s.start = 0; for (auto& skip : s.skips) skip.key = -1; }
+        for (unsigned t = 0; t < track_count; ++t) fit_kept(t);    // pad-fx C: a kept punch the new place is not in lets go
         for (unsigned t = 0; t < track_count; ++t) plan_follow(t); // roadmap P5: counted from the patterns' top again
         tick_count.store(tick_now, std::memory_order_relaxed);
         break;
@@ -1742,6 +1743,7 @@ void EngineHost::bar_start() {
         running = false;
         if (rendering) render_out.tail(); // on until the mix falls silent
         for (auto& s : slots) { for (auto& off : s.offs) if (off.key >= 0) { engine_note_off(s, off.key); off.key = -1; } s.held = {}; }
+        drop_punches(); // no tick comes to end them
         return;
     }
     clips_at_bar(false);
@@ -1832,6 +1834,7 @@ void EngineHost::mtc_place(double seconds) {
     count_left = 0; count_beat.store(0, std::memory_order_relaxed); count_rest.store(0, std::memory_order_relaxed);
     until_tick = (at - ticks) * tick_length(); // the tick after the place, to the sample
     for (auto& s : slots) for (auto& skip : s.skips) skip.key = -1;
+    if (punch_from_song) { punch.stop(); punch_from_song = false; } // the song's punch was the old place's
     if (song_mode) {
         unsigned b = at / bar, offset = at % bar;
         if (song.looping() && b >= song.loop_end) b = song.loop_start + (b - song.loop_start) % (song.loop_end - song.loop_start);
@@ -1842,6 +1845,7 @@ void EngineHost::mtc_place(double seconds) {
         } else if (!song.looping() && !song_recording && b >= std::max(song.length(), 1u)) {
             running = false; // past the song's end
             for (auto& s : slots) { for (auto& off : s.offs) if (off.key >= 0) { engine_note_off(s, off.key); off.key = -1; } s.held = {}; }
+            drop_punches();
         } else {
             song_bar_now = b;
             clips_at_bar(true);
@@ -1849,6 +1853,7 @@ void EngineHost::mtc_place(double seconds) {
     } else {
         tick_now = at;
         for (auto& s : slots) s.start = 0;
+        for (unsigned t = 0; t < track_count; ++t) fit_kept(t); // pad-fx C: as Locate
     }
     tick_count.store(tick_now, std::memory_order_relaxed);
     mtc_on = running; mtc_at = seconds; mtc_error = 0; speed = 1; mtc_misses = 0;
@@ -2339,6 +2344,13 @@ void EngineHost::fit_kept(unsigned t) {
 
 void EngineHost::drop_kept(unsigned t) {
     for (auto& k : kept) if (k.due && k.track == t) k.until = std::min(k.until, tick_now);
+}
+
+// The transport stops (Stop, or the song at its end): the song's punch and every kept one let go now. Their lengths
+// are counted in ticks, and none comes after this.
+void EngineHost::drop_punches() {
+    if (punch_from_song) { punch.stop(); punch_from_song = false; }
+    for (auto& k : kept) { if (k.on) k.punch.stop(); k.on = k.due = false; }
 }
 
 void EngineHost::sound_kept(Kept& k) {
