@@ -176,6 +176,7 @@ void scale_pattern(Pattern& p, bool slower) {
     for (const auto& e : moved) p.add(e);
     std::vector<MotionPoint> points; // its motion with them
     for (auto m : p.motion) {
+        if (m.tick >= p.length) continue; // hidden past the end: not brought in at double speed, as the notes
         m.tick = slower ? m.tick * 2 : m.tick / 2;
         m.hold = uint16_t(slower ? std::min<unsigned>(m.hold * 2u, 0xffff) : (m.hold ? std::max<unsigned>(m.hold / 2u, 1) : 0));
         if (m.tick < p.length) points.push_back(m);
@@ -186,6 +187,7 @@ void scale_pattern(Pattern& p, bool slower) {
     p.fit_lanes();
     std::vector<PatternPunch> punches; // and its kept punches (pad-fx C)
     for (auto e : p.punches) {
+        if (e.tick >= p.length) continue; // hidden past the end
         e.tick = slower ? e.tick * 2 : e.tick / 2;
         e.length = slower ? e.length * 2 : std::max<uint32_t>(e.length / 2, 1);
         if (e.tick >= p.length) continue;
@@ -264,6 +266,7 @@ Pattern speed_pattern(const Pattern& p, unsigned speed) {
     }
     out.motion.clear();
     for (auto m : p.motion) {
+        if (m.tick >= p.length) continue; // hidden past the end: not played on the last tick
         m.tick = uint32_t(std::min<uint64_t>(scale(m.tick), out.length - 1));
         if (m.hold) m.hold = uint16_t(std::clamp<uint64_t>(scale(m.hold), 1, 0xffff));
         out.write_motion(m);
