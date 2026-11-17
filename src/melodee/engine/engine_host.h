@@ -250,8 +250,8 @@ public:
     bool taps(TrackTaps& out) const { return tap_board.read(out); }
     float peak() const { return output_peak.load(std::memory_order_relaxed); }
     // The meter lights beside the screen: the mix (before main volume, the listening level) and the input source,
-    // side 0 left, 1 right, as peaks falling meter_fall_db a second, so the 5 ms light pass misses none.
-    static constexpr float meter_fall_db = 30;
+    // side 0 left, 1 right, as peaks falling meter_fall_db a second (stock's fall: -60 dB in a second).
+    static constexpr float meter_fall_db = 60;
     float out_level(unsigned side) const { return out_levels[side & 1].load(std::memory_order_relaxed); }
     float in_level(unsigned side) const { return in_levels[side & 1].load(std::memory_order_relaxed); }
     unsigned dropped() const { return lost.load(std::memory_order_relaxed); }

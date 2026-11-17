@@ -3109,14 +3109,17 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
     if (resampling) take_input(); // the mix itself, before main volume
     take.process(record_l, record_r, frames);
     audio_in.process(record_l, record_r, frames); // freeze plan F3: an audio track's take, between its bars
-    // The meters' fall over this block: meter_fall_db a second at the device's rate.
-    float meter_fall = std::pow(10.0f, -meter_fall_db / 20 * float(frames) / float(dsp::sample_rate()));
-    auto meter = [&](std::atomic<float>& held, float peak) {
-        held.store(std::max(peak, held.load(std::memory_order_relaxed) * meter_fall), std::memory_order_relaxed);
-    };
+    // The meters follow each side sample by sample, as stock's do: up at once, down meter_fall_db a second at the
+    // device's rate, silent below -100 dBFS.
+    const float meter_fall = std::pow(10.0f, -meter_fall_db / 20 / float(dsp::sample_rate()));
+    auto meter_from = [](const std::atomic<float>& level) { return level.load(std::memory_order_relaxed); };
+    auto meter = [](std::atomic<float>& level, float now) { level.store(now < 1e-5f ? 0.0f : now, std::memory_order_relaxed); };
     {
-        float in_l = 0, in_r = 0;
-        for (unsigned f = 0; f < frames; ++f) { in_l = std::max(in_l, std::fabs(record_l[f])); in_r = std::max(in_r, std::fabs(record_r[f])); }
+        float in_l = meter_from(in_levels[0]), in_r = meter_from(in_levels[1]);
+        for (unsigned f = 0; f < frames; ++f) {
+            in_l = std::max(std::fabs(record_l[f]), in_l * meter_fall);
+            in_r = std::max(std::fabs(record_r[f]), in_r * meter_fall);
+        }
         meter(in_levels[0], in_l); meter(in_levels[1], in_r);
     }
     recall_ring.write(record_l, record_r, frames);
@@ -3129,7 +3132,7 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
     if (park_fading && stems)
         for (unsigned t = 0; t < track_count; ++t)
             for (unsigned f = 0; f < frames; ++f) stems[size_t(t) * block + f] *= park_gain.at(f);
-    float peak = 0, out_l = 0, out_r = 0;
+    float peak = 0, out_l = meter_from(out_levels[0]), out_r = meter_from(out_levels[1]);
     for (unsigned f = 0; f < frames; ++f) {
         if (click_wait) --click_wait;
         else if (click_env > 0.0005f) { // a short blip on top of the mix
@@ -3138,7 +3141,8 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
             click_env *= click_fall;
             master_l[f] += blip; master_r[f] += blip;
         }
-        out_l = std::max(out_l, std::fabs(master_l[f])); out_r = std::max(out_r, std::fabs(master_r[f])); // the mix, for the meters
+        out_l = std::max(std::fabs(master_l[f]), out_l * meter_fall); // the mix, for the meters
+        out_r = std::max(std::fabs(master_r[f]), out_r * meter_fall);
         float v = park_fading ? volume_now.at(f) * park_gain.at(f) : volume_now.at(f);
         float left = dsp::master_clip(master_l[f] * v), right = dsp::master_clip(master_r[f] * v);
         peak = std::max(peak, std::max(std::fabs(left), std::fabs(right)));
