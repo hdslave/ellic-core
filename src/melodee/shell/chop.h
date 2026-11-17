@@ -4,6 +4,7 @@
 #include "melodee/engine/onsets.h"
 #include "melodee/engine/sample_data.h"
 #include "melodee/model/chop_slices.h"
+#include "melodee/model/sampler.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -211,6 +212,29 @@ inline Slices with_hand(const Slices& cut, const HandCuts& hand, uint32_t frames
         s.add(cut.start[n], frames);
     }
     return s;
+}
+
+// TO PADS' playback, as Simpler's Playback: POLY the slices overlap (as before), MONO they share a mute group so one
+// plays at a time, THRU that too and each plays on to the region's end. TO PADS asks, starting on the last one.
+enum class SlicePlay : uint8_t { Poly, Mono, Thru, Count };
+inline const char* slice_play_name(SlicePlay p) {
+    static const char* names[] {"POLY", "MONO", "THRU"};
+    return names[unsigned(p) % unsigned(SlicePlay::Count)];
+}
+// Slice n's pad, from the chopped pad's sound, as `play` lays it; `group` the mute group MONO and THRU share.
+inline PadSound slice_pad(const PadSound& parent, const Slices& s, unsigned n, uint32_t frames, SlicePlay play, uint8_t group) {
+    PadSound one = slice_sound(parent, s.start[n], play == SlicePlay::Thru ? s.end(s.count - 1, frames) : s.end(n, frames));
+    if (play != SlicePlay::Poly) one.group = group;
+    return one;
+}
+// The mute group MONO and THRU put the slices in: the chopped pad's own, else the first none of the track's pads
+// holds (16 when every one is taken).
+template <class Pads> inline uint8_t slice_group(const PadSound& parent, const Pads& pads) {
+    if (parent.group) return parent.group;
+    uint32_t taken = 0;
+    for (const auto& p : pads) if (p.used() && p.group) taken |= 1u << (p.group % 32);
+    for (uint8_t g = 1; g <= 16; ++g) if (!(taken & (1u << g))) return g;
+    return 16;
 }
 
 // The whole sample, as before parity phase 5.
