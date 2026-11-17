@@ -48,9 +48,11 @@ inline uint32_t snap_to_hit(uint32_t frame, const std::array<Hit, max_hits>& hit
     return best < 0 ? frame : hits[size_t(best)].frame;
 }
 
-// The hits Chop shows and SHIFT + the wheel jumps to: those Threshold would cut at with its amount (0..100, its
-// strength out of 255), so what counts as a hit is the one setting.
+// A Threshold amount (0..100) as a hit's strength (out of 255): the hits that chop would cut at.
 inline uint8_t hit_floor(int threshold_amount) { return uint8_t(std::clamp(threshold_amount, 0, 100) * 255 / 100); }
+// The hits Chop marks and SHIFT + the wheel jumps to: as strong as Threshold's amount, or 25% where that is higher (a
+// strong amount leaves few hits on a busy sample; the ones heard should still count).
+inline uint8_t mark_floor(int threshold_amount) { return hit_floor(std::min(threshold_amount, 25)); }
 // The hit after (`way` > 0) or before `frame` at least 10 ms from it, as strong as `floor`; `frame` itself where there
 // is none. 10 ms: a cut pulled onto a zero crossing just before a hit still counts as on it, so the next turn moves on.
 inline uint32_t next_hit(uint32_t frame, int way, const std::array<Hit, max_hits>& hits, unsigned count, uint8_t floor) {
@@ -66,7 +68,14 @@ inline uint32_t next_hit(uint32_t frame, int way, const std::array<Hit, max_hits
     return best;
 }
 
-// Zero Snap (Melodee's, on unless turned off on Chop's B2): a cut pulled onto
+// The same inside a cut's room (`lo`..`hi`, short of the neighbouring cuts): `frame` itself where the next hit is not.
+inline uint32_t next_hit_within(uint32_t frame, int way, const std::array<Hit, max_hits>& hits, unsigned count, uint8_t floor,
+                                uint32_t lo, uint32_t hi) {
+    const uint32_t h = next_hit(frame, way, hits, count, floor);
+    return h != frame && h > lo && h < hi ? h : frame;
+}
+
+// Zero Snap (always on; Chop's B2 switch is gone): a cut pulled onto
 // the nearest place the wave crosses zero, so a slice starts and stops
 // without a click. The two sides are summed (left and right cross at
 // different places; the sum is what a mono listener hears). It looks up to
