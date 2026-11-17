@@ -2146,6 +2146,7 @@ void EngineHost::midi_inputs(const int32_t* input, const float* usb, unsigned fr
     constexpr float scale = 1.0f / 2147483648.0f;
     for (auto& s : slots) {
         if (s.kind != EngineKind::Midi || s.midi.audio == midi_track::AudioNone) continue;
+        s.midi.read = 0;
         float g = s.base[midi_track::AudioMonitor] ? level_gain(s.base[midi_track::AudioLevel]) : 0.0f;
         for (unsigned f = 0; f < frames && f < 128; ++f) {
             float l = 0, r = 0;

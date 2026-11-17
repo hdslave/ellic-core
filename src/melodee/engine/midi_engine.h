@@ -97,11 +97,14 @@ public:
     // Roadmap P4 (docs/MIDI_TRACKS.md M5): an input as the track's sound (the external instrument back in the mix):
     // which (midi_track::AudioChoice; none while its route is taken), and this block of it, filled by the engine host.
     bool stereo() const override { return audio != midi_track::AudioNone; }
+    // A note in the block splits it into runs, each rendered on its own: each run takes the input from where the run
+    // before it stopped (from the block's start, it played the block's first frames again: a click at each note).
     void render_stereo(float* left, float* right, unsigned frames) override {
-        for (unsigned f = 0; f < frames && f < 128; ++f) { left[f] += in_l[f]; right[f] += in_r[f]; }
+        for (unsigned f = 0; f < frames && read < 128; ++f, ++read) { left[f] += in_l[read]; right[f] += in_r[read]; }
     }
     int audio = midi_track::AudioNone;
     float in_l[128] {}, in_r[128] {};
+    unsigned read = 0; // the next frame of in_l / in_r to play; the engine host sets 0 as it fills them
 };
 
 } // namespace melodee
