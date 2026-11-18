@@ -2616,7 +2616,8 @@ void EngineHost::knob_command(const Command& c) {
     knob_targets();
 }
 
-void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32_t* input, float* stems, const float* usb) {
+void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32_t* input, float* stems, const float* usb,
+                        int32_t* fixed) {
     static thread_local bool flushed = false;
     if (!flushed) { // the thread's first block: denormals off; kept to its core when pinned, and known (roadmap P2)
         flush_denormals();
@@ -2628,7 +2629,11 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
     }
     blocks_seen.fetch_add(1, std::memory_order_relaxed);
     if (is_parked) { // a project load on the loader's thread (park()): silent and still until it lets go
-        if (!park_over()) { play_parked(out, frames, stems); return; }
+        if (!park_over()) {
+            play_parked(out, frames, stems);
+            if (fixed) std::fill(fixed, fixed + 2 * std::min(frames, block), 0);
+            return;
+        }
         is_parked = false; park_wanted = 0; // the loader's project plays from here, faded in from silence
         frame_now += parked_frames; parked_frames = 0;
     } else if (park_wanted && park_over()) {
@@ -2671,6 +2676,7 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
     track_ns.fill(0);
     if (reformatting) { // a new rate: silent until the Reload has built everything again at it
         std::fill(out, out + 2 * frames, 0);
+        if (fixed) std::fill(fixed, fixed + 2 * frames, 0);
         if (stems) std::fill(stems, stems + size_t(track_count) * block, 0.0f);
         for (auto* level : {&out_levels[0], &out_levels[1], &in_levels[0], &in_levels[1]}) level->store(0, std::memory_order_relaxed);
         frame_now += frames;
@@ -3160,11 +3166,15 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
         }
         out_l = std::max(std::fabs(master_l[f]), out_l * meter_fall); // the mix, for the meters
         out_r = std::max(std::fabs(master_r[f]), out_r * meter_fall);
-        float v = park_fading ? volume_now.at(f) * park_gain.at(f) : volume_now.at(f);
+        float park = park_fading ? park_gain.at(f) : 1.0f, v = volume_now.at(f) * park;
         float left = dsp::master_clip(master_l[f] * v), right = dsp::master_clip(master_r[f] * v);
         peak = std::max(peak, std::max(std::fabs(left), std::fabs(right)));
         out[2 * f] = int32_t(std::clamp(left, -0.999f, 0.999f) * 2147483647.0f);
         out[2 * f + 1] = int32_t(std::clamp(right, -0.999f, 0.999f) * 2147483647.0f);
+        if (fixed) { // USB-C at full main volume: the knob left out, a Park's fade kept
+            fixed[2 * f] = int32_t(std::clamp(dsp::master_clip(master_l[f] * park), -0.999f, 0.999f) * 2147483647.0f);
+            fixed[2 * f + 1] = int32_t(std::clamp(dsp::master_clip(master_r[f] * park), -0.999f, 0.999f) * 2147483647.0f);
+        }
     }
     output_peak.store(peak, std::memory_order_relaxed);
     meter(out_levels[0], out_l); meter(out_levels[1], out_r);

@@ -139,9 +139,11 @@ public:
     // summed to mono with its pan law taken back out, before the buses, the
     // master chain and main volume. Muted (or soloed-out) tracks are silent.
     // `usb`, when given, is what a computer plays over USB-C: `frames`
-    // interleaved stereo floats, for the USB sources.
+    // interleaved stereo floats, for the USB sources. `fixed`, when given,
+    // gets `out` as it would be at full main volume, for what a computer
+    // records over USB-C (Settings' USB volume).
     void render(int32_t* out, unsigned frames, float volume, const int32_t* input = nullptr, float* stems = nullptr,
-                const float* usb = nullptr);
+                const float* usb = nullptr, int32_t* fixed = nullptr);
     // Before the audio thread starts: `count` render workers beside it (0: it renders alone), at its real-time
     // priority. Each block's tracks, their engines and then their chains, are shared out among them once the
     // last block's took more than `from_ns` (all cores together; 0 always, for tests). `pinned` (roadmap P2): the
