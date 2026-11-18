@@ -229,6 +229,82 @@ uint8_t probe_accent(const std::vector<uint8_t>& velocities, const std::vector<f
     return shift >= 0.6f * step[at] ? velocities[at + 1] : 0;
 }
 
+std::vector<uint8_t> probe_layers(const std::vector<uint8_t>& velocities, const std::vector<float>& db, const std::vector<float>& bright,
+                                  float amount, uint8_t accent, unsigned count) {
+    constexpr unsigned most = 8;
+    const size_t n = std::min({velocities.size(), db.size(), bright.size()});
+    if (n == 0 || count == 1) { // nothing heard: evenly; one layer: the hardest hit
+        const unsigned k = std::clamp(count ? count : 1u, 1u, most);
+        std::vector<uint8_t> tops;
+        for (unsigned l = 0; l < k; ++l) tops.push_back(uint8_t(std::clamp<unsigned>((l + 1) * 127 / k, 1, 127)));
+        return tops;
+    }
+    // How far hit i is from the sample of hit t played at hit i's velocity. Under -70 dB is silence, however far under.
+    auto level = [&](unsigned v) { return std::max(1e-3, 1.0 - std::clamp(double(amount), 0.0, 1.0) * (1.0 - v / 127.0)); };
+    auto loud = [&](size_t i) { return std::max(double(db[i]), -70.0); };
+    auto apart = [&](size_t i, size_t t) {
+        double d = std::fabs(loud(i) - std::max(-70.0, loud(t) + 20.0 * std::log10(level(velocities[i]) / level(velocities[t]))));
+        if (bright[i] > 0 && bright[t] > 0) d += 0.5 * std::fabs(semitones(bright[i], bright[t]));
+        return d;
+    };
+    constexpr double never = 1e30;
+    // Hits a..b as one layer, its sample hit b: the sum of squares, or never across the accent. Where hits sound
+    // alike (a sound whose level alone follows velocity) a hair on the layer's width squared keeps the layers even.
+    auto cost = [&](size_t a, size_t b) {
+        if (accent && velocities[a] < accent && velocities[b] >= accent) return never;
+        double sum = 0;
+        for (size_t i = a; i <= b; ++i) sum += apart(i, b) * apart(i, b);
+        const double wide = double(velocities[b]) - (a ? velocities[a - 1] : 0);
+        return sum + 1e-7 * wide * wide;
+    };
+    // The last hit of each of k layers, least squares; `far`: the hit furthest from its layer's sample. Empty when
+    // k layers cannot keep the accent apart.
+    auto place = [&](unsigned k, double& far) {
+        std::vector<std::vector<double>> best(k + 1, std::vector<double>(n, never));
+        std::vector<std::vector<size_t>> from(k + 1, std::vector<size_t>(n, 0));
+        for (size_t b = 0; b < n; ++b) best[1][b] = cost(0, b);
+        for (unsigned j = 2; j <= k; ++j)
+            for (size_t b = j - 1; b < n; ++b)
+                for (size_t a = j - 1; a <= b; ++a) {
+                    const double c = best[j - 1][a - 1] + cost(a, b);
+                    if (c < best[j][b]) { best[j][b] = c; from[j][b] = a; }
+                }
+        std::vector<size_t> ends;
+        far = 0;
+        if (best[k][n - 1] >= never) return ends;
+        size_t b = n - 1;
+        for (unsigned j = k; j >= 1; --j) {
+            const size_t a = j == 1 ? 0 : from[j][b];
+            ends.insert(ends.begin(), b);
+            for (size_t i = a; i <= b; ++i) far = std::max(far, apart(i, b));
+            if (j > 1) b = a - 1;
+        }
+        return ends;
+    };
+    const unsigned top = unsigned(std::min<size_t>(most, n));
+    std::vector<size_t> ends;
+    double far = 0;
+    if (count) ends = place(std::min(count, top), far);
+    else
+        for (unsigned k = 1; k <= top; ++k) { // as few as hold every hit within 1.5 dB
+            auto made = place(k, far);
+            if (made.empty()) continue;
+            ends = std::move(made);
+            if (far <= 1.5) break;
+        }
+    if (ends.empty()) ends = place(top, far);
+    // Each layer's top: its last hit's velocity; under an accent the velocity before it; the last 127.
+    std::vector<uint8_t> tops;
+    for (size_t e : ends) {
+        unsigned v = velocities[e];
+        if (accent && v < accent && e + 1 < n && velocities[e + 1] >= accent) v = accent - 1u;
+        if (e + 1 == n) v = 127;
+        if (tops.empty() || v > tops.back()) tops.push_back(uint8_t(std::clamp(v, 1u, 127u)));
+    }
+    if (tops.empty() || tops.back() != 127) tops.push_back(127);
+    return tops;
+}
+
 bool probe_drums(const std::vector<uint8_t>& keys, const std::vector<float>& hz) {
     const size_t n = std::min(keys.size(), hz.size());
     if (n < 3) return false;

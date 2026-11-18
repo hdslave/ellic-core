@@ -92,7 +92,7 @@ void layer_text(std::string& s, unsigned number_, const XpmLayer* l, uint8_t roo
     s += "            </Layer>\n";
 }
 
-void instrument_text(std::string& s, unsigned number_, const XpmKeygroup* k, double release, bool layered, bool mono_side) {
+void instrument_text(std::string& s, unsigned number_, const XpmKeygroup* k, double release, bool layered, bool mono_side, unsigned most) {
     s += "      <Instrument number=\"" + std::to_string(number_) + "\">\n";
     Tags t {s, 8};
     t.flag("CueBusEnable", false);
@@ -170,8 +170,9 @@ void instrument_text(std::string& s, unsigned number_, const XpmKeygroup* k, dou
     t.flag("WarpEnable", false);
     t("StretchPercentage", 100);
     s += "        <Layers>\n";
-    for (unsigned l = 0; l < 4; ++l) {
-        const XpmLayer* layer = k && l < k->layers.size() ? &k->layers[l] : nullptr;
+    const std::vector<XpmLayer> written = k ? xpm_layers(*k, most) : std::vector<XpmLayer> {};
+    for (unsigned l = 0; l < std::max(4u, most); ++l) {
+        const XpmLayer* layer = l < written.size() ? &written[l] : nullptr;
         layer_text(s, l + 1, layer, layer ? layer->root : k ? root : 0, layer && k ? k->gain * layer->gain : 1.0);
     }
     s += "        </Layers>\n";
@@ -179,13 +180,29 @@ void instrument_text(std::string& s, unsigned number_, const XpmKeygroup* k, dou
 }
 } // namespace
 
+std::vector<XpmLayer> xpm_layers(const XpmKeygroup& keygroup, unsigned most) {
+    const auto& all = keygroup.layers;
+    most = std::max(1u, most);
+    if (all.size() <= most) return all;
+    std::vector<XpmLayer> out;
+    const size_t n = all.size(), base = n / most, longer = n % most;
+    for (size_t run = 0, first = 0; run < most; ++run) {
+        const size_t last = first + base + (run < longer ? 1 : 0) - 1;
+        XpmLayer layer = all[last];
+        layer.low_velocity = all[first].low_velocity;
+        out.push_back(std::move(layer));
+        first = last + 1;
+    }
+    return out;
+}
+
 double xpm_envelope_value(double seconds) {
     // keygroup_seconds(): 0.001 * 100000^value
     if (seconds <= 0.001) return 0;
     return std::clamp(std::log10(seconds * 1000.0) / 5.0, 0.0, 1.0);
 }
 
-std::string xpm_text(const XpmProgram& program) {
+std::string xpm_text(const XpmProgram& program, unsigned most_layers) {
     std::string s;
     s += "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\n";
     s += "<MPCVObject>\n";
@@ -240,7 +257,7 @@ std::string xpm_text(const XpmProgram& program) {
     t("KeygroupAftertouchToFilter", 0.0);
     s += "    <Instruments>\n";
     for (unsigned n = 0; n < 128; ++n) instrument_text(s, n + 1, n < count ? &program.keygroups[n] : nullptr, program.release, layered,
-                                                         n < count && program.mono_side(program.keygroups[n]));
+                                                         n < count && program.mono_side(program.keygroups[n]), most_layers);
     s += "    </Instruments>\n";
     s += "    <PadNoteMap>\n";
     for (unsigned n = 0; n < 128; ++n)
@@ -255,8 +272,8 @@ std::string xpm_text(const XpmProgram& program) {
     return s;
 }
 
-std::string write_xpm(const std::string& path, const XpmProgram& program) {
-    const std::string text = xpm_text(program);
+std::string write_xpm(const std::string& path, const XpmProgram& program, unsigned most_layers) {
+    const std::string text = xpm_text(program, most_layers);
     const std::string part = path + ".part";
     {
         std::ofstream out(part, std::ios::binary | std::ios::trunc);

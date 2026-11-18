@@ -66,6 +66,14 @@ struct AutoFindings {
     AutoZone upper;
     // How many times real time its notes played during the check (an instrument outside: about 1); 0: not heard.
     float speed = 0;
+    // Velocity layers, from the accent's sixteen hits of one key: their velocities and brightness (Hz), how many
+    // layers the tone needs (LAYERS at Auto, 1-8; 1 where the hits differ in level only, or from hit to hit) and,
+    // for 1 to 8 layers, each one's top velocity (engine/auto_probe.h probe_layers(); 0 past the last).
+    uint8_t sweep_count = 0;
+    std::array<uint8_t, 16> sweep_velocity {};
+    std::array<float, 16> sweep_bright {};
+    uint8_t layers = 1;
+    std::array<std::array<uint8_t, 8>, 8> layer_tops {};
     AutoZone zone(unsigned key) const {
         if (split && key >= split) return upper;
         return {kind, glide, legato, tied, sustains, moves, hold, release, release_slow, release_share, velocity};
@@ -83,7 +91,7 @@ struct AutoFindings {
 struct AutoSampleSettings {
     uint8_t low = 36, high = 96; // the lowest and highest root, MIDI notes (C2, C7)
     uint8_t step = 3;            // semitones between roots
-    uint8_t layers = 1;          // velocity layers, 1-4
+    uint8_t layers = 0;          // velocity layers: 0 Auto (as many as the check heard the tone needs), 1-8
     float hold = 2.0f;           // seconds each key is held, when not at Auto
     bool hold_auto = true;       // HOLD at Auto: as long as the check found the sound needs (AutoFindings::hold)
     float tail = 8.0f;           // seconds of release kept at most
@@ -108,19 +116,23 @@ struct AutoSampleSettings {
     // The longest any key is held, and whether any key loops (the card's room, the sheet).
     float hold_most() const { return found.split ? std::max(hold_seconds(0), hold_seconds(found.split)) : hold_seconds(0); }
     bool loops_any() const { return looping(0) || (found.split && looping(found.split)); }
-    // The velocity layers taken: as asked, two at least where the check heard an accent.
-    unsigned layer_count() const { return std::clamp<unsigned>(found.accent && layers < 2 ? 2 : layers, 1, 4); }
+    // The velocity layers taken: as asked, or at Auto as many as the check heard the tone needs (one before it).
+    unsigned layer_count() const {
+        const unsigned asked = std::clamp<unsigned>(layers ? layers : found.heard ? found.layers : 1, 1, 8);
+        if (!found.heard) return asked;
+        unsigned placed = 0; // fewer where two would share a top velocity
+        for (uint8_t top : found.layer_tops[asked - 1]) placed += top != 0;
+        return placed ? placed : asked;
+    }
     // Takes of each key: the check's, with one velocity layer (MPC plays a keygroup's layers in turn or by velocity, not both).
     unsigned take_count() const { return layer_count() == 1 ? std::clamp<unsigned>(found.takes, 1, 4) : 1; }
-    // Each layer's velocity (the loudest of its range): 127 alone; 63, 127; 42, 84, 127; 31, 63, 95, 127. With an
-    // accent the top layer is the accent (127) and the rest share the velocities under it.
+    // Each layer's velocity (the loudest of its range), rising, the last 127: where the check heard the tone change
+    // (an accent starts a layer), else evenly (127 alone; 63, 127; 42, 84, 127 ...).
     uint8_t velocity(unsigned layer) const {
         const unsigned n = layer_count();
         layer = std::min(layer, n - 1);
-        if (found.accent > 1 && found.accent <= 127) {
-            if (layer + 1 == n) return 127;
-            return uint8_t(std::clamp<unsigned>((layer + 1) * (found.accent - 1u) / (n - 1), 1, 126));
-        }
+        const unsigned asked = std::clamp<unsigned>(layers ? layers : found.heard ? found.layers : 1, 1, 8);
+        if (found.heard && found.layer_tops[asked - 1][layer]) return found.layer_tops[asked - 1][layer];
         return uint8_t(std::clamp<unsigned>((layer + 1) * 127 / n, 1, 127));
     }
     // About how long sampling takes, seconds: each note held, then let go until it has fallen silent (TAIL at most),
@@ -172,6 +184,7 @@ struct AutoSampleResult {
     unsigned loops = 0;  // samples given a loop
     unsigned centred = 0; // samples whose DC offset was taken out
     unsigned mono = 0;   // samples written as one channel (both sides the same)
+    unsigned layers = 0; // the most velocity layers a keygroup has (over four: the track plays the .xty)
     // The release fitted to how its notes fell (engine/release_fit.h): seconds; a second stage's seconds and share (0: none).
     float release = 0, release_slow = 0, release_share = 0;
     std::string release_note; // what the fit went by, for `melodee-print status`

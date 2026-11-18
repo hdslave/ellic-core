@@ -70,6 +70,15 @@ float probe_fade_seconds(const std::vector<float>& x, float rate);
 // the accent at, where the sound jumps far more than between any other two; 0 for none.
 uint8_t probe_accent(const std::vector<uint8_t>& velocities, const std::vector<float>& db, const std::vector<float>& bright);
 
+// One key at rising velocities (as probe_accent's) as velocity layers: each layer is the hit at its top velocity,
+// played softer within the layer by Velocity `amount` (0..1, as probe_velocity's). A hit is as far from its layer's
+// sample as its level apart once Velocity has taken it down, plus its brightness apart at 6 dB an octave (half a dB
+// a semitone, as probe_accent weighs them). `count` layers (1-8) placed so the hits are as near as they can be
+// (least squares), or with `count` 0 as few as keep every hit within 1.5 dB, up to 8. An accent (its velocity, 0
+// none) always starts a layer, unless there is one layer only. The top velocity of each layer, rising, the last 127.
+std::vector<uint8_t> probe_layers(const std::vector<uint8_t>& velocities, const std::vector<float>& db, const std::vector<float>& bright,
+                                  float amount, uint8_t accent, unsigned count);
+
 // Keys played one at a time, each with the pitch heard (0 none): drums when most do not follow the keys as a
 // pitched instrument does (an octave up twice the frequency).
 bool probe_drums(const std::vector<uint8_t>& keys, const std::vector<float>& hz);

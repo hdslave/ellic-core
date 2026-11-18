@@ -28,7 +28,7 @@ struct XpmLayer {
 };
 struct XpmKeygroup {
     uint8_t low = 0, high = 127;
-    std::vector<XpmLayer> layers; // four at most, lowest velocity first
+    std::vector<XpmLayer> layers; // eight at most, lowest velocity first (an .xpm for MPC 2 holds four: xpm_layers())
     bool cycle = false;           // the layers are takes of one hit, played in turn (ZonePlay Cycle), not by velocity
     bool one_shot = false;        // plays out whole however short the press (a drum), else held while the key is
     // Its own release and level, for a fall of two stages (engine/release_fit.h): two keygroups over the same keys
@@ -63,10 +63,15 @@ struct XpmProgram {
     bool mono_side(const XpmKeygroup& k) const { return mono && !mono_all() && k.low >= mono_low && k.high <= mono_high; }
 };
 
-// The program as .xpm text.
-std::string xpm_text(const XpmProgram& program);
+// The layers a keygroup's instrument is written with, `most` at most (an MPC 2 .xpm holds four). Over that, its
+// layers in `most` runs, the softest runs a layer longer where they do not share out evenly; each run plays its top
+// layer over the run's velocities (eight in four: layers 2, 4, 6 and 8).
+std::vector<XpmLayer> xpm_layers(const XpmKeygroup& keygroup, unsigned most = 4);
+// The program as .xpm text, each instrument with `most_layers` layers (4, as MPC 2 and MPC Beats read them; 8 for
+// MPC 3's track file to be made from, shell/mpc3_export.h).
+std::string xpm_text(const XpmProgram& program, unsigned most_layers = 4);
 // The program written to `path` (beside its WAVs). Empty on success.
-std::string write_xpm(const std::string& path, const XpmProgram& program);
+std::string write_xpm(const std::string& path, const XpmProgram& program, unsigned most_layers = 4);
 
 // keygroup_seconds()'s inverse (engine/keygroup.h): seconds as the MPC's 0..1 envelope value.
 double xpm_envelope_value(double seconds);
