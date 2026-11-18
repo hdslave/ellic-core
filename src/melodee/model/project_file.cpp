@@ -271,13 +271,18 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
             const auto& pattern = patterns.at[t][p];
             bool plain = pattern.length == 16 * sixteenth_ticks && pattern.division == Division::Sixteenth && pattern.events.empty() &&
                          pattern.motion.empty() && pattern.lanes.empty() && pattern.feel == Feel {} && pattern.euclids.empty() &&
-                         pattern.punches.empty() && !pattern.program;
+                         pattern.punches.empty() && !pattern.program && pattern.free; // not written: an empty Free pattern of a bar
             if (plain) continue;
             at = w.begin("EVNT");
             w.u8(t); w.u8(p); w.u32(pattern.length); w.u8(unsigned(pattern.division));
             w.u32(uint32_t(pattern.events.size()));
             for (const auto& e : pattern.events) { w.u32(e.tick); w.u16(e.length); w.u8(e.key); w.u8(e.velocity); w.u8(e.chance); w.u8(e.flags); }
             w.end(at);
+            if (pattern.is_free()) { // Free length (shell/free_length.h), after its EVNT: older builds read it as fixed
+                at = w.begin("FREE");
+                w.u8(t); w.u8(p);
+                w.end(at);
+            }
             uint32_t pitched = 0;
             for (const auto& e : pattern.events) pitched += e.pitch != 0;
             if (pitched) { // what older builds skip: the notes that play off their pad's root, by their place in EVNT
@@ -998,6 +1003,7 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
             if (t >= track_count || p >= pattern_count) continue;
             auto& pattern = patterns->at[t][p];
             pattern.length = std::clamp<uint32_t>(r.u32(), 1, max_bars * 16 * ticks_per_quarter);
+            pattern.free = false; // written: its length was set, unless FREE follows
             pattern.division = Division(std::min<unsigned>(r.u8(), unsigned(Division::Count) - 1));
             uint32_t count = std::min<uint32_t>(r.u32(), max_pattern_events);
             pattern.events.clear();
@@ -1113,6 +1119,9 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
         } else if (name == "GRVB") { // a groove's source past P16 (after its FEEL)
             unsigned t = r.u8(), p = r.u8(), from = r.u16();
             if (r.ok && t < track_count && p < pattern_count && from <= track_count * pattern_count) patterns->at[t][p].feel.groove_from = uint16_t(from);
+        } else if (name == "FREE") { // Free length: an empty pattern whose first take sets its length (after its EVNT)
+            unsigned t = r.u8(), p = r.u8();
+            if (r.ok && t < track_count && p < pattern_count) patterns->at[t][p].free = true;
         } else if (name == "PPRG") { // a MIDI track's own program for a pattern
             unsigned t = r.u8(), p = r.u8(), program = r.u8();
             if (r.ok && t < track_count && p < pattern_count) { patterns->at[t][p].program = uint8_t(std::min(program, 128u)); programs[t] = true; }

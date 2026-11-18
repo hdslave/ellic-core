@@ -578,6 +578,7 @@ std::string import_mpc_project(const std::vector<uint8_t>& file, const std::stri
             for (const auto& [n, sequence] : sequences) {
                 auto& pattern = patterns.at[index][n];
                 pattern.length = uint32_t(std::clamp<int64_t>(int64_t(number(*sequence, "lengthPulses", 3840) / mpc_ticks_per_tick), 1, project.max_length()));
+                pattern.free = false; // the sequence's length, notes or not
                 report.notes += read_keys(clip_of(*sequence, name), pattern);
             }
             continue;
@@ -626,6 +627,7 @@ std::string import_mpc_project(const std::vector<uint8_t>& file, const std::stri
         for (const auto& [n, sequence] : sequences) {
             auto& pattern = patterns.at[index][n];
             pattern.length = uint32_t(std::clamp<int64_t>(int64_t(number(*sequence, "lengthPulses", 3840) / mpc_ticks_per_tick), 1, project.max_length()));
+            pattern.free = false; // the sequence's length, notes or not
             report.notes += read_notes(clip_of(*sequence, name), pad_of_note, pattern);
         }
     }

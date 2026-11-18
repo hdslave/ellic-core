@@ -149,7 +149,11 @@ struct Command {
         AudioQuiet,
         // A KEYGROUP track: value = the key that plays its pad 1 at the file's own pitch (model/scales.h keyed_root():
         // a single sample's note nearest 60, else 60).
-        KeyedRoot
+        KeyedRoot,
+        // Free length (shell/free_length.h): track, pattern: while it plays that pattern, it counts from the top of the
+        // pass playing now, or with index < track_count from where that track's pattern began when it plays the same
+        // number (a take fitted to its sequence lines up with it). Sent before the pattern's longer copy.
+        Rebase
 
     };
     Command() = default;

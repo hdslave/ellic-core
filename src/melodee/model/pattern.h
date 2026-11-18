@@ -213,15 +213,20 @@ struct Pattern {
     PatternFollow follow;                    // what comes after it by itself (roadmap P5, model/follow.h)
     uint8_t program = 0;                     // a MIDI track's: the program it sends as it starts, 1..128; 0 the track's own
     AudioRegion audio;                       // an AUDIO track's take, played from its top (freeze plan F3, model/audio_track.h)
+    // Free length (shell/free_length.h): while it is empty, its first take sets its length, a bar at a time. K1 to
+    // a number of bars, Half or Double Seq, or a launch that gives it a length turn it off.
+    bool free = true;
 
     unsigned q() const { return division_ticks(division); }
     // Steps of Q the pattern holds (a last part step counts).
     unsigned steps() const { return std::max(1u, unsigned((length + q() - 1) / q())); }
     bool empty() const { return (events.empty() || events.front().tick >= length) && !audio.used(); }
+    // Free length counts only while the pattern is empty.
+    bool is_free() const { return free && empty(); }
     bool operator==(const Pattern& o) const {
         return length == o.length && division == o.division && events == o.events && motion == o.motion && lanes == o.lanes &&
                feel == o.feel && euclids == o.euclids && punches == o.punches && follow == o.follow && program == o.program &&
-               audio == o.audio;
+               audio == o.audio && is_free() == o.is_free();
     }
     bool operator!=(const Pattern& o) const { return !(*this == o); }
     // The first event at or after `tick`.

@@ -900,6 +900,16 @@ void EngineHost::apply(const Command& c) {
         slot.loop_ticks = uint32_t(c.index) | uint32_t(uint16_t(c.value)) << 16;
         if (running) fit_kept(c.track % track_count); // pad-fx C: its punches in the loop as it is now
         break;
+    case Type::Rebase: { // Free length: the take's pattern counts from its own bar, or with the track it fits
+        unsigned t = c.track % track_count;
+        if (!running || song_mode || slot.pattern != c.pattern % pattern_count || slot.silent) break;
+        const auto& other = slots[c.index % track_count];
+        if (c.index < track_count && c.index != t && other.pattern == slot.pattern && !other.silent) slot.start = other.start;
+        else slot.start = tick_now - (tick_now - slot.start) % std::max<uint32_t>(patterns[t][slot.pattern]->length, 1);
+        fit_kept(t);    // pad-fx C: its punches as it counts now
+        plan_follow(t); // roadmap P5: counted from its top again
+        break;
+    }
     case Type::Chained: // roadmap P5: a chain is its track's order, its patterns' follow actions wait
         slot.chained = c.value != 0;
         if (slot.chained) slot.follow_do = 0;
