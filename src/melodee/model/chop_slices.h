@@ -12,9 +12,9 @@
 // cut with while the project is open.
 namespace melodee {
 
-enum class ChopMode : uint8_t { Threshold, Regions, Beats, Manual, Count };
+enum class ChopMode : uint8_t { Threshold, Regions, Beats, Manual, Auto, Count };
 inline const char* chop_mode_name(ChopMode m) {
-    static const char* names[] {"Threshold", "Regions", "Beats", "Manual"};
+    static const char* names[] {"Threshold", "Regions", "Beats", "Manual", "Auto"};
     return names[unsigned(m) % unsigned(ChopMode::Count)];
 }
 constexpr unsigned max_slices = 64;

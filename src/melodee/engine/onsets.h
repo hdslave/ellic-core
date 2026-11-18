@@ -17,11 +17,14 @@ struct BeatGrid {
     bool found() const { return tempo && at.size() >= 2; }
 };
 
-// The hits, as find_hits() (sample_data.h), and the sample's beats.
-unsigned find_hits(const SampleData& sample, std::array<Hit, max_hits>& out, BeatGrid& beats);
+struct AutoRead; // engine/auto_chop.h
+
+// The hits, as find_hits() (sample_data.h), and the sample's beats; with `autos`, also what Chop's Auto type reads
+// of its sound.
+unsigned find_hits(const SampleData& sample, std::array<Hit, max_hits>& out, BeatGrid& beats, AutoRead* autos = nullptr);
 // The same from the sample's sides summed at 44.1 kHz (one value a frame as the project counts them), for a sample
 // not in memory (a long WAV read a piece at a time).
-unsigned find_hits_in(const std::vector<float>& model_mono, std::array<Hit, max_hits>& out, BeatGrid& beats);
+unsigned find_hits_in(const std::vector<float>& model_mono, std::array<Hit, max_hits>& out, BeatGrid& beats, AutoRead* autos = nullptr);
 // The sample's sides summed at 44.1 kHz, as the hits (and its note, engine/root_find.h) are found in.
 std::vector<float> model_mono(const SampleData& sample);
 

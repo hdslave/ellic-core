@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #include "melodee/engine/onsets.h"
+#include "melodee/engine/auto_chop.h"
 #include "melodee/engine/fft.h"
 #include <algorithm>
 #include <cmath>
@@ -71,7 +72,8 @@ float band_sum(const std::vector<float>& magnitude, const Band& b) {
 
 // The hits in time order, every one found (the first frame 0), and the flux they were found in, from the sample's
 // sides summed at 44.1 kHz (model_mono()).
-void analyse(const std::vector<float>& mono, std::vector<Hit>& found, std::vector<float>& flux) {
+// `spectrum`, where asked for: the log bands of each frame, for Auto chop's reading of the sound (engine/auto_chop.h).
+void analyse(const std::vector<float>& mono, std::vector<Hit>& found, std::vector<float>& flux, BandFrames* spectrum = nullptr) {
     const auto frames = uint32_t(mono.size());
     found.assign(1, Hit {0, 255});
     flux.clear();
@@ -112,6 +114,13 @@ void analyse(const std::vector<float>& mono, std::vector<Hit>& found, std::vecto
         // flux: each band's rise over the frame before, that frame widened by one band either side.
         const float floor = std::max(1e-9f, sums.empty() ? 0.0f : *std::max_element(sums.begin(), sums.end()) * 1e-3f);
         for (float& v : sums) v = std::log10(1.0f + v / floor);
+        if (spectrum) { // 85 steps a tenfold (20 dB), 0 at the floor: 60 dB in a byte
+            spectrum->width = unsigned(width); spectrum->count = count;
+            spectrum->level.resize(sums.size());
+            for (size_t i = 0; i < sums.size(); ++i) spectrum->level[i] = uint8_t(std::clamp(std::lround(sums[i] * 85.0f), 0L, 255L));
+            spectrum->hz.resize(width);
+            for (size_t b = 0; b < width; ++b) spectrum->hz[b] = float(bands[b].peak) * 44100.0f / float(fft_size);
+        }
         for (unsigned t = 1; t < count; ++t) {
             const float *level = &sums[t * width], *before = &sums[(t - 1) * width];
             float rise = 0;
@@ -412,14 +421,15 @@ BeatGrid track_beats(const std::vector<float>& flux, const std::vector<Hit>& hit
 
 } // namespace
 
-unsigned find_hits(const SampleData& s, std::array<Hit, max_hits>& out, BeatGrid& beats) {
-    return find_hits_in(model_mono(s), out, beats);
+unsigned find_hits(const SampleData& s, std::array<Hit, max_hits>& out, BeatGrid& beats, AutoRead* autos) {
+    return find_hits_in(model_mono(s), out, beats, autos);
 }
 
-unsigned find_hits_in(const std::vector<float>& mono, std::array<Hit, max_hits>& out, BeatGrid& beats) {
+unsigned find_hits_in(const std::vector<float>& mono, std::array<Hit, max_hits>& out, BeatGrid& beats, AutoRead* autos) {
     std::vector<Hit> found;
     std::vector<float> flux;
-    analyse(mono, found, flux);
+    BandFrames spectrum;
+    analyse(mono, found, flux, autos ? &spectrum : nullptr);
     // Whether it starts with an attack: a peak in its first 10 ms at least a quarter of its highest.
     float peak = 0, opening = 0;
     for (size_t n = 0; n < mono.size(); ++n) {
@@ -434,6 +444,7 @@ unsigned find_hits_in(const std::vector<float>& mono, std::array<Hit, max_hits>&
         std::sort(found.begin(), found.end(), [](const Hit& a, const Hit& b) { return a.frame < b.frame; });
     }
     std::copy(found.begin(), found.end(), out.begin());
+    if (autos) read_auto(mono, spectrum, out, unsigned(found.size()), beats, *autos);
     return unsigned(found.size());
 }
 

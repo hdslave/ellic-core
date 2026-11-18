@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #pragma once
+#include "melodee/engine/auto_chop.h"
 #include "melodee/engine/onsets.h"
 #include "melodee/engine/sample_data.h"
 #include "melodee/model/chop_slices.h"
@@ -251,6 +252,14 @@ inline Slices with_hand(const Slices& cut, const HandCuts& hand, uint32_t frames
         if (s.count >= max_slices) { if (capped) *capped = true; break; }
         s.add(cut.start[n], frames);
     }
+    // Where the type leaves gaps (Auto's SHOTS and VOCAL: a slice ends where its sound does), a slice that starts
+    // inside one of the type's ends no later than that one does.
+    for (unsigned k = 0; k < s.count; ++k)
+        for (unsigned n = 0; n < cut.count; ++n)
+            if (cut.start[n] <= s.start[k] && s.start[k] < cut.end(n, frames)) {
+                if (!cut.touches(n, frames) && cut.end(n, frames) < s.end(k, frames)) s.stop[k] = cut.stop[n];
+                break;
+            }
     return s;
 }
 

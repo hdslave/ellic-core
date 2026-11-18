@@ -3,6 +3,7 @@
 #pragma once
 #include "melodee/engine/bounce.h"
 #include "melodee/shell/expansion_install.h"
+#include "melodee/engine/auto_chop.h"
 #include "melodee/engine/onsets.h"
 #include "melodee/engine/recall_ring.h"
 #include "melodee/engine/sample_data.h"
@@ -70,6 +71,7 @@ struct LoadedSample {
     std::array<Hit, max_hits> hits {};
     unsigned hit_count = 0;
     BeatGrid beats;          // its own tempo and beats, for Chop's Beats type
+    AutoRead autos;          // what Chop's Auto type reads of its sound (engine/auto_chop.h)
     int8_t root = root_unread; // its note (SampleRef::root): a pitch class or root_none; root_unread until it is found
     bool ready = false;
     // A multisampled instrument: no frames of its own, so nothing to trim or chop.
@@ -335,6 +337,7 @@ private:
         std::array<Hit, max_hits> hits {};
         unsigned hit_count = 0;
         BeatGrid beats;
+        AutoRead autos;
         int8_t root = root_none;
         std::vector<float> peaks; // Shown::peaks
     };
