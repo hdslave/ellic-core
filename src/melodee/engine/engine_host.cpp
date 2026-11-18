@@ -725,6 +725,7 @@ void EngineHost::apply(const Command& c) {
     case Type::RecordNow: take.start_now(); break;
     case Type::RecordStop: take.stop(); cue_track = -1; break;
     case Type::Monitor: monitor_on.store(c.value != 0, std::memory_order_relaxed); break;
+    case Type::InputTaken: source_taken.store(c.value != 0, std::memory_order_relaxed); break;
     case Type::LoopMonitor: loop_monitor.store(uint8_t(std::clamp<int>(c.value, 0, int(Monitor::Count) - 1)), std::memory_order_relaxed); break;
     case Type::KnobFx: knob_command(c); break;
     case Type::Compressor: {
@@ -2573,6 +2574,8 @@ void EngineHost::tick() {
 // The input source, as Sample Record, Audio Recall and Monitor hear it, after the gain.
 void EngineHost::select_input(const int32_t* input, const float* usb, unsigned frames) {
     auto source = InputSource(source_now.load(std::memory_order_relaxed));
+    // The mic or the rear inputs while the ADC is routed to the other one: silence, not the other input.
+    if (source_taken.load(std::memory_order_relaxed) && (source == InputSource::Mic || from_rear(source))) input = nullptr;
     constexpr float scale = 1.0f / 2147483648.0f;
     for (unsigned f = 0; f < frames; ++f) {
         float l = 0, r = 0;

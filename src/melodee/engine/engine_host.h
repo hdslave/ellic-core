@@ -215,6 +215,7 @@ public:
     unsigned record_track() const { return source_track.load(std::memory_order_relaxed); } // InputSource::Track: which
     bool record_post() const { return source_post.load(std::memory_order_relaxed); }      // and after its chain
     bool monitoring() const { return monitor_on.load(std::memory_order_relaxed); }
+    bool input_taken() const { return source_taken.load(std::memory_order_relaxed); }
 
     // Feedback, any thread.
     bool playing() const { return is_playing.load(std::memory_order_relaxed); }
@@ -714,6 +715,7 @@ private:
     uint32_t auto_quiet = 0;       // RecordAutoEnd: a Free take ends after this long quiet (frames at the model rate; 0 never)
     float auto_silence_db = -60;   // and what quiet is
     std::atomic<bool> monitor_on {false};
+    std::atomic<bool> source_taken {false}; // InputTaken: the source's ADC side is routed elsewhere
     std::atomic<uint8_t> loop_monitor {uint8_t(Monitor::Auto)}; // Input Config's Monitor, for loops on a hardware input
     float record_gain = 1;  // linear
     int cue_track = -1;     // a take cued for Rec length Seq starts where this track's pattern comes round

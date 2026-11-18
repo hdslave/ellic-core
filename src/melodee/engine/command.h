@@ -153,7 +153,10 @@ struct Command {
         // Free length (shell/free_length.h): track, pattern: while it plays that pattern, it counts from the top of the
         // pass playing now, or with index < track_count from where that track's pattern began when it plays the same
         // number (a take fitted to its sequence lines up with it). Sent before the pattern's longer copy.
-        Rebase
+        Rebase,
+        // value 1: the input source (the mic or the rear inputs) is on the ADC side a loop or MIDI track took, so
+        // Sample Record, Audio Recall, an audio track's take and Monitor hear silence, not the other input (IN USE).
+        InputTaken
 
     };
     Command() = default;
