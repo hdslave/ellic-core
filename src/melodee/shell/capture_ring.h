@@ -159,4 +159,12 @@ inline bool lay_capture(const CaptureRing& ring, unsigned track, const CaptureWi
     return any;
 }
 
+// Where a track's capture goes: the pattern it plays (`from`) when that is empty, else the next empty one after it,
+// round to the first; -1 when none is empty.
+inline int capture_into(const std::array<Pattern, pattern_count>& patterns, unsigned from) {
+    for (unsigned n = 0; n < pattern_count; ++n)
+        if (patterns[(from + n) % pattern_count].empty()) return int((from + n) % pattern_count);
+    return -1;
+}
+
 } // namespace melodee
