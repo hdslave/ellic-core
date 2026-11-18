@@ -5,6 +5,7 @@
 #include "melodee/engine/onsets.h"
 #include "melodee/engine/sample_data.h"
 #include "melodee/model/chop_slices.h"
+#include "melodee/model/pattern.h"
 #include "melodee/model/sampler.h"
 #include <algorithm>
 #include <array>
@@ -295,7 +296,8 @@ inline const char* slice_play_name(SlicePlay p) {
 // than low; anything else, or a slice with no hit there, is other. A hat that rings 150 ms or more is an open hat.
 // Slices of one kind that sound alike (their bands within 6 dB of the same balance, ringing about as long) are one
 // sound, and the longest of them (the most of its own tail) goes on its pad. Kicks first, then snares, hats, open
-// hats and the rest; each kind's sounds the most heard first.
+// hats and the rest; each kind's sounds the most heard first. `sound_of`: each slice's sound (its place in the list),
+// for TO PADS' pattern.
 enum class KitKind : uint8_t { Kick, Snare, Hat, OpenHat, Other };
 struct KitSound { unsigned slice = 0; KitKind kind = KitKind::Other; unsigned count = 0; };
 inline KitKind kit_kind(const HitSound& h) {
@@ -306,10 +308,11 @@ inline KitKind kit_kind(const HitSound& h) {
     return KitKind::Other;
 }
 inline std::vector<KitSound> kit_sounds(const Slices& s, uint32_t frames, const std::array<Hit, max_hits>& hits, unsigned hit_count,
-                                        const AutoRead& read) {
-    struct Group { KitSound sound; HitSound like; bool known; };
+                                        const AutoRead& read, std::array<int, max_slices>* sound_of = nullptr) {
+    struct Group { KitSound sound; HitSound like; bool known; unsigned id; };
     std::vector<Group> groups;
-    for (unsigned n = 0; n < s.count; ++n) {
+    std::array<unsigned, max_slices> in {}; // each slice's group, in the order the groups were found
+    for (unsigned n = 0; n < s.count && n < max_slices; ++n) {
         int hit = -1;
         uint32_t gap = 1324;
         for (unsigned k = 0; k < hit_count && k < max_hits && k < read.sounds.size(); ++k) {
@@ -325,7 +328,12 @@ inline std::vector<KitSound> kit_sounds(const Slices& s, uint32_t frames, const 
             return std::abs(low) <= 25 && std::abs(high) <= 25 && std::abs(int(h.ring) - int(g.like.ring)) <= std::max(3, int(g.like.ring) / 2);
         };
         auto it = std::find_if(groups.begin(), groups.end(), alike);
-        if (it == groups.end()) { groups.push_back({KitSound {n, kind, 1}, h, known}); continue; }
+        if (it == groups.end()) {
+            in[n] = unsigned(groups.size());
+            groups.push_back({KitSound {n, kind, 1}, h, known, in[n]});
+            continue;
+        }
+        in[n] = it->id;
         ++it->sound.count;
         const unsigned kept = it->sound.slice;
         if (s.end(n, frames) - s.start[n] > s.end(kept, frames) - s.start[kept]) it->sound.slice = n;
@@ -335,6 +343,12 @@ inline std::vector<KitSound> kit_sounds(const Slices& s, uint32_t frames, const 
     });
     std::vector<KitSound> out;
     for (const auto& g : groups) out.push_back(g.sound);
+    if (sound_of) {
+        sound_of->fill(-1);
+        std::vector<int> place(groups.size());
+        for (size_t k = 0; k < groups.size(); ++k) place[groups[k].id] = int(k);
+        for (unsigned n = 0; n < s.count && n < max_slices; ++n) (*sound_of)[n] = place[in[n]];
+    }
     return out;
 }
 // Slice n's pad, from the chopped pad's sound, as `play` lays it; `group` the mute group MONO and THRU share.
@@ -342,6 +356,43 @@ inline PadSound slice_pad(const PadSound& parent, const Slices& s, unsigned n, u
     PadSound one = slice_sound(parent, s.start[n], play == SlicePlay::Thru ? s.end(s.count - 1, frames) : s.end(n, frames));
     if (play != SlicePlay::Poly) one.group = group;
     return one;
+}
+// TO PADS' pattern, as Live's Slice to New MIDI Track: a note for each slice where it falls in the region, so Play
+// gives the loop back as the slices' pads play it. Ticks a frame of the region at the pad's speed: Warp's Seq or
+// Follow plays it at the region's own tempo (by # Beats, else own_tempo) whatever the project's, 50..200 % that much
+// longer at the pattern's tempo, else as it was recorded at the pattern's tempo.
+inline double slice_ticks_per_frame(const PadSound& pad, bool follow, uint32_t region_frames, unsigned tempo_tenths) {
+    constexpr double per_second = ticks_per_quarter / 60.0, rate = 44100; // ticks a second at 1 BPM; frames a second
+    double own = 0; // the region's own tempo where the pad follows the project's
+    if (pad.warp == warp_seq) own = pad.beats && region_frames ? pad.beats * 60.0 * rate / region_frames : pad.own_tempo / 10.0;
+    else if (pad.warp < warp_min && follow) own = pad.own_tempo / 10.0;
+    if (own > 0) return own * per_second / rate;
+    const double longer = pad.warp >= warp_min ? pad.warp / 100.0 : 1.0;
+    return longer * (std::max(tempo_tenths, 10u) / 10.0) * per_second / rate;
+}
+// The pattern: slice n's note on `keys[n]` (-1 none) at velocity 127, as long as the slice; the length the region
+// at the nearest whole bar when within an eighth of one, else the bars that hold it all, at most `most` ticks.
+inline Pattern slice_pattern(const Slices& s, uint32_t frames, const std::array<int, max_slices>& keys, double ticks_per_frame,
+                             unsigned bar_ticks, uint32_t most) {
+    Pattern p;
+    if (!s.count || !bar_ticks) return p;
+    const uint32_t from = s.start[0], to = s.end(s.count - 1, frames);
+    const double bars = (to - from) * ticks_per_frame / bar_ticks;
+    double whole = std::round(bars);
+    if (whole < 1 || std::fabs(bars - whole) > 0.125) whole = std::ceil(bars);
+    p.length = uint32_t(std::min<double>(std::max(1.0, whole) * bar_ticks, most));
+    p.free = false; // its length is set
+    for (unsigned n = 0; n < s.count && n < max_slices; ++n) {
+        if (keys[n] < 0 || keys[n] > 255) continue; // a kit's keys run 36 .. 163
+        const uint32_t tick = uint32_t(std::lround((s.start[n] - from) * ticks_per_frame));
+        if (tick >= p.length) break;
+        Event e;
+        e.tick = tick;
+        e.length = uint16_t(std::clamp<long>(std::lround((s.end(n, frames) - s.start[n]) * ticks_per_frame), 1, 0xffff));
+        e.key = uint8_t(keys[n]); e.velocity = 127;
+        p.add(e);
+    }
+    return p;
 }
 // The mute group MONO and THRU put the slices in: the chopped pad's own, else the first none of the track's pads
 // holds (16 when every one is taken).
