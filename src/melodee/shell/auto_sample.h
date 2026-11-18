@@ -3,17 +3,19 @@
 #pragma once
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <vector>
 
 // The auto sampler: a plug-in track's instrument played a key at a time by
 // the print engine (shell/print_engine.h, a print host of its own, at SCHED_IDLE),
-// each note held, let go and its release kept, written as 24-bit WAVs and an MPC
-// keygroup program (shell/xpm_write.h) in Samples/Keygroups/<name>/, which a new
-// KEYGROUP track then plays with the plug-in track's patterns and mix
-// (shell/auto_sample.cpp). Taken before the track's chain (the keygroup
-// track gets the chain) or after it (the keygroup track's chain empty).
+// each note held, let go and its release kept, written as 24-bit WAVs (mono where
+// both sides are the same) and an MPC keygroup program (shell/xpm_write.h) in
+// Samples/Keygroups/<name>/, which a new KEYGROUP track then plays with the
+// plug-in track's patterns and mix (shell/auto_sample.cpp). Taken before the
+// track's chain (the keygroup track gets the chain) or after it (the keygroup
+// track's chain empty).
 namespace melodee {
 
 // What the check heard (engine/auto_probe.h), before anything is sampled: nothing to pick, nothing read from the
@@ -62,6 +64,8 @@ struct AutoFindings {
     // `split`: the first key of the upper one, 0 none. The fields above are then the lower side's, `upper` the other's.
     uint8_t split = 0;
     AutoZone upper;
+    // How many times real time its notes played during the check (an instrument outside: about 1); 0: not heard.
+    float speed = 0;
     AutoZone zone(unsigned key) const {
         if (split && key >= split) return upper;
         return {kind, glide, legato, tied, sustains, moves, hold, release, release_slow, release_share, velocity};
@@ -119,6 +123,23 @@ struct AutoSampleSettings {
         }
         return uint8_t(std::clamp<unsigned>((layer + 1) * 127 / n, 1, 127));
     }
+    // About how long sampling takes, seconds: each note held, then let go until it has fallen silent (TAIL at most),
+    // and a moment of quiet before the next, at the speed the check played it. 0: not known before the check (an
+    // instrument outside is checked once SAMPLE is pressed).
+    float seconds_expected() const {
+        if (!found.heard || found.speed <= 0) return 0;
+        double total = 0;
+        for (uint8_t root : roots()) {
+            const AutoZone z = found.zone(root);
+            // To silence: 60 dB down. A release's seconds take it 26 dB down (engine/release_fit.h); a second stage
+            // starts at its share of the level.
+            float fall = z.release * 60.0f / 26.0f;
+            if (z.release_slow > 0 && z.release_share > 0)
+                fall = std::max(fall, z.release_slow * std::max(0.0f, 60.0f + 20.0f * std::log10(z.release_share)) / 26.0f);
+            total += double(layer_count() * take_count()) * (hold_seconds(root) + std::min(tail, fall + 0.2f) + 0.1f);
+        }
+        return float(total / found.speed);
+    }
     // The keys sampled: every STEP from LOW; drums, every key of the range that sounds.
     std::vector<uint8_t> roots() const {
         std::vector<uint8_t> out;
@@ -150,6 +171,7 @@ struct AutoSampleResult {
     unsigned samples = 0;
     unsigned loops = 0;  // samples given a loop
     unsigned centred = 0; // samples whose DC offset was taken out
+    unsigned mono = 0;   // samples written as one channel (both sides the same)
     // The release fitted to how its notes fell (engine/release_fit.h): seconds; a second stage's seconds and share (0: none).
     float release = 0, release_slow = 0, release_share = 0;
     std::string release_note; // what the fit went by, for `melodee-print status`

@@ -362,6 +362,13 @@ bool WavStream::close() {
     return !failed;
 }
 
+bool sides_alike(const float* interleaved, size_t frames) {
+    constexpr float step = 1.0f / 8388608.0f; // 2^-23
+    for (size_t f = 0; f < frames; ++f)
+        if (!(std::fabs(interleaved[2 * f] - interleaved[2 * f + 1]) < step)) return false; // a NaN is not alike
+    return true;
+}
+
 bool make_overview(const SampleData& s, Overview& out, std::array<Overview, 2>* sides) {
     out.fill(0);
     if (sides) { (*sides)[0].fill(0); (*sides)[1].fill(0); }

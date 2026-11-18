@@ -186,6 +186,10 @@ private:
     std::vector<unsigned char> header(uint32_t frames) const;
     uint32_t noise = 0x9e3779b9u; // the dither's
 };
+// True when the two sides of `frames` interleaved stereo frames are the same sound: nowhere apart by a 24-bit step
+// (2^-23) or more. A mono 24-bit file then holds them as a stereo one would, in half the room (read_wav puts its one
+// side on both).
+bool sides_alike(const float* interleaved, size_t frames);
 // `out` the louder side of each column; with `sides`, the left and right apart. True when the sides differ (a
 // stereo file; a mono one is read onto both sides alike).
 bool make_overview(const SampleData& sample, Overview& out, std::array<Overview, 2>* sides = nullptr);
