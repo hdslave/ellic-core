@@ -238,14 +238,15 @@ inline uint32_t give_way_reach(const Slices& cut, unsigned n, uint32_t frames) {
     const uint32_t step = std::min(at - cut.start[n - 1], next > at ? next - at : 0);
     return std::max<uint32_t>(2 * hand_reach, step / 4);
 }
-inline Slices with_hand(const Slices& cut, const HandCuts& hand, uint32_t frames, bool* capped = nullptr) {
+// `keep_clear`: a type's cut nearer a hand cut than this gives way too (Auto: auto_keep_clear()).
+inline Slices with_hand(const Slices& cut, const HandCuts& hand, uint32_t frames, bool* capped = nullptr, uint32_t keep_clear = 0) {
     if (hand.empty() || !cut.count) return cut;
     Slices s;
     s.whole(cut.start[0], cut.stop[cut.count - 1]);
     for (unsigned n = 0; n < hand.pin_count; ++n) s.add(hand.pins[n], frames);
     for (unsigned n = 1; n < cut.count; ++n) {
         if (hand.dropped(cut.start[n])) continue;
-        const uint32_t at = cut.start[n], reach = give_way_reach(cut, n, frames);
+        const uint32_t at = cut.start[n], reach = std::max(give_way_reach(cut, n, frames), keep_clear);
         bool near_hand = false;
         for (unsigned k = 0; k < hand.pin_count && !near_hand; ++k)
             near_hand = (hand.pins[k] > at ? hand.pins[k] - at : at - hand.pins[k]) < reach;
@@ -402,6 +403,106 @@ template <class Pads> inline uint8_t slice_group(const PadSound& parent, const P
     for (const auto& p : pads) if (p.used() && p.group) taken |= 1u << (p.group % 32);
     for (uint8_t g = 1; g <= 16; ++g) if (!(taken & (1u << g))) return g;
     return 16;
+}
+
+// Auto (engine/auto_chop.h): a sample with a steady beat (DRUMS, MUSIC) is cut on its tracked beats (BeatGrid::at,
+// each on its hit): every beat, every 2, 4, 8 or 16, or eighths (each beat, and its strongest hit from 40% to 60%
+// of the way to the next beat, where there is one), whichever comes nearest SLICES (on a tie, the longer). A
+// lead-in before the first beat, or a tail after the last, is a slice of its own where it is at least 80% of an
+// eighth note long, else it joins its neighbour. Anything else is cut by its hits (auto_slices()).
+inline bool auto_on_beat(const AutoRead& read, const BeatGrid& beats) {
+    return (read.kind == SoundKind::Drums || read.kind == SoundKind::Music) && beats.found();
+}
+inline Slices auto_chop(const AutoRead& read, unsigned want, uint32_t from, uint32_t to, uint32_t frames, const std::array<Hit, max_hits>& hits,
+                        unsigned hit_count, const BeatGrid& beats, bool* capped = nullptr) {
+    if (!auto_on_beat(read, beats)) return auto_slices(read, want, from, to, frames, hits, hit_count, capped);
+    if (capped) *capped = false;
+    to = to && to <= frames ? to : frames;
+    const auto least = uint32_t(0.8 * 44100.0 * 600 / beats.tempo / 2); // 80% of an eighth note
+    // The beats from the region's start (one there counts, so every 2 beats counts from it), cut where a slice of
+    // 80% of an eighth note or more is left either side.
+    // Before the first tracked beat, beats counted back by the tempo to the region's start: they count, and their
+    // eighths' hits may be cut, but they are not cut themselves (no hit is known on them).
+    const auto beat = uint32_t(44100.0 * 600 / beats.tempo);
+    std::vector<uint32_t> at;
+    std::vector<bool> tracked;
+    for (uint32_t b : beats.at) if (b + 1323 >= from && b < to) { at.push_back(b); tracked.push_back(true); }
+    // The hits half a beat after the tracked beats clearly stronger (by 30%, the strongest within 30 ms of each):
+    // the tracker took the off-beats, and those hits are the beats.
+    auto strongest_near = [&](uint32_t t) {
+        int best = -1;
+        for (unsigned n = 0; n < hit_count && n < max_hits; ++n)
+            if ((hits[n].frame > t ? hits[n].frame - t : t - hits[n].frame) <= 1323 && (best < 0 || hits[n].strength > hits[size_t(best)].strength)) best = int(n);
+        return best;
+    };
+    unsigned on = 0, off = 0;
+    auto count_in = [&](unsigned& sum, uint32_t t) { const int h = strongest_near(t); sum += h >= 0 ? hits[size_t(h)].strength : 0; };
+    for (uint32_t b : at) { count_in(on, b); count_in(off, b + beat / 2); }
+    // The beat before the first tracked one, and the off-beat before it, where they fall in the region (30 ms early counts).
+    auto before = [&](uint32_t back) { return !at.empty() && uint64_t(at.front()) + 1323 >= uint64_t(from) + back; };
+    auto back_from = [&](uint32_t back) { return at.front() > from + back ? at.front() - back : from; };
+    if (before(beat)) count_in(on, back_from(beat));
+    if (before(beat / 2)) count_in(off, back_from(beat / 2));
+    if (off * 10 > on * 13) {
+        std::vector<uint32_t> moved;
+        std::vector<bool> real;
+        if (before(beat / 2)) { // the one before the first tracked beat
+            const int h = strongest_near(back_from(beat / 2));
+            moved.push_back(h >= 0 ? hits[size_t(h)].frame : back_from(beat / 2));
+            real.push_back(h >= 0);
+        }
+        for (uint32_t b : at) {
+            const int h = strongest_near(b + beat / 2);
+            if (b + beat / 2 >= to) continue;
+            moved.push_back(h >= 0 ? hits[size_t(h)].frame : b + beat / 2);
+            real.push_back(h >= 0);
+        }
+        at = std::move(moved);
+        tracked = std::move(real);
+    }
+    while (!at.empty() && uint64_t(at.front()) + 1323 >= uint64_t(from) + beat) { // within 30 ms of the region's start counts
+        at.insert(at.begin(), at.front() > beat ? at.front() - beat : 0);
+        tracked.insert(tracked.begin(), false);
+    }
+    auto room = [&](size_t i) { return tracked[i] && at[i] >= from + least && at[i] + least <= to; };
+    auto fits = [&](uint32_t cut) { return cut >= from + least && cut + least <= to; };
+    std::vector<std::vector<uint32_t>> ways;
+    std::vector<uint32_t> eighths;
+    for (size_t i = 0; i < at.size(); ++i) { // eighths: the beat, then the strongest hit near the middle of it (the last beat's by the tempo)
+        if (room(i)) eighths.push_back(at[i]);
+        const uint32_t next = i + 1 < at.size() ? at[i + 1] : at[i] + beat;
+        const uint32_t lo = at[i] + uint32_t(0.4 * (next - at[i])), hi = at[i] + uint32_t(0.6 * (next - at[i]));
+        int best = -1;
+        for (unsigned n = 0; n < hit_count && n < max_hits; ++n)
+            if (hits[n].frame >= lo && hits[n].frame <= hi && (best < 0 || hits[n].strength > hits[size_t(best)].strength)) best = int(n);
+        if (best >= 0 && fits(hits[size_t(best)].frame)) eighths.push_back(hits[size_t(best)].frame);
+    }
+    for (unsigned every : {16u, 8u, 4u, 2u, 1u}) {
+        std::vector<uint32_t> w;
+        for (size_t i = 0; i < at.size(); i += every) if (room(i)) w.push_back(at[i]);
+        ways.push_back(std::move(w));
+    }
+    ways.push_back(std::move(eighths));
+    const std::vector<uint32_t>* best = nullptr;
+    unsigned gap = UINT32_MAX;
+    for (const auto& w : ways) { // longest first: on a tie the longer stays
+        const unsigned count = unsigned(w.size()) + 1, off = count > want ? count - want : want - count;
+        if (off < gap) { gap = off; best = &w; }
+    }
+    Slices s;
+    s.whole(from, to == frames ? 0 : to);
+    if (!best) return s;
+    uint32_t last = from; // a cut that would leave under 80% of an eighth note after the one before (beats tracked unevenly) is left out
+    for (uint32_t cut : *best) {
+        if (cut < last + least || cut + least > to) continue;
+        if (s.count >= max_slices) { if (capped) *capped = true; break; }
+        if (s.add(cut, frames)) last = cut;
+    }
+    return s;
+}
+// How far from a hand cut Auto keeps its own: an eighth note at the sample's tempo, else auto_least (150 ms).
+inline uint32_t auto_keep_clear(const AutoRead& read, const BeatGrid& beats) {
+    return auto_on_beat(read, beats) ? uint32_t(44100.0 * 600 / beats.tempo / 2) : auto_least;
 }
 
 // The whole sample, as before parity phase 5.

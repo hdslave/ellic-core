@@ -66,17 +66,6 @@ std::vector<Span> spans_of(const std::vector<float>& db, float below, unsigned g
     return out;
 }
 
-int pitch_class(float hz) {
-    const int midi = int(std::lround(69 + 12 * std::log2(std::max(hz, 1.0f) / 440.0f)));
-    return ((midi % 12) + 12) % 12;
-}
-
-float cosine(const std::array<float, 12>& a, const std::array<float, 12>& b) {
-    float ab = 0, aa = 0, bb = 0;
-    for (int k = 0; k < 12; ++k) { ab += a[size_t(k)] * b[size_t(k)]; aa += a[size_t(k)] * a[size_t(k)]; bb += b[size_t(k)] * b[size_t(k)]; }
-    return aa > 0 && bb > 0 ? ab / std::sqrt(aa * bb) : 1.0f;
-}
-
 } // namespace
 
 void read_auto(const std::vector<float>& mono, const BandFrames& spectrum, const std::array<Hit, max_hits>& hits,
@@ -116,7 +105,6 @@ void read_auto(const std::vector<float>& mono, const BandFrames& spectrum, const
     // Held and struck, cell by cell; the loud frames' shares; each frame's notes (pitch classes, from held sound).
     const auto& a = amps().a;
     std::vector<uint8_t> total(count, 0);
-    std::vector<std::array<float, 12>> notes(count, std::array<float, 12> {});
     if (width && count && spectrum.level.size() >= size_t(width) * count) {
         const uint8_t* level = spectrum.level.data();
         for (unsigned t = 0; t < count; ++t) {
@@ -126,8 +114,6 @@ void read_auto(const std::vector<float>& mono, const BandFrames& spectrum, const
         }
         const uint8_t loudest = *std::max_element(total.begin(), total.end());
         const unsigned stride = std::max(1u, count / 12000); // a long sample: every so many frames (2 minutes' worth)
-        std::vector<int> band_pc(width, -1);
-        for (unsigned b = 0; b < width; ++b) if (spectrum.hz[b] >= 150 && spectrum.hz[b] <= 5000) band_pc[b] = pitch_class(spectrum.hz[b]);
         double struck_sum = 0, all_sum = 0, held_sum = 0, range_sum = 0;
         uint8_t window[2 * median_reach + 1];
         for (unsigned t = 0; t < count; t += stride) {
@@ -142,7 +128,6 @@ void read_auto(const std::vector<float>& mono, const BandFrames& spectrum, const
                 std::nth_element(window, window + n / 2, window + n);
                 const uint8_t struck = window[n / 2];
                 const float e = a[level[t * width + b]] * a[level[t * width + b]];
-                if (held >= struck && band_pc[b] >= 0) notes[t][size_t(band_pc[b])] += a[held] * a[held];
                 if (!loud) continue;
                 all_sum += e;
                 if (struck > held) struck_sum += e;
@@ -152,22 +137,6 @@ void read_auto(const std::vector<float>& mono, const BandFrames& spectrum, const
                 }
             }
         }
-        // The strongest held pitch of each loud frame, and how often it moves by one semitone.
-        unsigned slides = 0, moves = 0;
-        int before = -1;
-        for (unsigned t = 0; t < count; t += stride) {
-            if (total[t] + 170 < loudest) { before = -1; continue; }
-            int top = -1;
-            float most = 0;
-            for (unsigned b = 0; b < width; ++b) {
-                if (spectrum.hz[b] < 150 || spectrum.hz[b] > 1500) continue;
-                const float v = a[level[t * width + b]];
-                if (v > most) { most = v; top = int(b); }
-            }
-            if (top >= 0 && before >= 0) { ++moves; slides += std::abs(top - before) == 1; }
-            before = top;
-        }
-        out.slide = moves ? float(slides) / float(moves) : 0.0f;
         out.percussive = all_sum > 0 ? float(struck_sum / all_sum) : 0.0f;
         out.voice = held_sum > 0 ? float(range_sum / held_sum) : 0.0f;
     }
@@ -192,16 +161,6 @@ void read_auto(const std::vector<float>& mono, const BandFrames& spectrum, const
         unsigned t = t0 + 1;
         while (t < count && t < next && t < t0 + 255 && total[t] + 85 >= peak) ++t;
         s.ring = uint8_t(std::min(255u, t - t0));
-    }
-
-    // How far the notes change at each hit: the 400 ms before it against the 400 ms after its attack.
-    out.change.assign(hit_count, 0.0f);
-    for (unsigned n = 0; n < hit_count && count; ++n) {
-        const unsigned t0 = hits[n].frame / hop, reach = 40;
-        std::array<float, 12> before {}, after {};
-        for (unsigned t = t0 > reach ? t0 - reach : 0; t < t0 && t < count; ++t) for (size_t k = 0; k < 12; ++k) before[k] += notes[t][k];
-        for (unsigned t = t0 + 3; t < t0 + 3 + reach && t < count; ++t) for (size_t k = 0; k < 12; ++k) after[k] += notes[t][k];
-        out.change[n] = std::clamp(1.0f - cosine(before, after), 0.0f, 1.0f);
     }
 
     // The kind.
@@ -253,9 +212,9 @@ namespace {
 struct Candidate { uint32_t at; float score; };
 
 // `want` - 1 cuts from `cands` in (from, to): the best of score times room, where room is how far it is from the
-// cuts already made and the region's ends, against an even share of the region (so they spread out); never two
-// within 40 ms.
-std::vector<uint32_t> pick(std::vector<Candidate> cands, unsigned want, uint32_t from, uint32_t to) {
+// cuts already made and the region's ends, against an even share of the region (so they spread out); none nearer
+// another or an end than `least`.
+std::vector<uint32_t> pick(const std::vector<Candidate>& cands, unsigned want, uint32_t from, uint32_t to, uint32_t least) {
     std::vector<uint32_t> cuts;
     if (want < 2 || to <= from) return cuts;
     const double share = double(to - from) / want;
@@ -268,7 +227,7 @@ std::vector<uint32_t> pick(std::vector<Candidate> cands, unsigned want, uint32_t
             const uint32_t at = cands[i].at;
             uint32_t room = std::min(at - from, to - at);
             for (uint32_t c : cuts) room = std::min(room, at > c ? at - c : c - at);
-            if (room < 2 * min_slice) continue;
+            if (room < least) continue;
             const double v = cands[i].score * std::min(1.0, room / share);
             if (v > value) { value = v; best = int(i); }
         }
@@ -280,65 +239,10 @@ std::vector<uint32_t> pick(std::vector<Candidate> cands, unsigned want, uint32_t
     return cuts;
 }
 
-// The hits in (from, to) as candidates. A hit within 50 ms after another is one with it (a flam, a grace note, a
-// layered clap): the cut at the first, as strong as the stronger. DRUMS: a ghost note is left inside the hit before:
-// a hit under a third of the strong hits' level, with more mid than high, that sounds like a strong one played softly
-// (its bands within 7 dB of the same balance, ringing about as long). A quiet hat stays. A hit off the beat's
-// sixteenths counts less.
-std::vector<Candidate> hit_candidates(const std::array<Hit, max_hits>& hits, unsigned hit_count, uint32_t from, uint32_t to,
-                                      const BeatGrid* grid, const AutoRead* read = nullptr) {
-    std::vector<Candidate> c;
-    std::vector<int> which; // the hit each candidate is (its sound)
-    for (unsigned n = 0; n < hit_count && n < max_hits; ++n) {
-        const uint32_t f = hits[n].frame;
-        if (f <= from + min_slice || f + min_slice >= to) continue;
-        const float score = hits[n].strength / 255.0f;
-        if (!c.empty() && f - c.back().at < 2205) {
-            if (score > c.back().score) { c.back().score = score; which.back() = int(n); }
-            continue;
-        }
-        c.push_back({f, score});
-        which.push_back(int(n));
-    }
-    if (!grid || c.empty()) return c;
-    std::vector<float> scores;
-    for (const auto& x : c) scores.push_back(x.score);
-    std::sort(scores.begin(), scores.end());
-    const float strong = scores[scores.size() * 3 / 4], ghost = strong / 3;
-    auto sound = [&](size_t i) { return read && size_t(which[i]) < read->sounds.size() ? read->sounds[size_t(which[i])] : HitSound {}; };
-    auto softer_twin = [&](size_t i) {
-        if (!read) return true;
-        const HitSound a = sound(i);
-        for (size_t j = 0; j < c.size(); ++j) {
-            if (c[j].score < 0.6f * strong) continue;
-            const HitSound b = sound(j);
-            const int low = (a.low - a.mid) - (b.low - b.mid), high = (a.high - a.mid) - (b.high - b.mid);
-            const int ring = std::abs(int(a.ring) - int(b.ring));
-            if (std::abs(low) <= 30 && std::abs(high) <= 30 && ring <= std::max(3, int(b.ring) / 2)) return true;
-        }
-        return false;
-    };
-    std::vector<Candidate> kept;
-    const bool on_grid = grid->found();
-    const double sixteenth = on_grid ? 44100.0 * 600 / grid->tempo / 4 : 0;
-    for (size_t i = 0; i < c.size(); ++i) {
-        auto x = c[i];
-        if (x.score < ghost && sound(i).high <= sound(i).mid && softer_twin(i)) continue; // a hat (more high than mid) stays
-        if (on_grid) {
-            auto b = std::upper_bound(grid->at.begin(), grid->at.end(), x.at);
-            const uint32_t beat = b == grid->at.begin() ? grid->first : *(b - 1);
-            const double off = std::fmod(std::fabs(double(x.at) - double(beat)), sixteenth);
-            if (std::min(off, sixteenth - off) > 0.35 * sixteenth) x.score *= 0.7f;
-        }
-        kept.push_back(x);
-    }
-    return kept;
-}
-
 } // namespace
 
 Slices auto_slices(const AutoRead& read, unsigned want, uint32_t from, uint32_t to, uint32_t frames,
-                   const std::array<Hit, max_hits>& hits, unsigned hit_count, const BeatGrid& beats, bool* capped) {
+                   const std::array<Hit, max_hits>& hits, unsigned hit_count, bool* capped) {
     Slices s;
     if (capped) *capped = false;
     if (!frames) return s;
@@ -346,57 +250,27 @@ Slices auto_slices(const AutoRead& read, unsigned want, uint32_t from, uint32_t 
     from = std::min(from, to > min_slice ? to - min_slice : 0);
     s.whole(from, to);
     want = std::clamp(want, 1u, max_slices);
-    auto lay = [&](const std::vector<Span>& parts) { // slices with gaps: one a part, each ending where its part does
+    if (read.kind == SoundKind::Shots) { // one slice a sound, each ending where its sound does
         Slices g;
-        for (const auto& p : parts) {
+        for (const auto& p : read.spans) {
             const uint32_t a = std::max(p.from, from), b = std::min(p.to, to);
             if (b < a + min_slice) continue;
             if (g.count >= max_slices) { if (capped) *capped = true; break; }
             g.start[g.count] = a; g.stop[g.count] = b == frames ? 0 : b; ++g.count;
         }
         return g.count ? g : s;
-    };
-    switch (read.kind) {
-    case SoundKind::Shots: return lay(read.spans);
-    case SoundKind::Vocal: {
-        // A cut where each phrase starts; then on the strongest word starts inside the phrases, up to `want`.
-        std::vector<Span> phrases;
-        for (const auto& p : read.phrases) if (p.to > from && p.from < to) phrases.push_back(p);
-        if (phrases.empty()) break;
-        std::vector<Candidate> words;
-        for (const auto& p : phrases)
-            for (const auto& c : hit_candidates(hits, hit_count, p.from + 2205, p.to, nullptr)) words.push_back(c);
-        std::vector<uint32_t> inside;
-        if (want > phrases.size()) {
-            inside = pick(words, unsigned(want - phrases.size() + 1), from, to);
-        }
-        std::vector<Span> parts;
-        for (const auto& p : phrases) {
-            uint32_t at = p.from;
-            for (uint32_t c : inside) if (c > p.from && c < p.to) { parts.push_back({at, c}); at = c; }
-            parts.push_back({at, p.to});
-        }
-        return lay(parts);
     }
-    case SoundKind::Music: {
-        // Where the notes change most first, then the strongest hits, up to `want`.
-        std::vector<Candidate> c;
-        for (unsigned n = 0; n < hit_count && n < max_hits; ++n) {
-            const uint32_t f = hits[n].frame;
-            if (f <= from + min_slice || f + min_slice >= to) continue;
-            const float score = (n < read.change.size() ? read.change[n] : 0.0f) + 0.15f * hits[n].strength / 255.0f;
-            if (!c.empty() && f - c.back().at < 2205) { c.back().score = std::max(c.back().score, score); continue; }
-            c.push_back({f, score});
-        }
-        for (uint32_t cut : pick(c, want, from, to)) s.add(cut, frames);
-        return s;
+    // The strongest hits, spread out. A hit within 50 ms after another is one with it (a flam, a grace note, a
+    // layered clap): the cut at the first, as strong as the stronger.
+    std::vector<Candidate> c;
+    for (unsigned n = 0; n < hit_count && n < max_hits; ++n) {
+        const uint32_t f = hits[n].frame;
+        if (f <= from + auto_least || f + auto_least >= to) continue;
+        const float score = hits[n].strength / 255.0f;
+        if (!c.empty() && f - c.back().at < 2205) { c.back().score = std::max(c.back().score, score); continue; }
+        c.push_back({f, score});
     }
-    default: {
-        const bool drums = read.kind == SoundKind::Drums;
-        for (uint32_t cut : pick(hit_candidates(hits, hit_count, from, to, drums ? &beats : nullptr, &read), want, from, to)) s.add(cut, frames);
-        return s;
-    }
-    }
+    for (uint32_t cut : pick(c, want, from, to, auto_least)) s.add(cut, frames);
     return s;
 }
 

@@ -10,10 +10,9 @@
 #include <vector>
 
 // Chop's Auto type: what kind of sound a sample is, read with its hits and beats when it loads (engine/onsets.cpp),
-// and where Auto cuts it. DRUMS: a steady beat led by drums, a cut on each drum hit. MUSIC: a steady beat led by
-// notes or chords, a cut where they change, then on the strongest hits. VOCAL: a voice, a cut where a phrase starts
-// after a gap, then on words (cut as HITS for now). SHOTS: single sounds with silence between, one slice a sound. HITS: none of these, the strongest
-// hits spread out.
+// and where Auto cuts it. DRUMS (a steady beat led by drums) and MUSIC (a steady beat led by notes or chords) are cut
+// on the beat, as Beats cuts them (shell/chop.h auto_chop()). SHOTS: single sounds with silence between, one slice a
+// sound. HITS: anything else, the strongest hits spread out, no slice under 150 ms. VOCAL is read but cut as HITS.
 namespace melodee {
 
 enum class SoundKind : uint8_t { None, Drums, Music, Vocal, Shots, Hits, Count };
@@ -39,12 +38,9 @@ struct AutoRead {
     SoundKind found = SoundKind::None; // what it reads as (VOCAL is cut as HITS until it scores well)
     float percussive = 0;            // the share of its sound in short hits rather than held notes (0..1)
     float voice = 0;                 // the share of its held sound between 150 Hz and 4 kHz (0..1)
-    float slide = 0;                 // how often its strongest held pitch (150 Hz to 1.5 kHz) moves by a semitone from
-                                     // one frame to the next, of its loud frames (a voice glides and wavers; keys hold or jump)
     std::vector<HitSound> sounds;    // one a hit, in the order find_hits_in() keeps them
     std::vector<Span> spans;         // its sounds between silences (50 dB under its loudest, 30 ms or more)
     std::vector<Span> phrases;       // its sound between gaps (35 dB under its loudest, 120 ms or more)
-    std::vector<float> change;       // at each hit: how far the notes change there (0..1)
     int8_t bar_one = -1;             // which of the first four of BeatGrid::at is a bar's first beat; -1 not sure
 };
 
@@ -56,10 +52,13 @@ void read_auto(const std::vector<float>& model_mono, const BandFrames& spectrum,
 constexpr unsigned auto_counts = 4, auto_default_count = 1;
 inline unsigned auto_slice_count(int amount) { return 8u << std::min(unsigned(std::max(amount, 0)), auto_counts - 1); }
 
-// Auto's slices of [from, to) of a sample of `frames`: `want` of them (SHOTS: one a sound, whatever `want`). DRUMS
-// and MUSIC keep to the whole bars of the region where the beat says which beat is a bar's first. `capped`: set when
-// a sound found no room (64 slices).
+// The shortest slice Auto cuts by hits (HITS), and how near a hand cut it cuts where no beat says more: 150 ms.
+constexpr uint32_t auto_least = 6615;
+
+// Auto's slices of [from, to) of a sample of `frames` by its hits: SHOTS one a sound (whatever `want`), anything
+// else `want` of the strongest hits spread over the region, none under auto_least. A sample with a steady beat is
+// cut on the beat instead (shell/chop.h auto_chop()). `capped`: set when a sound found no room (64 slices).
 Slices auto_slices(const AutoRead& read, unsigned want, uint32_t from, uint32_t to, uint32_t frames,
-                   const std::array<Hit, max_hits>& hits, unsigned hit_count, const BeatGrid& beats, bool* capped = nullptr);
+                   const std::array<Hit, max_hits>& hits, unsigned hit_count, bool* capped = nullptr);
 
 } // namespace melodee
