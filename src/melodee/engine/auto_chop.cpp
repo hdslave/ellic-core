@@ -152,6 +152,22 @@ void read_auto(const std::vector<float>& mono, const BandFrames& spectrum, const
                 }
             }
         }
+        // The strongest held pitch of each loud frame, and how often it moves by one semitone.
+        unsigned slides = 0, moves = 0;
+        int before = -1;
+        for (unsigned t = 0; t < count; t += stride) {
+            if (total[t] + 170 < loudest) { before = -1; continue; }
+            int top = -1;
+            float most = 0;
+            for (unsigned b = 0; b < width; ++b) {
+                if (spectrum.hz[b] < 150 || spectrum.hz[b] > 1500) continue;
+                const float v = a[level[t * width + b]];
+                if (v > most) { most = v; top = int(b); }
+            }
+            if (top >= 0 && before >= 0) { ++moves; slides += std::abs(top - before) == 1; }
+            before = top;
+        }
+        out.slide = moves ? float(slides) / float(moves) : 0.0f;
         out.percussive = all_sum > 0 ? float(struck_sum / all_sum) : 0.0f;
         out.voice = held_sum > 0 ? float(range_sum / held_sum) : 0.0f;
     }
@@ -178,22 +194,14 @@ void read_auto(const std::vector<float>& mono, const BandFrames& spectrum, const
         s.ring = uint8_t(std::min(255u, t - t0));
     }
 
-    // How far the notes change at each beat: the two beats before it against the two from it.
-    if (beats.found() && count) {
-        const size_t nb = beats.at.size();
-        std::vector<std::array<float, 12>> per_beat(nb, std::array<float, 12> {});
-        for (size_t i = 0; i < nb; ++i) {
-            const uint32_t from = beats.at[i], to = i + 1 < nb ? beats.at[i + 1] : from + (i ? from - beats.at[i - 1] : 0);
-            for (unsigned t = from / hop; t < to / hop && t < count; ++t)
-                for (size_t k = 0; k < 12; ++k) per_beat[i][k] += notes[t][k];
-        }
-        out.change.assign(nb, 0.0f);
-        for (size_t i = 1; i < nb; ++i) {
-            std::array<float, 12> before {}, after {};
-            for (size_t j = i >= 2 ? i - 2 : 0; j < i; ++j) for (size_t k = 0; k < 12; ++k) before[k] += per_beat[j][k];
-            for (size_t j = i; j < std::min(nb, i + 2); ++j) for (size_t k = 0; k < 12; ++k) after[k] += per_beat[j][k];
-            out.change[i] = std::clamp(1.0f - cosine(before, after), 0.0f, 1.0f);
-        }
+    // How far the notes change at each hit: the 400 ms before it against the 400 ms after its attack.
+    out.change.assign(hit_count, 0.0f);
+    for (unsigned n = 0; n < hit_count && count; ++n) {
+        const unsigned t0 = hits[n].frame / hop, reach = 40;
+        std::array<float, 12> before {}, after {};
+        for (unsigned t = t0 > reach ? t0 - reach : 0; t < t0 && t < count; ++t) for (size_t k = 0; k < 12; ++k) before[k] += notes[t][k];
+        for (unsigned t = t0 + 3; t < t0 + 3 + reach && t < count; ++t) for (size_t k = 0; k < 12; ++k) after[k] += notes[t][k];
+        out.change[n] = std::clamp(1.0f - cosine(before, after), 0.0f, 1.0f);
     }
 
     // The kind.
@@ -235,8 +243,9 @@ void read_auto(const std::vector<float>& mono, const BandFrames& spectrum, const
               : voice ? SoundKind::Vocal
               : steady ? (out.percussive >= drums_share ? SoundKind::Drums : SoundKind::Music)
               : SoundKind::Hits;
-    // MUSIC and VOCAL are cut as HITS until they score well (tools/auto_chop_score.cpp).
-    out.kind = out.found == SoundKind::Music || out.found == SoundKind::Vocal ? SoundKind::Hits : out.found;
+    // VOCAL is cut as HITS until it scores well (tools/auto_chop_score.cpp: these measures do not tell a voice from
+    // keys, piano or guitar).
+    out.kind = out.found == SoundKind::Vocal ? SoundKind::Hits : out.found;
 }
 
 namespace {
@@ -370,14 +379,15 @@ Slices auto_slices(const AutoRead& read, unsigned want, uint32_t from, uint32_t 
         return lay(parts);
     }
     case SoundKind::Music: {
-        // On the beats, where the notes change first; then between beats where a hit is, up to `want`.
+        // Where the notes change most first, then the strongest hits, up to `want`.
         std::vector<Candidate> c;
-        for (size_t i = 0; i < beats.at.size(); ++i) {
-            const uint32_t at = beats.at[i];
-            if (at <= from + min_slice || at + min_slice >= to) continue;
-            c.push_back({at, 0.5f + 2.0f * (i < read.change.size() ? read.change[i] : 0.0f)});
+        for (unsigned n = 0; n < hit_count && n < max_hits; ++n) {
+            const uint32_t f = hits[n].frame;
+            if (f <= from + min_slice || f + min_slice >= to) continue;
+            const float score = (n < read.change.size() ? read.change[n] : 0.0f) + 0.15f * hits[n].strength / 255.0f;
+            if (!c.empty() && f - c.back().at < 2205) { c.back().score = std::max(c.back().score, score); continue; }
+            c.push_back({f, score});
         }
-        for (const auto& h : hit_candidates(hits, hit_count, from, to, nullptr)) c.push_back({h.at, 0.25f * h.score});
         for (uint32_t cut : pick(c, want, from, to)) s.add(cut, frames);
         return s;
     }

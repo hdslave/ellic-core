@@ -11,8 +11,8 @@
 
 // Chop's Auto type: what kind of sound a sample is, read with its hits and beats when it loads (engine/onsets.cpp),
 // and where Auto cuts it. DRUMS: a steady beat led by drums, a cut on each drum hit. MUSIC: a steady beat led by
-// notes or chords, a cut where they change, then on beats. VOCAL: a voice, a cut where a phrase starts after a gap,
-// then on words. SHOTS: single sounds with silence between, one slice a sound. HITS: none of these, the strongest
+// notes or chords, a cut where they change, then on the strongest hits. VOCAL: a voice, a cut where a phrase starts
+// after a gap, then on words (cut as HITS for now). SHOTS: single sounds with silence between, one slice a sound. HITS: none of these, the strongest
 // hits spread out.
 namespace melodee {
 
@@ -36,13 +36,15 @@ struct Span { uint32_t from = 0, to = 0; };
 
 struct AutoRead {
     SoundKind kind = SoundKind::None;  // what Auto cuts it as
-    SoundKind found = SoundKind::None; // what it reads as (MUSIC and VOCAL are cut as HITS until they score well)
+    SoundKind found = SoundKind::None; // what it reads as (VOCAL is cut as HITS until it scores well)
     float percussive = 0;            // the share of its sound in short hits rather than held notes (0..1)
     float voice = 0;                 // the share of its held sound between 150 Hz and 4 kHz (0..1)
+    float slide = 0;                 // how often its strongest held pitch (150 Hz to 1.5 kHz) moves by a semitone from
+                                     // one frame to the next, of its loud frames (a voice glides and wavers; keys hold or jump)
     std::vector<HitSound> sounds;    // one a hit, in the order find_hits_in() keeps them
     std::vector<Span> spans;         // its sounds between silences (50 dB under its loudest, 30 ms or more)
     std::vector<Span> phrases;       // its sound between gaps (35 dB under its loudest, 120 ms or more)
-    std::vector<float> change;       // at each of BeatGrid::at: how far the notes change there (0..1)
+    std::vector<float> change;       // at each hit: how far the notes change there (0..1)
     int8_t bar_one = -1;             // which of the first four of BeatGrid::at is a bar's first beat; -1 not sure
 };
 
