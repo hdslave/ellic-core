@@ -282,11 +282,60 @@ inline void infer_hand(HandCuts& hand, const Slices& kept, const Slices& autos, 
 }
 
 // TO PADS' playback, as Simpler's Playback: POLY the slices overlap (as before), MONO they share a mute group so one
-// plays at a time, THRU that too and each plays on to the region's end. TO PADS asks, starting on the last one.
-enum class SlicePlay : uint8_t { Poly, Mono, Thru, Count };
+// plays at a time, THRU that too and each plays on to the region's end. KIT lays one pad a sound (kit_sounds()).
+// TO PADS asks, starting on the last one.
+enum class SlicePlay : uint8_t { Poly, Mono, Thru, Kit, Count };
 inline const char* slice_play_name(SlicePlay p) {
-    static const char* names[] {"POLY", "MONO", "THRU"};
+    static const char* names[] {"POLY", "MONO", "THRU", "KIT"};
     return names[unsigned(p) % unsigned(SlicePlay::Count)];
+}
+
+// KIT: one pad a sound. A slice's sound is its first hit's (engine/auto_chop.h HitSound, the hit within 30 ms of
+// its start): a kick has more low than mid and high, a hat more high than mid (by 5 dB) and low, a snare more mid
+// than low; anything else, or a slice with no hit there, is other. A hat that rings 150 ms or more is an open hat.
+// Slices of one kind that sound alike (their bands within 6 dB of the same balance, ringing about as long) are one
+// sound, and the longest of them (the most of its own tail) goes on its pad. Kicks first, then snares, hats, open
+// hats and the rest; each kind's sounds the most heard first.
+enum class KitKind : uint8_t { Kick, Snare, Hat, OpenHat, Other };
+struct KitSound { unsigned slice = 0; KitKind kind = KitKind::Other; unsigned count = 0; };
+inline KitKind kit_kind(const HitSound& h) {
+    const int low = h.low, mid = h.mid, high = h.high;
+    if (low >= std::max(mid, high) && low > 0) return KitKind::Kick;
+    if (high >= mid + 20 && high > low) return h.ring >= 15 ? KitKind::OpenHat : KitKind::Hat;
+    if (mid >= low && mid > 0) return KitKind::Snare;
+    return KitKind::Other;
+}
+inline std::vector<KitSound> kit_sounds(const Slices& s, uint32_t frames, const std::array<Hit, max_hits>& hits, unsigned hit_count,
+                                        const AutoRead& read) {
+    struct Group { KitSound sound; HitSound like; bool known; };
+    std::vector<Group> groups;
+    for (unsigned n = 0; n < s.count; ++n) {
+        int hit = -1;
+        uint32_t gap = 1324;
+        for (unsigned k = 0; k < hit_count && k < max_hits && k < read.sounds.size(); ++k) {
+            const uint32_t d = hits[k].frame > s.start[n] ? hits[k].frame - s.start[n] : s.start[n] - hits[k].frame;
+            if (d < gap) { gap = d; hit = int(k); }
+        }
+        const bool known = hit >= 0;
+        const HitSound h = known ? read.sounds[size_t(hit)] : HitSound {};
+        const KitKind kind = known ? kit_kind(h) : KitKind::Other;
+        auto alike = [&](const Group& g) {
+            if (!known || !g.known || g.sound.kind != kind) return false;
+            const int low = (h.low - h.mid) - (g.like.low - g.like.mid), high = (h.high - h.mid) - (g.like.high - g.like.mid);
+            return std::abs(low) <= 25 && std::abs(high) <= 25 && std::abs(int(h.ring) - int(g.like.ring)) <= std::max(3, int(g.like.ring) / 2);
+        };
+        auto it = std::find_if(groups.begin(), groups.end(), alike);
+        if (it == groups.end()) { groups.push_back({KitSound {n, kind, 1}, h, known}); continue; }
+        ++it->sound.count;
+        const unsigned kept = it->sound.slice;
+        if (s.end(n, frames) - s.start[n] > s.end(kept, frames) - s.start[kept]) it->sound.slice = n;
+    }
+    std::stable_sort(groups.begin(), groups.end(), [](const Group& a, const Group& b) {
+        return a.sound.kind != b.sound.kind ? a.sound.kind < b.sound.kind : a.sound.count > b.sound.count;
+    });
+    std::vector<KitSound> out;
+    for (const auto& g : groups) out.push_back(g.sound);
+    return out;
 }
 // Slice n's pad, from the chopped pad's sound, as `play` lays it; `group` the mute group MONO and THRU share.
 inline PadSound slice_pad(const PadSound& parent, const Slices& s, unsigned n, uint32_t frames, SlicePlay play, uint8_t group) {
