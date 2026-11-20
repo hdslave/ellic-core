@@ -12,7 +12,7 @@ void starting_project(Project& project, PatternBank& patterns) {
     std::snprintf(project.name, sizeof(project.name), "Untitled");
     project.tempo = 1200;
     project.root = 0; project.scale = chromatic_scale; // C Chromatic
-    patterns = PatternBank {};
+    patterns.clear();
 }
 
 int kit_track(const Project& from) {

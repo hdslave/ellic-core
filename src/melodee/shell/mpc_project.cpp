@@ -459,7 +459,7 @@ std::string import_mpc_project(const std::vector<uint8_t>& file, const std::stri
     if (!tracks) return "Not an MPC Sample project";
 
     project = Project {};
-    patterns = PatternBank {};
+    patterns.clear();
     const fs::path where(path);
     std::snprintf(project.name, sizeof(project.name), "%s", where.stem().string().c_str());
     project.root = 0;

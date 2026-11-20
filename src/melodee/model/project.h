@@ -53,6 +53,9 @@ constexpr uint8_t prophet = 1, fm6 = 2, cz = 3, sid = 4, kit909 = 5;
 // Every pattern of every track (their events on the heap).
 struct PatternBank {
     std::array<std::array<Pattern, pattern_count>, track_count> at;
+    // Every pattern empty again (project.cpp), as `bank = PatternBank {}` was, on which GCC 11 spent minutes at -O2
+    // inline.
+    void clear();
 };
 
 struct ModRoute {
