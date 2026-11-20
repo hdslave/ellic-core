@@ -385,6 +385,9 @@ struct PluginRef {
 static_assert(sample_slots >= track_count * sampler_pads * pad_layers, "a sample slot for every layer of every pad");
 
 struct Project {
+    // Made in project.cpp alone: inline, GCC 11 spent minutes at -O2 on a Project's construction in each file that
+    // made one. Every member is {} or its own default, so a new Project is zeros but for those, as before.
+    Project();
     char name[32] = "Untitled";
     uint16_t tempo = 1200;  // tenths of a BPM; the global tempo
     // BPM per pattern (B2 on Patterns): with seq_tempo on, launching pattern n
@@ -402,20 +405,20 @@ struct Project {
     uint8_t punch_target = 0, punch_bank = 2, punch_depth = 100, punch_snap = 2, punch_tail = 0;
     bool punch_quantize = true; // Shift + B3 on Pad FX: while playing, a punch waits for its snap grid's next line; off, at once
     PadFxParams pad_fx_params = pad_fx_defaults; // the MPC's Pad FX, K1-K3 each (parity phase 7b)
-    FlexSettings flex;                           // Flex Beat (Shift + Pad FX)
+    FlexSettings flex {};                        // Flex Beat (Shift + Pad FX)
     std::array<Track, track_count> tracks {};
-    KnobFx knob_fx;         // Knob FX (parity phase 7)
-    MasterComp compressor;  // Shift + Pad 5 (parity phase 7)
-    Song song;              // (Motion is each pattern's own since roadmap P1: Pattern::motion)
+    KnobFx knob_fx {};         // Knob FX (parity phase 7)
+    MasterComp compressor {};  // Shift + Pad 5 (parity phase 7)
+    Song song {};              // (Motion is each pattern's own since roadmap P1: Pattern::motion)
     std::array<Bus, bus_count> buses {};
     // Its samples, a slot each (PadSound::sample), in tables that keep only the slots written (model/slot_table.h):
     // samples[n] reads slot n, samples.edit(n) is the slot to write.
-    SlotTable<SampleRef> samples;
-    SlotTable<SampleChop> chops; // roadmap P3: each sample's chop, as Chop left it (CHOP)
+    SlotTable<SampleRef> samples {};
+    SlotTable<SampleChop> chops {}; // roadmap P3: each sample's chop, as Chop left it (CHOP)
     std::array<PluginRef, max_plugins> plugins {};
     Chain master {{}, master_slots};
     // The Looper (docs/LOOPER.md): its settings, and its four tracks' strips and chains.
-    LooperSettings looper;
+    LooperSettings looper {};
     std::array<Mix, loop_tracks> loop_mix {};
     std::array<Chain, loop_tracks> loop_fx = [] { std::array<Chain, loop_tracks> c {}; for (auto& x : c) x.size = track_slots; return c; }();
     // Roadmap P4: LFOs and followers on any lane (MODS), and macros turning several at once (MACR); model/modulators.h.
