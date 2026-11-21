@@ -56,7 +56,7 @@ struct SampleData {
     size_t bytes() const { return (left.capacity() + right.capacity()) * sizeof(float); }
 };
 
-// Band-limited rate conversion (the base's dsp::SincResampler, as plugin/polyphase.h works it out for a ratio that
+// Band-limited rate conversion (dsp/sinc.h's SincResampler, as plugin/polyphase.h works it out for a ratio that
 // never changes: flat to 0.907 of the lower Nyquist, images 90 dB down): `frames` of left and right at `from` Hz to
 // `to` Hz, frame n of the result at n * from / to of the input (no delay), as many as the ratio gives. Allocates: not
 // for the audio thread. For what needs another rate for a while (a program that takes 44.1 kHz), never to keep.

@@ -3,7 +3,6 @@
 #include "melodee/engine/sample_data.h"
 #include "melodee/engine/dsp.h"
 #include "melodee/plugin/polyphase.h"
-#include "dsp/frame_ring.h"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -160,8 +159,8 @@ void resample(const float* left, const float* right, uint32_t frames, unsigned f
     if (!frames || !from || !to) return;
     const auto length = size_t(std::llround(double(frames) * to / from));
     out_left.assign(length, 0.0f); out_right.assign(length, 0.0f);
-    // The converter's output n sits at input n * from / to (frame_ring.h): nothing to drop at the start; it only
-    // answers `half` frames late, so silence after the last frame lets the end out. The base's SincResampler with
+    // The converter's output n sits at input n * from / to (dsp/sinc.h): nothing to drop at the start; it only
+    // answers `half` frames late, so silence after the last frame lets the end out. The SincResampler (dsp/sinc.h) with
     // each output place's weights worked out once (plugin/polyphase.h): a file's ratio never changes, and on the MPC
     // that is some sixty times the frames a second (a ratio too fine for a table still goes the slow way).
     auto converter = std::make_unique<PolyphaseResampler>();

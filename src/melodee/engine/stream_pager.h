@@ -2,7 +2,6 @@
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #pragma once
 #include "melodee/engine/multisample.h"
-#include "surface/midi.h"
 #include <array>
 #include <atomic>
 #include <cstddef>

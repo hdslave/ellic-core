@@ -3,7 +3,6 @@
 #pragma once
 #include "melodee/engine/dsp.h"
 #include "melodee/model/looper.h"
-#include "surface/midi.h"
 #include <array>
 #include <atomic>
 #include <cstdint>

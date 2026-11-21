@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #pragma once
-#include "dsp/frame_ring.h"
+#include "melodee/dsp/sinc.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -12,7 +12,7 @@
 #include <arm_neon.h>
 #endif
 
-// The base's SincResampler (dsp/frame_ring.h) for a ratio that never changes,
+// The SincResampler (dsp/sinc.h) for a ratio that never changes,
 // as the plug-in rate bridge (plugin/rate_bridge.h) has: the same kernel, band,
 // lag and output, with each output position's weights worked out once at
 // reset() instead of for every frame. 44.1 to 48 kHz is 147 input frames to
@@ -26,7 +26,7 @@ namespace melodee {
 
 class PolyphaseResampler {
 public:
-    static constexpr unsigned max_half = ::SincResampler<2>::max_half;
+    static constexpr unsigned max_half = SincResampler<2>::max_half;
     static constexpr size_t max_table = size_t(1) << 17; // weights: 512 KB
 
     void reset(unsigned input_rate, unsigned output_rate) {
@@ -117,7 +117,7 @@ private:
     std::vector<float> table;  // places rows of width weights
     unsigned step = 1, places = 1, place = 0, half = 0, width = 0, newest = 0, pending = 0;
     bool primed = false, fallback = true;
-    ::SincResampler<2> slow;   // a ratio too fine for a table
+    SincResampler<2> slow;   // a ratio too fine for a table
 };
 
 } // namespace melodee

@@ -15,7 +15,6 @@
 #include "melodee/shell/stems.h"
 #include "melodee/shell/stream_holds.h"
 #include "melodee/shell/zone_shapes.h"
-#include "surface/midi.h"
 #include <array>
 #include <atomic>
 #include <chrono>

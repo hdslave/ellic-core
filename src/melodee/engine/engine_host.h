@@ -22,7 +22,6 @@
 #include "melodee/engine/midi_out.h"
 #include "melodee/model/input_config.h"
 #include "melodee/model/project.h"
-#include "surface/midi.h"
 #include <array>
 #include <atomic>
 #include <bitset>
