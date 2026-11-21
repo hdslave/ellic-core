@@ -67,10 +67,12 @@ void resample(const float* left, const float* right, uint32_t frames, unsigned f
 void adopt(SampleData& sample, std::vector<float> left, std::vector<float> right, unsigned rate);
 
 // What a file says of itself, beyond its frames: its rate and sides, and the
-// first loop of its smpl chunk (frames at its own rate, end past the last; -1 none).
+// first loop of its smpl chunk (frames at its own rate, end past the last; -1 none), and that chunk's MIDI
+// unity note (-1 none).
 struct WavInfo {
     unsigned channels = 0, rate = 0;
     int64_t loop_start = -1, loop_end = -1;
+    int root = -1;
 };
 
 // The waveform as the pages draw it: the peak of each of 512 columns, 0..255.

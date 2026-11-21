@@ -2967,6 +2967,18 @@ void auto_sample_mono_time() {
     SampleData read;
     WavInfo info;
     CHECK(read_wav(path, read, 60, &info).empty() && info.channels == 1 && read.frames == one.size());
+    CHECK(info.root == -1); // no smpl chunk: no root of its own
+    {   // a smpl chunk's MIDI unity note (45, A2) after the audio
+        std::fstream add(path, std::ios::in | std::ios::out | std::ios::binary | std::ios::ate);
+        uint8_t smpl[68] = {'s', 'm', 'p', 'l', 60};
+        smpl[8 + 12] = 45;
+        add.write(reinterpret_cast<const char*>(smpl), sizeof smpl);
+        const uint32_t riff = uint32_t(add.tellp()) - 8;
+        add.seekp(4);
+        add.write(reinterpret_cast<const char*>(&riff), 4);
+    }
+    WavInfo rooted;
+    CHECK(read_wav(path, read, 60, &rooted).empty() && rooted.root == 45 && rooted.loop_start == -1);
     for (size_t f = 0; f < one.size(); ++f) CHECK(read.left[f] == read.right[f] && std::fabs(read.left[f] - one[f]) < 2.0f / 8388608.0f);
     std::filesystem::remove(path);
 
@@ -3623,6 +3635,14 @@ void keygroup_reader() {
     program.instruments = {low, high, past};
     auto read = read_keygroup(program);
     CHECK(read.regions.size() == 4 && read.left == 0);
+    CHECK(!read.regions[0].root_from_file && !read.regions[2].root_from_file);
+    {   // RootNote 0 (MPC-V's own exports): the sample's own root, from its smpl chunk, not C-1
+        KeygroupProgram own = program;
+        own.instruments = {low};
+        for (auto& l : own.instruments[0].layers) if (l.count("RootNote")) l["RootNote"] = "0";
+        auto from_file = read_keygroup(own);
+        CHECK(from_file.regions.size() == 2 && from_file.regions[0].root_from_file && from_file.regions[0].zone.root == 60);
+    }
     const auto& soft = read.regions[0];
     const auto& hard = read.regions[1];
     CHECK(soft.sample == "Piano C3 .WAV" && hard.sample == "Piano C3 Hard.WAV");

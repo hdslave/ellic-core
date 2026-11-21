@@ -153,8 +153,11 @@ void add_layers(const KeygroupInstrument& instrument, int low, int high, bool dr
         z.low_key = uint8_t(low);
         z.high_key = uint8_t(high);
         z.velocity = int8_t(std::clamp(velocity_over, -100, 100));
-        // RootNote is one past the MIDI note; a drum pad's layers sit at the pad's note.
-        z.root = drum ? 60 : clamped<uint8_t>(int_at(l, "RootNote").value_or(61) - 1, 0, 127);
+        // RootNote is one past the MIDI note, 0 the sample's own (its smpl chunk's, else C3 as found_only leaves it);
+        // a drum pad's layers sit at the pad's note.
+        const int root_note = int_at(l, "RootNote").value_or(61);
+        made.root_from_file = !drum && root_note <= 0;
+        z.root = drum || root_note <= 0 ? 60 : clamped<uint8_t>(root_note - 1, 0, 127);
         // velocity 0 is a release: the lowest that plays is 1
         z.low_velocity = clamped<uint8_t>(int_at(l, "VelStart").value_or(1), 1, 127);
         z.high_velocity = clamped<uint8_t>(int_at(l, "VelEnd").value_or(127), 1, 127);

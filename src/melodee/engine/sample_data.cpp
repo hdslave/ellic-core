@@ -53,6 +53,7 @@ std::string WavReader::open(const std::string& path, unsigned max_seconds, WavIn
         } else if (info && !std::memcmp(chunk, "smpl", 4) && size >= 60) {
             uint8_t body[60];
             if (!file.read(reinterpret_cast<char*>(body), 60)) break;
+            if (u32(body + 12) < 128) info->root = int(u32(body + 12));
             if (u32(body + 28) > 0 && u32(body + 48) > u32(body + 44)) { info->loop_start = u32(body + 44); info->loop_end = int64_t(u32(body + 48)) + 1; }
             file.seekg(std::streamoff(uint64_t(size) + (size & 1) - 60), std::ios::cur);
         } else {

@@ -22,6 +22,7 @@ struct SfzRegion {
     int64_t offset = -1, end = -1; // frames of its file it plays from and to; -1: its start, its end
     bool loop_asked = false;     // it asks for a loop, so a file's own may give it
     bool loop_named = false;     // a mode was named, so a file's own loop is not taken over no_loop
+    bool root_from_file = false; // its root is the file's own (its smpl chunk's note), else zone.root
 };
 
 // The amp envelope most regions have, in seconds and percent, for the pad.
