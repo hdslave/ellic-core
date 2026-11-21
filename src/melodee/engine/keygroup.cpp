@@ -8,6 +8,7 @@
 // right, an envelope's 0..1 is 1 ms to 100 s, and the sample is its SampleName
 // with ".WAV", beside the program.
 #include "melodee/engine/keygroup.h"
+#include "melodee/model/chop_slices.h"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -239,6 +240,12 @@ uint8_t mpc_level(double value) {
 }
 
 int8_t mpc_pan(double value) { return int8_t(std::clamp(std::lround((value - 0.5) * 100), -50l, 50l)); }
+
+// Past Melodee's 64 slices, a slice no chop has: the hit is silent, as one past its chop's end.
+uint8_t mpc_slice_hit(bool active, double value, bool relative) {
+    if (!active || relative || !(value >= 0)) return 0;
+    return uint8_t(std::min<long>(std::lround(std::min(value, 1.0) * 127), long(max_slices)) + 1);
+}
 
 // The MPC's filter table, thirty types, as the pad's: a one-pole as the pad's two-pole kind.
 PadFilter mpc_filter(int type) {
