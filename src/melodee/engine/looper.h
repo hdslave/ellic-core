@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #pragma once
+#include "melodee/engine/spsc_queue.h"
 #include "melodee/engine/dsp.h"
 #include "melodee/model/looper.h"
 #include <array>
@@ -303,8 +304,8 @@ private:
     std::atomic<float> memory_rate {dsp::model_rate}; // the rate the service thread makes memory for (64 s of it)
     unsigned block_frames = looper::block;
     // Memory: made by the service thread, handed in (`pool`) and back (`retired`).
-    MidiQueue<16, LoopBuffer*> pool, retired;
-    MidiQueue<8, LoopLoad> loads;
+    SpscQueue<16, LoopBuffer*> pool, retired;
+    SpscQueue<8, LoopLoad> loads;
     std::array<LoopBuffer*, 2 * loop_tracks> spare {};   // handed in, not in a loop yet
     std::atomic<bool> want_memory {false};
     std::atomic<unsigned> owned {0};

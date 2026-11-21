@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #pragma once
+#include "melodee/engine/spsc_queue.h"
 #include "melodee/engine/arp.h"
 #include "melodee/engine/note_repeat.h"
 #include "melodee/engine/command.h"
@@ -560,12 +561,12 @@ private:
     std::array<FreezePack*, track_count> freeze_next {}; // waiting for the next bar
     static constexpr float sleep_floor = 3.16e-5f; // -90 dB: a frozen track's engine below it a second sleeps
     float pan_centre = 0.7071f;                    // set_pan()'s sides at the centre, as a print was made at
-    MidiQueue<64, FreezePack*> done_freezes;
+    SpscQueue<64, FreezePack*> done_freezes;
     // Freeze plan F3: audio tracks.
     void set_audio(unsigned t, AudioPack* pack);
     void retire_audio(AudioPack* pack);
     void audio_tick(unsigned t, Slot& slot, uint32_t at);
-    MidiQueue<64, AudioPack*> done_audio;
+    SpscQueue<64, AudioPack*> done_audio;
     std::array<AudioPack*, 16> audio_limbo {};
     std::atomic<uint32_t> audio_under {0}, audio_waited {0};
     std::atomic<int> audio_track {-1};   // the track a take is armed or recording for
@@ -681,7 +682,7 @@ private:
     bool park_over() const { return int32_t(resume_serial.load(std::memory_order_acquire) - park_wanted) >= 0; }
     void play_parked(int32_t* out, unsigned frames, float* stems);
     void go_parked(); // audio thread, the last thing in a block
-    MidiQueue<1024, MidiOutEvent> midi_events;
+    SpscQueue<1024, MidiOutEvent> midi_events;
     std::atomic<unsigned> midi_lost {0};
     AudioClock clock;
     uint64_t frame_now = 0;                                                  // frames rendered before this block
@@ -724,7 +725,7 @@ private:
     void follow_tempo();  // the tempo now: the global one, or the lead pattern's own (BPM per pattern)
     bool skipped(Slot& slot, unsigned key, uint32_t tick);
 
-    MidiQueue<4096, Command> queue;
+    SpscQueue<4096, Command> queue;
     // The first command not applied yet: a timed note before its frame, or one sent after it, waiting behind it.
     Command waiting {};
     bool has_waiting = false;
@@ -742,18 +743,18 @@ private:
     std::atomic<bool> fill_now {false};
     // Plug-ins: each entry's as the rack offered it; the ones replaced wait in the queue to be freed.
     struct PluginOffer { uint8_t entry = 0; PluginRunner* runner = nullptr; };
-    MidiQueue<64, PluginOffer> plugin_offers;
-    MidiQueue<64, PluginRunner*> retired_plugins;
+    SpscQueue<64, PluginOffer> plugin_offers;
+    SpscQueue<64, PluginRunner*> retired_plugins;
     std::array<PluginRunner*, max_plugins> runners {};
     std::array<PluginRunner*, 16> plugin_limbo {}; // replaced ones the queue had no room for yet
     PluginRunner* runner_of(unsigned entry) const { return entry < max_plugins ? runners[entry] : nullptr; }
     void take_plugins(); // the offers waiting, at the start of a block
     struct Offer { uint16_t slot = 0; const SampleData* sample = nullptr; };
-    MidiQueue<64, Offer> offers;
-    MidiQueue<128, const SampleData*> retired;
-    MidiQueue<8, const ProjectPack*> done_packs;
-    MidiQueue<8, const TrackPack*> done_tracks;
-    MidiQueue<1024, Pattern*> retired_patterns;
+    SpscQueue<64, Offer> offers;
+    SpscQueue<128, const SampleData*> retired;
+    SpscQueue<8, const ProjectPack*> done_packs;
+    SpscQueue<8, const TrackPack*> done_tracks;
+    SpscQueue<1024, Pattern*> retired_patterns;
     std::array<Pattern*, 64> limbo {}; // retired ones the queue had no room for yet
     void retire(Pattern* pattern);
     SamplerEngine::Table samples {};
@@ -766,7 +767,7 @@ private:
         ChopTable& operator=(const ChopTable&) = delete;
         ~ChopTable() { for (const Slices* s : at) delete s; }
     } chops;
-    MidiQueue<1024, const Slices*> retired_chops;
+    SpscQueue<1024, const Slices*> retired_chops;
     StreamPager pager;
     TakeRecorder take;
     RecallRing recall_ring; // Audio Recall: the source, always
@@ -797,7 +798,7 @@ private:
     double until_arp = 0;
     uint32_t arp_ticks = 0;
     uint32_t arp_origin = 0;                    // the sequencer's tick at the arp's tick 0 (Play, a locate)
-    MidiQueue<512, ArpWritten> arp_written;     // its notes for Seq Record
+    SpscQueue<512, ArpWritten> arp_written;     // its notes for Seq Record
     bool click = false;
     float click_level = 0.4f, click_env = 0, click_phase = 0, click_step = 0;
     float click_fall = 0.9985f; // the blip's fall a frame: 0.9985 a 44.1 kHz frame, the same time at any rate

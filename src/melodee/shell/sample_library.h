@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #pragma once
+#include "melodee/engine/spsc_queue.h"
 #include "melodee/engine/bounce.h"
 #include "melodee/shell/expansion_install.h"
 #include "melodee/engine/auto_chop.h"
@@ -390,11 +391,11 @@ private:
     std::vector<std::pair<uint16_t, std::string>> away; // the instruments put down for SD card access
 
     EngineHost& host;
-    MidiQueue<16, Request> requests; // MIDI thread produces, service thread consumes
+    SpscQueue<16, Request> requests; // MIDI thread produces, service thread consumes
     std::atomic<unsigned> asked {0}, answered {0}; // requests taken by load(), and read since (loads_waiting())
     std::atomic<unsigned> landings_open {0};        // instruments still landing, a part a pass
-    MidiQueue<8, SampleJob> jobs;    // the same
-    MidiQueue<8, Done> finished;     // service thread produces, MIDI thread consumes
+    SpscQueue<8, SampleJob> jobs;    // the same
+    SpscQueue<8, Done> finished;     // service thread produces, MIDI thread consumes
     std::atomic<bool> scan_wanted {true};
     std::atomic<unsigned> changes {0};
     std::atomic<unsigned> preview_count {0};
@@ -409,12 +410,12 @@ private:
     bool take_open = false, take_failed = false, take_seen = false;
     // Recall and renders (shell/sample_capture.cpp).
     struct RecallJob { uint16_t slot = 0; RecallOptions options; };
-    MidiQueue<4, RecallJob> recalls;
-    MidiQueue<4, Render> renders;
+    SpscQueue<4, RecallJob> recalls;
+    SpscQueue<4, Render> renders;
     void save_recall(const RecallJob& job);
     void drain_render();
     // Stems: the job asked for, the one running, and what came of the last (under `lock`).
-    MidiQueue<2, StemsRequest> stems_wanted;
+    SpscQueue<2, StemsRequest> stems_wanted;
     StemSeparator separator;
     std::vector<StemsResult> stems_done;
     void stems_service(const Platform& platform);
@@ -430,7 +431,7 @@ private:
     Render render_job;
     unsigned render_rate = 44100; // the render's frames, the device's rate when it began
     // The Looper's files: a commit waiting for its loop, file jobs in turn (shell/looper_files.cpp).
-    MidiQueue<4, LoopCommit> commits;
+    SpscQueue<4, LoopCommit> commits;
     struct Waiting { bool on = false; LoopCommit job; unsigned passes = 0; };
     Waiting committing;
     mutable std::mutex loop_lock;
