@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 // MPC programs as zones and pads: a keygroup program's keygroups and layers,
 // and a drum program's pads. The tags are read as the MPC's own files have

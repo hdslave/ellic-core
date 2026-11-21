@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: MIT
 """The core stands alone: it includes itself, the C++ and POSIX libraries and
 two JUCE modules, never a product's code or a hardware runtime (AGENTS.md)."""
 from pathlib import Path

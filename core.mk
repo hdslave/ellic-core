@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-License-Identifier: MIT
 # ellic-core in a product's build: the product's Makefile sets CORE (where
 # this checkout is, by default the core/ submodule), includes this file and
 # compiles CORE_SOURCES with CORE_CPPFLAGS among its own flags. Nothing here
