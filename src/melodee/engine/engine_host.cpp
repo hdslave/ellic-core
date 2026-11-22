@@ -3366,7 +3366,9 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
         for (unsigned f = 0; f < frames; ++f) { master_l[f] += knob_l[f]; master_r[f] += knob_r[f]; }
     }
     if (keyed) { // everything but the key ducks under it, then the key joins, untouched
-        comp.duck(key_l, key_r, master_l, master_r, frames);
+        // With a muted kit, its selected pad feeds the detector through the same mute fade as its audible return.
+        const bool muted_pad = pad_keyed == int(key) && slots[key].mute;
+        comp.duck(muted_pad ? aside_l : key_l, muted_pad ? aside_r : key_r, master_l, master_r, frames);
         for (unsigned f = 0; f < frames; ++f) { master_l[f] += aside_l[f]; master_r[f] += aside_r[f]; }
     }
     // The input source, after the gain: the take, the Recall ring and the meter hear it. Rec Input FX: Knob FX on it
