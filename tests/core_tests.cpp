@@ -5087,8 +5087,16 @@ void sampler_zones() {
         SamplerEngine::plain_taken = 0;
         const auto full = render(false);
         CHECK(SamplerEngine::plain_taken == 0);
+        SamplerEngine::held_taken = 0;
         const auto plain = render(true);
         CHECK(SamplerEngine::plain_taken > 200);
+        CHECK(SamplerEngine::held_taken > 50); // a zone holding its sustain: the run without the tests
+        {
+            SamplerEngine::held_runs = false;
+            const auto unheld = render(true);
+            SamplerEngine::held_runs = true;
+            CHECK(unheld == plain);
+        }
         size_t differ = 0;
         for (size_t n = 0; n < std::min(full.size(), plain.size()); ++n) differ += full[n] != plain[n];
         if (differ) std::fprintf(stderr, "zone_run_plain: %zu samples differ\n", differ);
