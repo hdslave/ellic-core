@@ -3,6 +3,7 @@
 #include "melodee/model/print.h"
 #include "melodee/model/project_file.h"
 #include <algorithm>
+#include <cstring>
 #include <filesystem>
 #include <memory>
 
@@ -55,6 +56,7 @@ void print_project(Project& project, PatternBank& bank, unsigned track, unsigned
     tr.mix = print_mix(project.tracks[t]); // unity and centred, or (effects on its chain) as it meets them live
     tr.pattern = uint8_t(p);
     tr.chain = {}; tr.chain_count = 0; tr.chain_at = 0;
+    tr.in_scene = {}; tr.off = false; // which pattern it plays in each scene: not part of its sound
     tr.last_note = plain.last_note; tr.last_pad = plain.last_pad;
     tr.fader_target = plain.fader_target; tr.fader_on = plain.fader_on; tr.fader_learned = plain.fader_learned; tr.fader_pin = plain.fader_pin;
     tr.wheel = 0; tr.bend = 0;
@@ -86,6 +88,14 @@ uint64_t print_hash(const Project& project, const PatternBank& bank, const std::
     for (unsigned e = 0; e < max_plugins; ++e)
         if (project.plugins[e].used()) used[e] = states[e];
     auto bytes = save_project(project, bank, &used);
+    // Without the sequence links (SEQL): which pattern plays in which scene is not the print's sound, and the
+    // hashes stay those of prints made before links.
+    for (size_t at = 8; at + 8 <= bytes.size();) {
+        size_t size = size_t(bytes[at + 4]) | size_t(bytes[at + 5]) << 8 | size_t(bytes[at + 6]) << 16 | size_t(bytes[at + 7]) << 24;
+        if (at + 8 + size > bytes.size()) break;
+        if (std::memcmp(bytes.data() + at, "SEQL", 4) == 0) { bytes.erase(bytes.begin() + long(at), bytes.begin() + long(at + 8 + size)); break; }
+        at += 8 + size;
+    }
     bytes.push_back(uint8_t(tap));
     bytes.push_back(uint8_t(tail));
     for (unsigned k = 0; k < 4; ++k) bytes.push_back(uint8_t(rate >> (8 * k)));

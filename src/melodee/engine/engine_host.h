@@ -425,6 +425,9 @@ private:
         uint32_t start = 0;                // the tick its pattern started on
         int clip = -1;                     // in the song: the clip playing
         bool silent = false;               // in the song: no clip here
+        // Off (sequence links): stopped by its scene or SEQ + STOP until a launch, through Play; off_queued: from the
+        // next bar (Command::Pattern with a value below 0).
+        bool off = false, off_queued = false;
         std::array<PendingOff, 32> offs {};
         // A note with Slide or Tie, held into the next note of its pattern, which takes it over (key: as the
         // engine plays it; midi: as it went out). Its off, a sixteenth past that note, lets it go if none comes.
@@ -576,6 +579,7 @@ private:
     // Roadmap P5: track t's follow action planned from where its pattern started (dice rolled now), and brought.
     void plan_follow(unsigned t);
     void follow(unsigned t);
+    void stop_track(unsigned t); // a follow action's STOP, or off: what it holds lets go, and it is silent
     FollowDice dice;
     uint16_t scene_tempo = 0; // a scene's tempo waiting for the bar its patterns launch on (0 none)
     // Roadmap P5: the song's tempo lane where the song plays now (0: none, or not the song), worked out each tick.

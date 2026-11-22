@@ -228,9 +228,10 @@ struct Song {
     }
 };
 
-// Roadmap P5: a scene is a column of patterns across the tracks (pattern n of each), launched together on the next bar,
-// with a name and a tempo of its own (0: none; tenths of a BPM) taking over on that bar, and a colour (issue 19) its
-// cell and pad show (0: none; 1-16 a track colour, ui/shades.h).
+// Roadmap P5: a scene (a sequence on screen) launches a pattern on each track together on the next bar, with a name
+// and a tempo of its own (0: none; tenths of a BPM) taking over on that bar, and a colour (issue 19) its cell and pad
+// show (0: none; 1-16 a track colour, ui/shades.h). Which pattern each track plays in it is the track's
+// (Track::in_scene, model/scene_links.h).
 struct Scene {
     char name[12] {};
     uint16_t tempo = 0;
@@ -341,6 +342,10 @@ struct Track {
     uint8_t speed = speed_normal; // its patterns' playback speed (roadmap P1), an index into speeds: x1/2 .. x2
     MidiDevice midi;              // a MIDI track's device name, drum map and SysEx file (roadmap P4, MIDT v3)
     AudioTrackSettings audio;     // an AUDIO track's source and monitor (freeze plan F3, AUDT)
+    // Its pattern in each scene (model/scene_links.h): 0 none (the track plays on when the scene launches), n + 1
+    // pattern n, scene_off: the track stops. Kept with the track, so a move, copy or clear takes them along.
+    std::array<uint8_t, pattern_count> in_scene {};
+    bool off = false; // stopped by its scene or SEQ + STOP: its pattern does not play until a launch (SEQL)
     bool used() const { return engine != EngineKind::None; }
     bool is_audio() const { return engine == EngineKind::Audio; }
     // Plays samples off its pads: a kit, or a keygroup (its one sound on pad 1, always its last pad), whose sound
@@ -427,7 +432,8 @@ struct Project {
     // Roadmap P4: LFOs and followers on any lane (MODS), and macros turning several at once (MACR); model/modulators.h.
     std::array<Modulator, modulator_count> modulators {};
     std::array<Macro, macro_count> macros {};
-    std::array<Scene, pattern_count> scenes {}; // roadmap P5: each column's name and tempo (SCNE)
+    std::array<Scene, pattern_count> scenes {}; // roadmap P5: each scene's name, tempo and colour (SCNE)
+    uint8_t scene = 0; // the scene in hand: launched last; a pattern picked by hand is kept in it (SEQL)
     Chain& chain(unsigned n) {
         if (n >= pad_chain_base) { n -= pad_chain_base; return tracks[(n / sampler_pads) % track_count].pad_fx.at[n % sampler_pads]; }
         if (is_loop_chain(n)) return loop_fx[n - loop_chain(0)];

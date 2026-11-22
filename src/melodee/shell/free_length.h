@@ -6,28 +6,26 @@
 #include <cstdint>
 
 // Free length (2026-11-18). An empty pattern starts Free (Pattern::free): K1 shows Free, below 1 bar. A Seq Record
-// take on it, with no notes on another track in its sequence, grows it a bar at a time: the bar playing and the
+// take on it, with no notes on another track playing with it, grows it a bar at a time: the bar playing and the
 // next are always in it. The take ends at the end of the bar playing; pressed in the first eighth of a bar after
-// the first, at that bar line, and what was played since moves to the top. With notes on another track in its
-// sequence, the take is as long as the longest of them, and lines up with it (shell/sequences.h). Pure, for the
+// the first, at that bar line, and what was played since moves to the top. With notes on another track playing
+// with it, the take is as long as the longest of them, and lines up with it (shell/sequences.h). Pure, for the
 // shell, the cards and the tests.
 namespace melodee {
 
-// The longest pattern with notes in sequence `n` on another used track than `t`, and its track (-1: none).
+// The longest pattern with notes that another used track than `t` is on (not off), and its track (-1: none): what
+// plays with it in its sequence (model/scene_links.h).
 struct ColumnFit { uint32_t length = 0; int track = -1; };
-template <class HasNotes, class LengthOf>
-ColumnFit column_fit(const Project& project, unsigned t, unsigned n, HasNotes has_notes, LengthOf length_of) {
+inline ColumnFit column_fit(const Project& project, const PatternBank& patterns, unsigned t) {
     ColumnFit fit;
     for (unsigned k = 0; k < track_count; ++k) {
-        if (k == t % track_count || !project.tracks[k].used() || !has_notes(k, n % pattern_count)) continue;
-        uint32_t length = length_of(k, n % pattern_count);
-        if (length > fit.length) { fit.length = length; fit.track = int(k); }
+        const auto& track = project.tracks[k];
+        if (k == t % track_count || !track.used() || track.off) continue;
+        const auto& pattern = patterns.at[k][track.pattern % pattern_count];
+        if (pattern.empty() || pattern.length <= fit.length) continue;
+        fit.length = pattern.length; fit.track = int(k);
     }
     return fit;
-}
-inline ColumnFit column_fit(const Project& project, const PatternBank& patterns, unsigned t, unsigned n) {
-    return column_fit(project, t, n, [&](unsigned k, unsigned p) { return !patterns.at[k][p].empty(); },
-                      [&](unsigned k, unsigned p) { return patterns.at[k][p].length; });
 }
 
 // What K1 shows for a pattern: Free (0), else the ticks a take on it would get.

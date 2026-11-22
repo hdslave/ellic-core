@@ -6,6 +6,7 @@
 #include "melodee/engine/dsp.h"
 #include "melodee/engine/sample_data.h"
 #include "melodee/model/scales.h"
+#include "melodee/model/scene_links.h"
 #include <juce_core/juce_core.h>
 #include <algorithm>
 #include <array>
@@ -653,6 +654,9 @@ std::string import_mpc_project(const std::vector<uint8_t>& file, const std::stri
     if (!master && sequences.count(current)) project.tempo = project.pattern_tempo[current];
     if (sequences.count(current))
         for (unsigned t = 0; t < used; ++t) project.tracks[t].pattern = uint8_t(current);
+    // Each sequence keeps its own number on every track, as the MPC plays it (model/scene_links.h).
+    keep_columns(project, patterns);
+    if (sequences.count(current)) project.scene = uint8_t(current % pattern_count);
 
     // One time signature for every pattern, as in Melodee: the first sequence's.
     if (!sequences.empty()) {

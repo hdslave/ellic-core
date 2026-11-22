@@ -14,6 +14,7 @@
 #include "melodee/engine/midi_engine.h"
 #include "melodee/engine/sfz.h"
 #include "melodee/model/scales.h"
+#include "melodee/model/scene_links.h"
 #include "melodee/shell/sample_library.h"
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <algorithm>
@@ -667,7 +668,8 @@ std::string export_live_set(const Project& project, const PatternBank& patterns,
         if (fed) buses.push_back(b);
     }
 
-    // ---- scenes: one a pattern number, up to the last any track has
+    // ---- scenes: one a sequence, up to the last that plays anything; a track's clip in it is the pattern the sequence
+    // keeps for it, none where it keeps the track off, pattern n where it keeps nothing for it (model/scene_links.h)
     auto has_pattern = [&](const Planned& p, unsigned pattern) {
         const Pattern& written = patterns.at[p.index][pattern];
         if (p.lane == Lane::Takes) return written.audio.used();
@@ -677,10 +679,13 @@ std::string export_live_set(const Project& project, const PatternBank& patterns,
         }
         return !written.events.empty() && written.events.front().tick < written.length;
     };
+    auto kept_in = [&](const Planned& p, unsigned n) { return export_pattern(project, p.index, n); };
     unsigned scenes = 1;
     for (const auto& p : planned)
-        for (unsigned n = 0; n < pattern_count; ++n)
-            if (has_pattern(p, n)) scenes = std::max(scenes, n + 1);
+        for (unsigned n = 0; n < pattern_count; ++n) {
+            const int kept = kept_in(p, n);
+            if (kept >= 0 && has_pattern(p, unsigned(kept))) scenes = std::max(scenes, n + 1);
+        }
     report.scenes = scenes;
 
     const auto ts = project.time_signature();
@@ -733,17 +738,19 @@ std::string export_live_set(const Project& project, const PatternBank& patterns,
         std::string arranged;
         unsigned clip_id = 0;
         for (unsigned n = 0; n < scenes; ++n) {
-            if (!has_pattern(p, n)) continue;
-            const std::string clip_name = print_pattern_name(n);
+            const int kept = kept_in(p, n);
+            if (kept < 0 || !has_pattern(p, unsigned(kept))) continue;
+            const unsigned k = unsigned(kept); // the pattern this sequence plays on the track
+            const std::string clip_name = print_pattern_name(k);
             if (p.audio) {
                 AudioPlace place;
-                if (!audio_of(p, n, place)) continue;
+                if (!audio_of(p, k, place)) continue;
                 session[n] = audio_clip(project, files, place, clip_name, clip_id++, colour, 0, 0, false);
             } else {
                 double length = 0;
-                const auto notes = notes_of(project, p, patterns.at[p.index][n], moved[p.index], length);
+                const auto notes = notes_of(project, p, patterns.at[p.index][k], moved[p.index], length);
                 if (notes.empty() && (p.lane == Lane::Kit || p.lane == Lane::Pad)) continue; // the pattern plays nothing here
-                const int program = patterns.at[p.index][n].program ? patterns.at[p.index][n].program - 1 : p.program;
+                const int program = patterns.at[p.index][k].program ? patterns.at[p.index][k].program - 1 : p.program;
                 session[n] = midi_clip(project, p, notes, length, clip_name, clip_id++, colour, 0, length, false, program);
                 report.notes += unsigned(notes.size());
             }
@@ -829,7 +836,7 @@ std::string export_live_set(const Project& project, const PatternBank& patterns,
     for (unsigned n = 0; n < buses.size(); ++n) x.add("<SendPreBool" + attr("Id", n) + attr("Value", "false") + "/>");
     x.close("SendsPre");
 
-    // ---- scenes: each pattern number, named and timed as the project's
+    // ---- scenes: each sequence, named and timed as the project's
     x.open("Scenes");
     for (unsigned n = 0; n < scenes; ++n) {
         const auto& scene = project.scenes[n];
