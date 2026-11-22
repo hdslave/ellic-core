@@ -533,7 +533,7 @@ void EngineHost::apply(const Command& c) {
     case Type::MidiAudio: slot.midi.audio = std::clamp<int>(c.value, 0, midi_track::AudioCount - 1); break; // roadmap P4 (M5)
     case Type::MidiEcho: // roadmap P4 (M3): what came in, on the MIDI track's own port and channel
         if (slot.kind == EngineKind::Midi) {
-            MidiOutEvent e {MidiOutEvent::Kind::Control, uint8_t(std::clamp<int>(slot.base[midi_track::Channel], 1, 16)), uint8_t(c.position & 0x7f),
+            MidiOutEvent e {MidiOutEvent::Kind::Control, midi_track::base_channel(slot.base[midi_track::Channel]), uint8_t(c.position & 0x7f),
                             uint8_t(c.value & 0x7f), 0, frame_now + block_at};
             if (c.index == 0xa0) e.kind = MidiOutEvent::Kind::PolyPressure;
             else if (c.index == 0xd0) { e.kind = MidiOutEvent::Kind::ChannelPressure; e.b = e.a; }
@@ -879,8 +879,11 @@ void EngineHost::apply(const Command& c) {
         if (!slot.engine) break;
         if (slot.kind == EngineKind::Midi && slot.base[midi_track::PressureOut] != midi_track::PressureOff && c.index < 128) { // roadmap P4 (M2)
             bool poly = slot.base[midi_track::PressureOut] == midi_track::PressurePoly;
+            bool multi = midi_track::is_multi(slot.base[midi_track::Channel]);
+            uint8_t ch = multi ? midi_track::multi_channel(c.index) : midi_track::base_channel(slot.base[midi_track::Channel]);
+            uint8_t note = multi ? uint8_t(midi_track::multi_note) : uint8_t(c.index);
             MidiOutEvent e {poly ? MidiOutEvent::Kind::PolyPressure : MidiOutEvent::Kind::ChannelPressure,
-                            uint8_t(std::clamp<int>(slot.base[midi_track::Channel], 1, 16)), uint8_t(c.index), uint8_t(std::clamp<int>(c.value, 0, 127)), 0,
+                            ch, note, uint8_t(std::clamp<int>(c.value, 0, 127)), 0,
                             frame_now + block_at};
             e.dest = midi_track::dest_of(slot.base[midi_track::Port]); e.track = c.track % track_count;
             emit(e);
@@ -900,7 +903,7 @@ void EngineHost::apply(const Command& c) {
         slot.wheel = std::clamp(c.value / 1000.0f, 0.0f, 1.0f);
         engine_wheel(slot, slot.wheel);
         if (slot.kind == EngineKind::Midi) { // roadmap P4 (M2): the fader's or MIDI in's mod wheel as CC 1
-            MidiOutEvent e {MidiOutEvent::Kind::Control, uint8_t(std::clamp<int>(slot.base[midi_track::Channel], 1, 16)), 1,
+            MidiOutEvent e {MidiOutEvent::Kind::Control, midi_track::base_channel(slot.base[midi_track::Channel]), 1,
                             uint8_t(std::lround(slot.wheel * 127)), 0, frame_now + block_at};
             e.dest = midi_track::dest_of(slot.base[midi_track::Port]); e.track = c.track % track_count;
             emit(e);
@@ -2207,22 +2210,25 @@ void EngineHost::midi_note(unsigned t, int key, int velocity, uint64_t at, int64
     if (!out_wanted(t, key)) return;
     t %= track_count;
     // A MIDI track's own port and channel (its first two parameters), else Pad MIDI Out's channel on MIDI Config's port.
-    bool own = is_midi(t);
-    uint8_t channel = own ? uint8_t(std::clamp<int>(slots[t].base[midi_track::Channel], 1, 16)) : out_channel[t];
+    // In Multi mode, pad keys 36..51 route to MIDI channels 1..16 and send Middle C (60).
+    bool own = is_midi(t), multi = own && midi_track::is_multi(slots[t].base[midi_track::Channel]);
+    uint8_t channel = multi ? midi_track::multi_channel(key)
+                    : own ? midi_track::base_channel(slots[t].base[midi_track::Channel]) : out_channel[t];
+    int wire_key = multi ? midi_track::multi_note : key;
     MidiDest dest = own ? midi_track::dest_of(slots[t].base[midi_track::Port]) : MidiDest::Config;
     auto event = [&](MidiOutEvent::Kind kind, uint8_t b, uint64_t when) {
-        MidiOutEvent e {kind, channel, uint8_t(key), b, 0, when};
+        MidiOutEvent e {kind, channel, uint8_t(wire_key), b, 0, when};
         e.dest = dest;
         if (own) e.track = uint8_t(t);
         emit(e);
     };
     if (midi_offs_held)
         for (auto& off : midi_offs) // a retrigger ends the note it replaces first
-            if (off.on && off.channel == channel && off.key == key && off.dest == dest) { event(MidiOutEvent::Kind::NoteOff, 0, at); off.on = false; }
+            if (off.on && off.channel == channel && off.key == wire_key && off.dest == dest) { event(MidiOutEvent::Kind::NoteOff, 0, at); off.on = false; }
     event(MidiOutEvent::Kind::NoteOn, uint8_t(std::clamp(velocity, 1, 127)), at);
     for (auto& off : midi_offs)
         if (!off.on) {
-            off = {true, channel, uint8_t(key), uint8_t(t), length >= 0 ? at + uint64_t(length) : ~uint64_t(0), dest};
+            off = {true, channel, uint8_t(wire_key), uint8_t(t), length >= 0 ? at + uint64_t(length) : ~uint64_t(0), dest};
             midi_offs_held = true;
             return;
         }
@@ -2236,7 +2242,7 @@ void EngineHost::midi_param(unsigned t, int id, int value, uint64_t at) {
     const auto& base = slots[t].base;
     if (is_program(id) || (id >= PatternProgram0 && id < PatternProgram0 + 16)) { midi_program(t, at, false); return; }
     if (id == Bend) { // pitch bend: -64..63 around the centre
-        MidiOutEvent e {MidiOutEvent::Kind::PitchBend, uint8_t(std::clamp<int>(base[Channel], 1, 16)), 0, 0, uint32_t(std::clamp((value + 64) * 128, 0, 16383)), at};
+        MidiOutEvent e {MidiOutEvent::Kind::PitchBend, base_channel(base[Channel]), 0, 0, uint32_t(std::clamp((value + 64) * 128, 0, 16383)), at};
         e.dest = dest_of(base[Port]); e.track = uint8_t(t);
         emit(e);
         return;
@@ -2261,7 +2267,7 @@ void EngineHost::midi_slot(unsigned t, int slot, int value, uint64_t at) {
     thin.last = std::max<uint64_t>(at, 1);
     thin.pending = -1;
     int address = s.base[size_t(slot_address(slot))];
-    uint8_t channel = uint8_t(std::clamp<int>(s.base[Channel], 1, 16));
+    uint8_t channel = base_channel(s.base[Channel]);
     MidiOutEvent e {MidiOutEvent::Kind::Control, channel, 0, 0, 0, at};
     int v = std::clamp(value, 0, 127), wide = std::min(v * 129, 16383); // a knob's 0-127 over 14 bits, ends to ends
     switch (slot_kind(address)) {
@@ -2377,7 +2383,7 @@ void EngineHost::midi_program(unsigned t, uint64_t at, bool force, int pattern_i
     if (!program) return; // Off: the device keeps its own
     if (!force && program == slot.program_sent) return;
     slot.program_sent = program;
-    uint8_t channel = uint8_t(std::clamp<int>(base[Channel], 1, 16));
+    uint8_t channel = base_channel(base[Channel]);
     auto out = [&](MidiOutEvent::Kind kind, int a, int b) {
         MidiOutEvent e {kind, channel, uint8_t(a), uint8_t(b), 0, at};
         e.dest = dest_of(base[Port]); e.track = uint8_t(t);
@@ -2390,8 +2396,12 @@ void EngineHost::midi_program(unsigned t, uint64_t at, bool force, int pattern_i
 
 void EngineHost::midi_note_off(unsigned t, int key, uint64_t at) {
     if (!midi_offs_held) return;
+    t %= track_count;
+    bool multi = is_midi(t) && midi_track::is_multi(slots[t].base[midi_track::Channel]);
+    uint8_t ch = multi ? midi_track::multi_channel(key) : 0;
+    int wire_key = multi ? midi_track::multi_note : key;
     for (auto& off : midi_offs)
-        if (off.on && off.track == t % track_count && off.key == key) {
+        if (off.on && off.track == t && off.key == wire_key && (!multi || off.channel == ch)) {
             emit(off_event(off, at));
             off.on = false;
         }
@@ -2400,8 +2410,12 @@ void EngineHost::midi_note_off(unsigned t, int key, uint64_t at) {
 bool EngineHost::midi_hold(unsigned t, int key, int64_t length, uint64_t at) {
     if (!out_wanted(t, key)) return true; // nothing went out to hold
     if (!midi_offs_held) return false;
+    t %= track_count;
+    bool multi = is_midi(t) && midi_track::is_multi(slots[t].base[midi_track::Channel]);
+    uint8_t ch = multi ? midi_track::multi_channel(key) : 0;
+    int wire_key = multi ? midi_track::multi_note : key;
     for (auto& off : midi_offs)
-        if (off.on && off.track == t % track_count && off.key == key) { off.at = at + uint64_t(std::max<int64_t>(length, 0)); return true; }
+        if (off.on && off.track == t && off.key == wire_key && (!multi || off.channel == ch)) { off.at = at + uint64_t(std::max<int64_t>(length, 0)); return true; }
     return false;
 }
 

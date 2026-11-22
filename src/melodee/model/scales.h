@@ -47,11 +47,17 @@ inline const char* layout_name(PadLayout layout) {
 // notes (8W8's "Rack 36"). Banks A-D, so every note stays MIDI's (36-99).
 constexpr unsigned drum_banks = 4;
 constexpr unsigned drum_first_key = 36, drum_last_key = drum_first_key + 16 * drum_banks - 1;
-inline bool drum_pads(const Track& track) {
-    return track.layout == PadLayout::Drums && track.engine != EngineKind::Sampler && track.engine != EngineKind::None;
+// A MIDI track in Multi channel mode: pads 1-16 send Middle C (60) on MIDI channels 1-16,
+// stored as 16 pad lanes (keys 36..51) so Steps, Roll and Seq Record separate each channel.
+inline bool midi_multi(const Track& track) {
+    return track.engine == EngineKind::Midi && track.params[midi_channel_param] == midi_channel_multi;
 }
-inline unsigned drum_bank(const Track& track) { return track.bank % drum_banks; }
+inline bool drum_pads(const Track& track) {
+    return (track.layout == PadLayout::Drums || midi_multi(track)) && track.engine != EngineKind::Sampler && track.engine != EngineKind::None;
+}
+inline unsigned drum_bank(const Track& track) { return midi_multi(track) ? 0u : track.bank % drum_banks; }
 inline int drum_key(const Track& track, unsigned pad) {
+    if (midi_multi(track)) return int(drum_first_key + pad % 16);
     if (track.engine == EngineKind::Midi) return track.midi.drum_note[(16 * drum_bank(track) + pad % 16) % sampler_pads]; // its drum map (roadmap P4, M3)
     return int(drum_first_key + 16 * drum_bank(track) + pad % 16);
 }
@@ -75,7 +81,7 @@ constexpr unsigned prog_banks = prog_chords / 16;
 inline unsigned prog_bank(const Track& track) { return track.bank % prog_banks; }
 // A synth track's pads playing its progression (not 16 Levels over it).
 inline bool prog_pads(const Track& track) {
-    return track.layout == PadLayout::Prog && !track.levels && track.engine != EngineKind::Sampler && track.engine != EngineKind::None;
+    return !midi_multi(track) && track.layout == PadLayout::Prog && !track.levels && track.engine != EngineKind::Sampler && track.engine != EngineKind::None;
 }
 inline unsigned prog_index(const Track& track, unsigned pad) { return 16 * prog_bank(track) + pad % 16; }
 // The keys chord `index` plays, lowest first; how many (0: no chord there).
@@ -116,6 +122,7 @@ inline unsigned prog_key(const Track& track) { return unsigned((int(track.prog.r
 // a root. 16 Levels plays the track's last note on every pad.
 struct PadNote { int key; bool root; };
 inline PadNote pad_note(const Project& project, const Track& track, unsigned pad) {
+    if (midi_multi(track)) return {drum_key(track, pad), false};
     int base = 12 * (track.octave + 1) + project.root + track.transpose;
     switch (track.layout) {
     case PadLayout::Chromatic: return {base + int(pad), pad % 12 == 0};

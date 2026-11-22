@@ -11,6 +11,10 @@
 // what is no number. Kept in MIDT from its version 3.
 namespace melodee {
 
+constexpr int midi_channel_param = 1;  // midi_track::Channel
+constexpr int midi_channel_multi = 17; // Multi mode: pads 1-16 -> MIDI channels 1-16
+constexpr int midi_multi_note = 60;    // Middle C (C4), sent on each channel in Multi mode
+
 struct MidiDevice {
     char device[32] {};                         // Port USB device: the ALSA port's name, matched as devices come and go
     std::array<uint8_t, sampler_pads> drum_note {}; // Drum pads: each pad's note (pad n of bank b: 16 b + n), General MIDI from 36

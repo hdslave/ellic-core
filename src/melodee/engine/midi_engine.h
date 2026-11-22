@@ -3,6 +3,8 @@
 #pragma once
 #include "melodee/engine/engine.h"
 #include "melodee/model/midi_config.h"
+#include "melodee/model/midi_track.h"
+#include <algorithm>
 #include <string>
 
 // The MIDI engine (docs/MIDI_TRACKS.md, phase M1): a track that plays an
@@ -31,6 +33,12 @@ constexpr int slots = 24, slot_pages = slots / 3;
 constexpr int slot_value(int k) { return Cc1 + k; }
 constexpr int slot_address(int k) { return k < 3 ? CcNumber1 + k : SlotAddress4 + (k - 3); }
 constexpr int routing_params = 2; // Port and Channel: what decides where notes go (no Motion lane)
+static_assert(Channel == midi_channel_param);
+constexpr int channel_multi = midi_channel_multi; // Multi: pads 1-16 -> channels 1-16
+constexpr int multi_note = midi_multi_note;       // Middle C (C4) sent on each channel in Multi mode
+constexpr bool is_multi(int channel) { return channel == channel_multi; }
+constexpr uint8_t multi_channel(int key) { return uint8_t((((key - 36) % 16) + 16) % 16 + 1); }
+constexpr uint8_t base_channel(int channel) { return is_multi(channel) ? 1 : uint8_t(std::clamp(channel, 1, 16)); }
 constexpr bool is_cc(int id) { return id >= Cc1 && id < Cc1 + slots; } // a slot's value: a Motion lane
 constexpr bool is_program(int id) { return id >= BankMsb && id <= Program; }
 constexpr int slot_of_address(int id) { return id >= CcNumber1 && id <= CcNumber3 ? id - CcNumber1 : id >= SlotAddress4 && id < SlotAddress4 + 21 ? id - SlotAddress4 + 3 : -1; }

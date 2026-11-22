@@ -39,13 +39,14 @@ const EngineInfo& engine_info(EngineKind kind) {
     // (the first three on Stage's CC page), each slot's address; pressure, bend, delay, pads, an input as its sound,
     // SysEx on load, each pattern's own program (roadmap P4, M2-M5).
     static const char* const midi_ports[] {"External", "USB-C", "All USB", "USB device"};
+    static const char* const midi_channels[] {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "Multi"};
     static const char* const pressure_outs[] {"Poly", "Channel", "Off"};
     static const char* const audio_ins[] {"None", "Rear L", "Rear R", "Rear", "Mic", "USB"};
     static const auto midi_params = [] {
         using namespace midi_track;
         std::array<ParamInfo, Count> p {};
         p[Port] = {"PORT", 0, PortCount - 1, External, Format::Choice, midi_ports};
-        p[Channel] = {"CHANNEL", 1, 16, 1, Format::Number, nullptr};
+        p[Channel] = {"CHANNEL", 1, channel_multi, 1, Format::Choice, midi_channels};
         p[BankMsb] = {"BANK MSB", 0, 128, 0, Format::Bank, nullptr};
         p[BankLsb] = {"BANK LSB", 0, 128, 0, Format::Bank, nullptr};
         p[Program] = {"PROGRAM", 0, 128, 0, Format::Program, nullptr};

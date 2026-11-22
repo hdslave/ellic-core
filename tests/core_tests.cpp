@@ -8565,6 +8565,43 @@ void midi_lookahead() {
     CHECK(first && first->e.frame == again && !first->e.live);
 }
 
+void midi_multi_channel() {
+    using K = MidiOutEvent::Kind;
+    const auto& ch_info = engine_info(EngineKind::Midi).params[midi_track::Channel];
+    CHECK(show(ch_info, 1).value == "1" && show(ch_info, 16).value == "16" && show(ch_info, midi_track::channel_multi).value == "Multi");
+    auto project = std::make_unique<Project>();
+    auto bank = std::make_unique<PatternBank>();
+    for (auto& t : project->tracks) t.engine = EngineKind::None;
+    load_sound(project->tracks[0], EngineKind::Midi, 0);
+    project->tracks[0].params[midi_track::Port] = midi_track::UsbC;
+    project->tracks[0].params[midi_track::Channel] = midi_track::channel_multi;
+    CHECK(midi_multi(project->tracks[0]) && drum_pads(project->tracks[0]));
+    CHECK(pad_note(*project, project->tracks[0], 0).key == 36 && pad_note(*project, project->tracks[0], 15).key == 51);
+    EngineHost host;
+    host.load(*project, *bank);
+    host.set_audio_format(44100, 384);
+    std::vector<int32_t> out(256);
+    auto block = [&] {
+        host.render(out.data(), 128, 1);
+        std::vector<MidiOutEvent> got;
+        MidiOutEvent e;
+        while (host.take_midi(e)) got.push_back(e);
+        return got;
+    };
+    host.send({Command::Type::NoteOn, 0, 0, 36, 100});
+    host.send({Command::Type::NoteOn, 0, 0, 51, 90});
+    auto ons = block();
+    CHECK(ons.size() == 2);
+    CHECK(ons[0].kind == K::NoteOn && ons[0].channel == 1 && ons[0].a == 60 && ons[0].b == 100);
+    CHECK(ons[1].kind == K::NoteOn && ons[1].channel == 16 && ons[1].a == 60 && ons[1].b == 90);
+    host.send({Command::Type::NoteOff, 0, 0, 36, 0});
+    auto off1 = block();
+    CHECK(off1.size() == 1 && off1[0].kind == K::NoteOff && off1[0].channel == 1 && off1[0].a == 60);
+    host.send({Command::Type::Param, 0, 0, midi_track::Channel, 4});
+    auto switched = block();
+    CHECK(switched.size() == 1 && switched[0].kind == K::NoteOff && switched[0].channel == 16 && switched[0].a == 60);
+}
+
 void track_names() {
     // A name of its own (Tracks, Shift + Push): kept when the track's sound, plug-in or kit changes, saved in TNAM.
     Track t;
@@ -8917,6 +8954,7 @@ int main() {
     host_sequencer();
     solo_empty_track();
     sequenced_legato();
+    midi_multi_channel();
     audio_quality();
     std::puts("core ok");
 }
