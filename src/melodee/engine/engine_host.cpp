@@ -2244,7 +2244,7 @@ bool EngineHost::out_wanted(unsigned t, int key) const {
 
 bool EngineHost::heard(unsigned t) const {
     bool solo = false;
-    for (const auto& s : slots) solo |= s.solo;
+    for (const auto& s : slots) solo |= s.soloing();
     const auto& slot = slots[t % track_count];
     return !(slot.mute && !mutes_notes(slot)) && !(solo && !slot.solo);
 }
@@ -2998,7 +2998,7 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
     bool solo = false;
     for (auto& strip : loop_strips) solo |= strip.solo && loops.on();
     for (auto& slot : slots) {
-        solo |= slot.solo;
+        solo |= slot.soloing();
         // An empty track (no engine, no print sounding) is read by nothing this block (every reader asks for its
         // engine first): its buffers are left as they are, and cleared again once it plays.
         if (!slot.engine && !slot.print.sounding()) { slot.knob_pad_fed = false; slot.print_fed = false; continue; }

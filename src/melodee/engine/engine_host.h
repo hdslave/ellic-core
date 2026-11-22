@@ -415,6 +415,9 @@ private:
         // apart would be ten lines far apart in each slot for a block on a cold cache to wait for, not a few.
         EngineKind kind = EngineKind::None;
         bool mute = false, solo = false;
+        // A solo counts only on a track that plays something (Track::used(), as the pad lights have it): an empty
+        // track kept soloed would silence every other track with nothing to show why.
+        bool soloing() const { return solo && kind != EngineKind::None; }
         bool knob_pad_fed = false; // some sub-block of this block put something in knob_pad_l / knob_pad_r
         bool print_fed = false;    // this block's print is in print_l / print_r (freeze plan F2b, below)
         Engine* engine = nullptr;
