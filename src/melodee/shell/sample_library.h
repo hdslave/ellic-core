@@ -1,6 +1,7 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #pragma once
+#include "melodee/engine/spsc_queue.h"
 #include "melodee/engine/bounce.h"
 #include "melodee/shell/expansion_install.h"
 #include "melodee/engine/auto_chop.h"
@@ -15,7 +16,6 @@
 #include "melodee/shell/stems.h"
 #include "melodee/shell/stream_holds.h"
 #include "melodee/shell/zone_shapes.h"
-#include "surface/midi.h"
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -57,6 +57,9 @@ struct SampleFile {
     bool expansion = false;  // an MPC expansion (".xpn"): Push installs it onto the card
     bool presets = false;    // a SoundFont (".sf2", roadmap P3): listed as a folder, its presets inside it
     bool midi = false;       // a Standard MIDI File (".mid", roadmap P4): Push lays its notes on the track's pattern
+    bool starred = false;    // on STARRED (shell/sample_lists.h)
+    uint8_t list = 0;        // the row that opens STARRED (1) or RECENT (2); its path is that list's folder name
+    std::string where {};    // in a list: the folder its file is in; on a list's row: how many it holds
 };
 struct LoadedSample {
     std::string name, path, error;
@@ -165,6 +168,12 @@ public:
     // in view is listed again. removals(): how many have been done (the plug-in picker lists again too).
     void remove(const std::string& path);
     unsigned removals() const { return removal_count.load(std::memory_order_acquire); }
+    // MIDI thread: the browser's STARRED and RECENT (shell/sample_lists.h). star(): Shift + B3, starred or no
+    // longer; used(): a file loaded from the browser, first on RECENT; unlist(): Erase in a list, off it, the
+    // file kept. Done on the service thread, which keeps them on the card and lists the folder in view again.
+    void star(const std::string& path) { list_change(ListChange::Star, path); }
+    void used(const std::string& path) { list_change(ListChange::Use, path); }
+    void unlist(const std::string& path) { list_change(ListChange::Unlist, path); }
     // MIDI thread: an MPC expansion (.xpn) to install onto the card (shell/expansion_install.h);
     // done() says when it starts and ends, and the browser then shows its folder.
     void install(const std::string& path);
@@ -206,10 +215,10 @@ public:
     void stop_stems() { separator.cancel(); }
     StemsProgress stems_progress() const { return separator.progress(); }
     bool take_stems(StemsResult& out);
-    // Where the separating program is: the release's folder on the card (autorun/melodee/stems), else the folder
-    // `device.py install-sd` starts the app from (autorun/sample-base/stems, or sample-base/stems at the card's top
-    // for an install from before); or $MELODEE_STEMS_ENGINE. Its model is the
-    // file spleeter-4stems.f16 beside it, or $MELODEE_STEMS_MODEL.
+    // Where the separating program is: the stems folder of the card folder the app was copied from (a release's
+    // autorun/melodee, or where a boot menu keeps it), else autorun/melodee/stems, autorun/sample-base/stems or
+    // sample-base/stems at the card's top (shell/stems_find.h); or $MELODEE_STEMS_ENGINE. Empty when there is none.
+    // Its model is the file spleeter-4stems.f16 beside it, or $MELODEE_STEMS_MODEL.
     static std::string stems_program(const std::string& card_top);
 
     // The Looper (docs/LOOPER.md, shell/looper_files.cpp). Commit to pad: loop `loop` into slot `slot`, as
@@ -382,11 +391,11 @@ private:
     std::vector<std::pair<uint16_t, std::string>> away; // the instruments put down for SD card access
 
     EngineHost& host;
-    MidiQueue<16, Request> requests; // MIDI thread produces, service thread consumes
+    SpscQueue<16, Request> requests; // MIDI thread produces, service thread consumes
     std::atomic<unsigned> asked {0}, answered {0}; // requests taken by load(), and read since (loads_waiting())
     std::atomic<unsigned> landings_open {0};        // instruments still landing, a part a pass
-    MidiQueue<8, SampleJob> jobs;    // the same
-    MidiQueue<8, Done> finished;     // service thread produces, MIDI thread consumes
+    SpscQueue<8, SampleJob> jobs;    // the same
+    SpscQueue<8, Done> finished;     // service thread produces, MIDI thread consumes
     std::atomic<bool> scan_wanted {true};
     // The browser's folder is listed again every few seconds only while something reads the listing (files(): the
     // Samples page does every frame). With no page showing it, a card change, a file Melodee wrote or a browse
@@ -406,12 +415,12 @@ private:
     bool take_open = false, take_failed = false, take_seen = false;
     // Recall and renders (shell/sample_capture.cpp).
     struct RecallJob { uint16_t slot = 0; RecallOptions options; };
-    MidiQueue<4, RecallJob> recalls;
-    MidiQueue<4, Render> renders;
+    SpscQueue<4, RecallJob> recalls;
+    SpscQueue<4, Render> renders;
     void save_recall(const RecallJob& job);
     void drain_render();
     // Stems: the job asked for, the one running, and what came of the last (under `lock`).
-    MidiQueue<2, StemsRequest> stems_wanted;
+    SpscQueue<2, StemsRequest> stems_wanted;
     StemSeparator separator;
     std::vector<StemsResult> stems_done;
     void stems_service(const Platform& platform);
@@ -427,7 +436,7 @@ private:
     Render render_job;
     unsigned render_rate = 44100; // the render's frames, the device's rate when it began
     // The Looper's files: a commit waiting for its loop, file jobs in turn (shell/looper_files.cpp).
-    MidiQueue<4, LoopCommit> commits;
+    SpscQueue<4, LoopCommit> commits;
     struct Waiting { bool on = false; LoopCommit job; unsigned passes = 0; };
     Waiting committing;
     mutable std::mutex loop_lock;
@@ -474,6 +483,15 @@ private:
     std::vector<std::string> removals_wanted; // under `lock`: paths to delete
     std::atomic<unsigned> removal_count {0};
     void remove_service();
+    // STARRED and RECENT: what the MIDI thread asked, under `lock`; the lists themselves, the service thread's.
+    struct ListChange { enum Kind : uint8_t { Star, Use, Unlist } kind = Star; std::string path; };
+    void list_change(ListChange::Kind kind, const std::string& path);
+    std::vector<ListChange> list_changes;
+    std::vector<std::string> starred_paths, recent_paths;
+    std::string list_parent; // the folder a list was opened from: B1 goes back to it
+    void lists_read();       // the card's Melodee/Starred.txt and Recent.txt, when a card comes
+    void lists_write(bool starred, bool recent);
+    void lists_service();    // the changes asked for, kept on the card
     std::vector<BankBytes> banks_read;    // under `lock`: what came of them
     bool preview_pending = false;
     // A load timed for the journal, from the first file asked for until nothing is left to read or hand on: how

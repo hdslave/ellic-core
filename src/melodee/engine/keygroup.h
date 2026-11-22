@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #pragma once
 #include "melodee/engine/sfz.h"
@@ -70,5 +70,10 @@ double keygroup_decibels(double value);
 uint8_t mpc_level(double value);     // a pad's or program's Volume (0.7079 is 0 dB, 1 is +6 dB) as Melodee's 0..127
 int8_t mpc_pan(double value);        // 0..1 as -50..50
 PadFilter mpc_filter(int type);      // its filter table as the pad's types; Off where it has none
+// A note's Sample Slice modifier (an .xpj note's modifierValue15 and modifierActiveState15; the stock MPC Sample
+// records a hit on Chop's pads so) as Event::slice: the slice + 1 of its pad's sample's chop, the value being the
+// slice / 127. 0 (the pad's own region) when it is off, or Relative (the project's modifierPlaybackProperties), an
+// offset from a slice the pad does not play.
+uint8_t mpc_slice_hit(bool active, double value, bool relative);
 
 } // namespace melodee

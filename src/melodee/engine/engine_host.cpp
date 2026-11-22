@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #include "melodee/engine/engine_host.h"
 #include <chrono>
@@ -99,6 +99,10 @@ EngineHost::~EngineHost() {
 void EngineHost::load(const Project& project, const PatternBank& bank) {
     for (unsigned t = 0; t < track_count; ++t)
         for (unsigned p = 0; p < pattern_count; ++p) *patterns[t][p] = played_pattern(bank.at[t][p], project.tracks[t].speed);
+    for (unsigned n = 0; n < sample_slots; ++n) { // each sample's chop, for slice hits (issue 24); a live host's shell sends them again
+        delete chops.at[n];
+        chops.at[n] = project.chops[n].used() ? new Slices(project.chops[n].slices) : nullptr;
+    }
     load_state(project);
     snap_mix = true; // its levels from the first block, not eased in from the last project's
 }
@@ -153,6 +157,7 @@ void EngineHost::play_parked(int32_t* out, unsigned frames, float* stems) {
     frames = std::min(frames, block);
     std::fill(out, out + 2 * frames, 0);
     if (stems) std::fill(stems, stems + size_t(track_count) * block, 0.0f);
+    silence_live_stems();
     for (auto* level : {&out_levels[0], &out_levels[1], &in_levels[0], &in_levels[1]}) level->store(0, std::memory_order_relaxed);
     parked_frames += frames;
 }
@@ -257,8 +262,11 @@ void EngineHost::retire(Pattern* pattern) {
 unsigned EngineHost::take_commands(unsigned offset, unsigned frames) {
     for (unsigned n = 0; n < 4096; ++n) {
         if (park_wanted) return frames; // a Park taken: what came after it waits for the loader's project
-        if (!has_waiting && !queue.pop(waiting)) return frames;
-        has_waiting = true;
+        if (!has_waiting) {
+            if (!queue.pop(waiting)) return frames;
+            has_waiting = true;
+            hand_early = waiting.timed && hand_midi(waiting, offset);
+        }
         if (waiting.timed) {
             int32_t due = int32_t(waiting.at - uint32_t(frame_now));
             if (due > timed_reach) due = 0; // the audio clock off (just after an overrun): at once, as before
@@ -275,9 +283,44 @@ unsigned EngineHost::take_commands(unsigned offset, unsigned frames) {
         }
         has_waiting = false;
         block_at = offset; // MIDI out of what it plays goes at this frame
+        from_hand = by_hand(waiting);
         apply(waiting);
+        from_hand = hand_early = false;
     }
     return frames;
+}
+
+// A note played by hand, timed a block after it was played (send_at()) so its sound keeps its spacing to the frame:
+// its MIDI out as soon as it is taken instead, in the first block rendered after it came, not the one its frame
+// falls in; apply() then leaves the MIDI out (`hand_early`). True for a note (whatever went out), false for the rest.
+bool EngineHost::hand_midi(const Command& c, unsigned offset) {
+    using Type = Command::Type;
+    if (c.type != Type::NoteOn && c.type != Type::NoteOff && c.type != Type::PadNote) return false;
+    int32_t due = int32_t(c.at - uint32_t(frame_now)); // its frame, as take_commands() reads it
+    if (due > timed_reach || due < int32_t(offset)) due = int32_t(offset);
+    const uint64_t at = frame_now + uint64_t(due);
+    const unsigned t = c.track % track_count;
+    const auto& slot = slots[t];
+    const bool deep = slot.freeze && slot.freeze->deep; // freeze plan F2d: a deep-frozen track's pads play nothing
+    from_hand = true;
+    if (c.type == Type::NoteOn) { if (c.pattern != 1 && !deep) midi_note(t, c.index & 0xff, c.value, at, -1); }
+    else if (c.type == Type::NoteOff) { if (c.pattern != 1) midi_note_off(t, c.index & 0xff, at); }
+    else if (!deep) midi_note(t, int(sampler_first_note + c.index), c.value, at, -1);
+    from_hand = false;
+    return true;
+}
+
+// Played by hand: a pad or key (or MIDI in playing one) and its release, its pressure, the fader's mod wheel, a knob on
+// a MIDI track's page, a controller MIDI in echoes on a MIDI track. Their MIDI out goes at once, not when the frame is
+// heard (docs/MIDI_TRACKS.md "Timing").
+bool EngineHost::by_hand(const Command& c) {
+    switch (c.type) {
+    case Command::Type::NoteOn: case Command::Type::NoteOff: case Command::Type::PadNote: case Command::Type::Pressure:
+    case Command::Type::Wheel: case Command::Type::Param: case Command::Type::MidiEcho:
+        return true;
+    default:
+        return false;
+    }
 }
 
 bool EngineHost::mid_block(Command::Type type) {
@@ -402,6 +445,7 @@ void EngineHost::select_engine(Slot& slot, EngineKind kind) {
     slot.plugin.attach(kind == EngineKind::Plugin ? runner_of(slot.plugin_entry) : nullptr);
     if (kind != EngineKind::Plugin) slot.plugin.release_macros();
     slot.sampler.set_samples(&samples);
+    slot.sampler.set_chops(&chops.at); // slice hits (issue 24)
     slot.sampler.set_keyed(kind == EngineKind::Keygroup); // its notes MIDI notes on pad 1
     slot.arp.top = kind == EngineKind::Sampler ? int(sampler_last_key) : 127; // a kit's notes run past 127
     for (auto& off : slot.offs) off.key = -1;
@@ -443,13 +487,13 @@ void EngineHost::apply(const Command& c) {
     case Type::NoteOn:
         if (slot.freeze && slot.freeze->deep) break; // freeze plan F2d: a deep-frozen track's pads play nothing
         if (slot.freeze) { wake(slot); slot.hand.set(c.index & 0xff); } // freeze plan F2b: a hand wakes a frozen track's engine
-        if (c.index <= 127 || slot.kind == EngineKind::Sampler) engine_note_on(slot, c.index, c.value);
-        if (c.pattern != 1) midi_note(c.track % track_count, c.index & 0xff, c.value, frame_now + block_at, -1); // a pad's note (not one from MIDI in)
+        if (slot.engine && (c.index <= 127 || slot.kind == EngineKind::Sampler)) engine_note_on(slot, c.index, c.value); // none: nothing to call
+        if (c.pattern != 1 && !hand_early) midi_note(c.track % track_count, c.index & 0xff, c.value, frame_now + block_at, -1); // a pad's note (not one from MIDI in)
         break;
     case Type::NoteOff:
         slot.hand.reset(c.index & 0xff);
-        if (c.index <= 127 || slot.kind == EngineKind::Sampler) engine_note_off(slot, c.index);
-        if (c.pattern != 1) midi_note_off(c.track % track_count, c.index & 0xff, frame_now + block_at);
+        if (slot.engine && (c.index <= 127 || slot.kind == EngineKind::Sampler)) engine_note_off(slot, c.index);
+        if (c.pattern != 1 && !hand_early) midi_note_off(c.track % track_count, c.index & 0xff, frame_now + block_at);
         break;
     case Type::AllNotesOff:
         midi_all_off(c.track, frame_now);
@@ -727,6 +771,13 @@ void EngineHost::apply(const Command& c) {
     case Type::RecordStop: take.stop(); cue_track = -1; break;
     case Type::Monitor: monitor_on.store(c.value != 0, std::memory_order_relaxed); break;
     case Type::InputTaken: source_taken.store(c.value != 0, std::memory_order_relaxed); break;
+    case Type::Chop: // issue 24: a sample's chop for slice hits; the one it replaces back to the MIDI thread
+        if (c.index < sample_slots) {
+            const Slices* old = chops.at[c.index];
+            chops.at[c.index] = c.chop;
+            if (old && !retired_chops.push(old)) {} // the MIDI thread frees it; a full queue only leaks one
+        }
+        break;
     case Type::LoopMonitor: loop_monitor.store(uint8_t(std::clamp<int>(c.value, 0, int(Monitor::Count) - 1)), std::memory_order_relaxed); break;
     case Type::KnobFx: knob_command(c); break;
     case Type::Compressor: {
@@ -758,10 +809,11 @@ void EngineHost::apply(const Command& c) {
         if (slot.freeze) wake(slot);
         if (slot.engine == &slot.sampler) {
             EngineCall call;
-            call.op = EngineCall::Op::PlayPad; call.a = c.index; call.b = c.value; call.c = int(c.pattern) - 64; call.d = int(c.position) - 1;
+            call.op = EngineCall::Op::PlayPad; call.b = c.value; call.c = int(c.pattern) - 64; call.d = int(c.position) - 1;
+            call.a = int(c.index & 0xffff) | int(std::min<uint32_t>(c.micros, 127)) << 16; // the pad, a slice + 1 above it (issue 24)
             if (!keep_call(slot, call)) make_call(c.track % track_count, slot, call);
         }
-        midi_note(c.track % track_count, int(sampler_first_note + c.index), c.value, frame_now + block_at, -1); // 16 Levels: the pad's note
+        if (!hand_early) midi_note(c.track % track_count, int(sampler_first_note + c.index), c.value, frame_now + block_at, -1); // 16 Levels: the pad's note
         break;
     case Type::MidiTrack:
         if (!is_midi(c.track)) midi_all_off(c.track, frame_now); // what went out on the old channel ends there (a MIDI track keeps its own)
@@ -1191,7 +1243,7 @@ void EngineHost::make_call(unsigned t, Slot& slot, const EngineCall& c) {
     case Op::Pressure: e->set_pressure(c.a, c.x); break;
     case Op::Control: e->control(c.a, c.b); break;
     case Op::Mod: e->set_mod(unsigned(c.a), ModRoute {uint8_t(c.b), uint8_t(c.c), int8_t(c.d)}); break;
-    case Op::PlayPad: if (e == &slot.sampler) slot.sampler.play_pad(unsigned(c.a), c.b, c.c, c.d); break;
+    case Op::PlayPad: if (e == &slot.sampler) slot.sampler.play_pad(unsigned(c.a & 0xffff), c.b, c.c, c.d, ((c.a >> 16) & 0x7f) - 1); break;
     case Op::Audition: if (e == &slot.sampler) slot.sampler.audition(uint16_t(c.a), uint32_t(c.b), uint32_t(c.c), c.d); break;
     case Op::MovePad: slot.sampler.move_pad(unsigned(c.a), PadParam(c.b), c.c); break;
     case Op::RestorePad: slot.sampler.restore_pad(unsigned(c.a), PadParam(c.b)); break;
@@ -1769,7 +1821,7 @@ void EngineHost::move_lane(unsigned t, Slot& slot, unsigned param, unsigned pad,
     }
     if (!slot.engine) return;
     engine_param(slot, int(param), value);
-    if (slot.kind == EngineKind::Midi) midi_param(t, int(param), value, frame_now + block_at); // a CC lane plays out
+    if (slot.kind == EngineKind::Midi) midi_param(t, int(param), value, seq_frame()); // a CC lane plays out
     slot.moved = true;
 }
 
@@ -1793,7 +1845,7 @@ void EngineHost::restore_lane(unsigned t, Slot& slot, unsigned param, unsigned p
     }
     if (!slot.engine || param >= max_params) return;
     engine_param(slot, int(param), slot.base[param]);
-    if (slot.kind == EngineKind::Midi) midi_param(t, int(param), slot.base[param], frame_now + block_at);
+    if (slot.kind == EngineKind::Midi) midi_param(t, int(param), slot.base[param], seq_frame());
 }
 
 // Swing stretches the first sixteenth of every eighth and shortens the second.
@@ -1819,10 +1871,12 @@ void EngineHost::bar_start() {
         for (unsigned t = 0; t < track_count; ++t) {
             auto& slot = slots[t];
             if (slot.queued == 255) continue;
-            if (slot.kind == EngineKind::Midi && slot.queued != slot.pattern) midi_all_off(t, frame_now + block_at); // the old pattern's notes end
+            // A MIDI track that read this launch ahead (play_ahead()) sent these already, ahead of the notes it sent.
+            const bool sent = slot.kind == EngineKind::Midi && slot.ahead_bar == tick_now && slot.ahead_queued == slot.queued;
+            if (slot.kind == EngineKind::Midi && slot.queued != slot.pattern && !sent) midi_all_off(t, early_frame(t)); // the old pattern's notes end
             slot.pattern = slot.queued; slot.queued = 255; slot.start = tick_now;
             drop_kept(t); // pad-fx C: the old pattern's punches end here
-            if (slot.kind == EngineKind::Midi) midi_program(t, frame_now + block_at, false); // roadmap P4: a pattern's own program, ahead of its notes
+            if (slot.kind == EngineKind::Midi && !sent) midi_program(t, early_frame(t), false); // roadmap P4: a pattern's own program, ahead of its notes
             patterns_now[t].store(slot.pattern, std::memory_order_relaxed);
             lead = slot.pattern;
             if (slot.silent) { slot.silent = false; stopped_now.fetch_and(~(1u << t), std::memory_order_relaxed); } // after a STOP (roadmap P5)
@@ -1881,10 +1935,10 @@ void EngineHost::follow(unsigned t) {
         stopped_now.fetch_or(1u << t, std::memory_order_relaxed);
         return;
     }
-    if (slot.kind == EngineKind::Midi && unsigned(to) != slot.pattern) midi_all_off(t, frame_now + block_at); // as a launch
+    if (slot.kind == EngineKind::Midi && unsigned(to) != slot.pattern) midi_all_off(t, early_frame(t)); // as a launch
     slot.pattern = uint8_t(to); slot.start = tick_now;
     drop_kept(t); // pad-fx C: the old pattern's punches end here
-    if (slot.kind == EngineKind::Midi) midi_program(t, frame_now + block_at, false);
+    if (slot.kind == EngineKind::Midi) midi_program(t, early_frame(t), false);
     patterns_now[t].store(slot.pattern, std::memory_order_relaxed);
     lead = slot.pattern;
     follow_tempo();
@@ -1908,7 +1962,7 @@ void EngineHost::clips_at_bar(bool force) {
             slot.clip = index;
             slot.pattern = clip.pattern;
             drop_kept(t); // pad-fx C: the clip before's punches end here
-            if (slot.kind == EngineKind::Midi) midi_program(t, frame_now + block_at, false); // roadmap P4
+            if (slot.kind == EngineKind::Midi) midi_program(t, early_frame(t), false); // roadmap P4
             slot.start = start;
             patterns_now[t].store(slot.pattern, std::memory_order_relaxed);
         }
@@ -2073,7 +2127,7 @@ void EngineHost::play_hit(unsigned t, Slot& slot, const PendingHit& hit, uint64_
         engine_note_on(slot, hit.key, hit.velocity, hit.accent ? accent_gain : 1.0f);
         schedule_off(slot, hit.key, hit.length);
     }
-    if (hit.midi >= 0) midi_note(t, hit.midi, hit.velocity, at, hit.length);
+    if (hit.midi >= 0) midi_note(t, hit.midi, hit.velocity, uint64_t(std::max<int64_t>(0, int64_t(at) + hit.shift)), hit.length);
     hits_played.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -2162,11 +2216,16 @@ void EngineHost::midi_note(unsigned t, int key, int velocity, uint64_t at, int64
         if (own) e.track = uint8_t(t);
         emit(e);
     };
-    for (auto& off : midi_offs) // a retrigger ends the note it replaces first
-        if (off.on && off.channel == channel && off.key == key && off.dest == dest) { event(MidiOutEvent::Kind::NoteOff, 0, at); off.on = false; }
+    if (midi_offs_held)
+        for (auto& off : midi_offs) // a retrigger ends the note it replaces first
+            if (off.on && off.channel == channel && off.key == key && off.dest == dest) { event(MidiOutEvent::Kind::NoteOff, 0, at); off.on = false; }
     event(MidiOutEvent::Kind::NoteOn, uint8_t(std::clamp(velocity, 1, 127)), at);
     for (auto& off : midi_offs)
-        if (!off.on) { off = {true, channel, uint8_t(key), uint8_t(t), length >= 0 ? at + uint64_t(length) : ~uint64_t(0), dest}; return; }
+        if (!off.on) {
+            off = {true, channel, uint8_t(key), uint8_t(t), length >= 0 ? at + uint64_t(length) : ~uint64_t(0), dest};
+            midi_offs_held = true;
+            return;
+        }
     if (length >= 0) event(MidiOutEvent::Kind::NoteOff, 0, at + uint64_t(length)); // no room: its off now, timed
 }
 
@@ -2242,6 +2301,13 @@ void EngineHost::midi_inputs(const int32_t* input, const float* usb, unsigned fr
         if (s.kind != EngineKind::Midi || s.midi.audio == midi_track::AudioNone) continue;
         s.midi.read = 0;
         float g = s.base[midi_track::AudioMonitor] ? level_gain(s.base[midi_track::AudioLevel]) : 0.0f;
+        if (s.midi.audio == midi_track::AudioUsb && usb_direct.load(std::memory_order_relaxed)) { // heard direct instead
+            if (g > 0 && heard(unsigned(&s - slots.data()))) { // at the track's level and pan (a stereo engine: unity at the centre)
+                usb_wanted = true;
+                usb_want_l += g * s.gain * s.pan_left * 1.4142f; usb_want_r += g * s.gain * s.pan_right * 1.4142f;
+            }
+            g = 0;
+        }
         for (unsigned f = 0; f < frames && f < 128; ++f) {
             float l = 0, r = 0;
             if (s.midi.audio == midi_track::AudioUsb) { if (usb) { l = usb[2 * f]; r = usb[2 * f + 1]; } }
@@ -2257,43 +2323,56 @@ void EngineHost::midi_inputs(const int32_t* input, const float* usb, unsigned fr
     }
 }
 
-// Roadmap P4, stems to the card: each track as it joins the mix (after its chain, level, pan and mute, eased as heard)
-// and each bus's return, the same frames as the mixdown.
+// Roadmap P4, stems to the card: each track as it joins the mix (after its chain, level, pan and mute, eased as heard,
+// with the kit pad that keys the Sidechain, which joins after the ducking) and each bus's return, the same frames as
+// the mixdown. The same rows, every block, into set_live_stems()'s (the Ableton Move's USB submixes): one
+// computation, so the two never differ.
 void EngineHost::take_stems(unsigned frames) {
     StemRing* ring = stem_ring.load(std::memory_order_acquire);
     unsigned from = 0, to = 0;
-    if (!ring || !render_out.span(frames, from, to)) return;
-    static thread_local float l[StemRing::stem_count][block], r[StemRing::stem_count][block];
+    const bool bouncing = ring && render_out.span(frames, from, to);
+    if (!bouncing && !live_stems) return;
+    static thread_local float own[StemRing::stem_count * 2][block];
+    float* rows = live_stems ? live_stems : &own[0][0];
+    auto row = [&](unsigned stem, unsigned side) { return rows + size_t(stem * 2 + side) * block; };
+    const uint32_t ring_mask = bouncing ? ring->mask() : 0, wanted = live_stems ? ~0u : ring_mask;
     std::array<const float*, StemRing::stem_count> left {}, right {};
-    uint32_t mask = ring->mask();
     for (unsigned t = 0; t < track_count; ++t) {
         const auto& slot = slots[t];
-        if (!((mask >> t) & 1) || !slot.engine) continue;
-        for (unsigned f = 0; f < frames; ++f) { float a = slot.audible.at(f); l[t][f] = slot.left[f] * a; r[t][f] = slot.right[f] * a; }
-        left[t] = l[t]; right[t] = r[t];
+        if (!((wanted >> t) & 1)) continue;
+        float *l = row(t, 0), *r = row(t, 1);
+        if (!slot.engine) { // silent, and so left out of the render's
+            std::fill(l, l + frames, 0.0f);
+            std::fill(r, r + frames, 0.0f);
+            continue;
+        }
+        for (unsigned f = 0; f < frames; ++f) { float a = slot.audible.at(f); l[f] = slot.left[f] * a; r[f] = slot.right[f] * a; }
+        if (keyed_pad == int(t) && !slot.audible.silent()) // as the mix has it (render())
+            for (unsigned f = 0; f < frames; ++f) { float a = slot.audible.at(f); l[f] += key_l[f] * a; r[f] += key_r[f] * a; }
+        if ((ring_mask >> t) & 1) { left[t] = l; right[t] = r; }
     }
     for (unsigned b = 0; b < bus_count; ++b) {
         unsigned s = track_count + b;
-        if (!((mask >> s) & 1)) continue;
-        for (unsigned f = 0; f < frames; ++f) { float g = returns_now[b].at(f); l[s][f] = bus_l[b][f] * g; r[s][f] = bus_r[b][f] * g; }
-        left[s] = l[s]; right[s] = r[s];
+        if (!((wanted >> s) & 1)) continue;
+        float *l = row(s, 0), *r = row(s, 1);
+        for (unsigned f = 0; f < frames; ++f) { float g = returns_now[b].at(f); l[f] = bus_l[b][f] * g; r[f] = bus_r[b][f] * g; }
+        if ((ring_mask >> s) & 1) { left[s] = l; right[s] = r; }
     }
-    ring->write(left.data(), right.data(), from, to);
+    if (bouncing) ring->write(left.data(), right.data(), from, to);
 }
 
 int64_t EngineHost::track_delay(unsigned t) const {
     int ms = slots[t % track_count].base[midi_track::Delay];
-    if (!ms || !is_midi(t)) return 0;
-    int64_t frames = int64_t(std::lround(ms * dsp::sample_rate() / 1000.0));
-    return std::max<int64_t>(frames, -int64_t(clock.latency_frames())); // decided as its block renders: no earlier than that
+    if (ms <= 0 || !is_midi(t)) return 0; // a negative one is the sequencer's: earlier as it plays ahead (play_ahead())
+    return int64_t(std::lround(ms * dsp::sample_rate() / 1000.0));
 }
 
-void EngineHost::midi_program(unsigned t, uint64_t at, bool force) {
+void EngineHost::midi_program(unsigned t, uint64_t at, bool force, int pattern_index) {
     using namespace midi_track;
     t %= track_count;
     auto& slot = slots[t];
     const auto& base = slot.base;
-    int own = patterns[t][slot.pattern % pattern_count]->program; // the pattern's own, else the track's
+    int own = patterns[t][(pattern_index >= 0 ? unsigned(pattern_index) : slot.pattern) % pattern_count]->program; // the pattern's own, else the track's
     int program = own ? own : base[Program];
     if (!program) return; // Off: the device keeps its own
     if (!force && program == slot.program_sent) return;
@@ -2310,6 +2389,7 @@ void EngineHost::midi_program(unsigned t, uint64_t at, bool force) {
 }
 
 void EngineHost::midi_note_off(unsigned t, int key, uint64_t at) {
+    if (!midi_offs_held) return;
     for (auto& off : midi_offs)
         if (off.on && off.track == t % track_count && off.key == key) {
             emit(off_event(off, at));
@@ -2319,22 +2399,33 @@ void EngineHost::midi_note_off(unsigned t, int key, uint64_t at) {
 
 bool EngineHost::midi_hold(unsigned t, int key, int64_t length, uint64_t at) {
     if (!out_wanted(t, key)) return true; // nothing went out to hold
+    if (!midi_offs_held) return false;
     for (auto& off : midi_offs)
         if (off.on && off.track == t % track_count && off.key == key) { off.at = at + uint64_t(std::max<int64_t>(length, 0)); return true; }
     return false;
 }
 
 void EngineHost::midi_offs_due(uint64_t until) {
-    for (auto& off : midi_offs)
+    if (!midi_offs_held) return;
+    bool held = false;
+    for (auto& off : midi_offs) {
         if (off.on && off.at < until) { emit(off_event(off, off.at)); off.on = false; }
+        held |= off.on;
+    }
+    midi_offs_held = held;
 }
 
 void EngineHost::midi_all_off(unsigned track, uint64_t at) {
+    if (!midi_offs_held) return;
+    // When heard, even after a knob (a port or channel changed): Note Ons still waiting go out before their Offs.
+    bool by = from_hand;
+    from_hand = false;
     for (auto& off : midi_offs)
         if (off.on && (track == 255 || off.track == track % track_count)) {
             emit(off_event(off, at));
             off.on = false;
         }
+    from_hand = by;
 }
 
 void EngineHost::sync_stop(uint64_t at) {
@@ -2483,7 +2574,8 @@ void EngineHost::play_event(unsigned t, Slot& slot, const Pattern& pattern, size
     if (skipped(slot, unsigned(played), at)) return;
     // Roadmap P3: a kit pad's note kept with 16 Levels' cutoff plays at it (the sampler reads it above the semitones).
     const int cutoff = slot.kind == EngineKind::Sampler && e.cutoff ? e.cutoff - 1 : -1;
-    const int sounded = cutoff >= 0 ? pad_note(e.key, e.pitch, cutoff) : played;
+    const int slice = slot.kind == EngineKind::Sampler && e.slice ? e.slice - 1 : -1; // issue 24: a slice hit's slice
+    const int sounded = cutoff >= 0 || slice >= 0 ? pad_note(e.key, e.pitch, cutoff, slice) : played;
     bool go = trig_plays(t, slot, e, pass);
     if (trig_weighed(e.condition, e.chance)) { // how it went, for PRE and NEI after it
         slot.weighed = true; slot.went = go;
@@ -2524,19 +2616,20 @@ void EngineHost::play_event(unsigned t, Slot& slot, const Pattern& pattern, size
         schedule_off(slot, played, samples);
     }
     // MIDI: a tie onto the same key goes on; else the notes overlap, which a mono synth plays legato.
-    if (from.midi != e.key || !midi_hold(t, e.key, samples, frame_now + block_at))
-        midi_note(t, e.key, velocity, frame_now + block_at, samples);
+    if (from.midi != e.key || !midi_hold(t, e.key, samples, seq_frame()))
+        midi_note(t, e.key, velocity, seq_frame(), samples);
     if (legato) holding = {int16_t(played), int16_t(e.key), (e.flags & step_slide) != 0};
     for (unsigned k = 1; k < hits; ++k) { // the ratchet's other hits, each on its frame (run_hits)
         if (slot.hits_waiting == slot.hits.size()) break;
         PendingHit hit;
-        hit.key = pad_note(e.key, std::clamp(e.pitch + e.hit_pitch(k), -48, 48), cutoff);
+        hit.key = pad_note(e.key, std::clamp(e.pitch + e.hit_pitch(k), -48, 48), cutoff, slice);
         hit.midi = int16_t(e.key);
         hit.velocity = uint8_t(e.hit_velocity(velocity, k));
         hit.accent = accent;
         hit.sound = sound;
         hit.samples = std::max<int32_t>(1, int32_t(std::lround(k * each * tick_length())));
         hit.length = samples;
+        hit.shift = int32_t(midi_shift); // a MIDI track ahead (play_ahead()): its MIDI that far from where the hit falls
         for (auto& h : slot.hits)
             if (h.key < 0) { h = hit; ++slot.hits_waiting; break; }
     }
@@ -2613,24 +2706,12 @@ void EngineHost::tick() {
         if (!pattern.punches.empty()) play_pattern_punches(t, pattern, at, end); // pad-fx C: punches kept with it
         passes_now[t].store(pass, std::memory_order_relaxed);
         if (at == 0 && int(t) == cue_track) { take.go(block_at); cue_track = -1; } // Rec length Seq: the take starts with the pattern
-        if (sound && (at == 0 || !pattern.motion.empty() || slot.locks_on)) play_motion(t, slot, pattern, at);
         if (slot.freeze && sound) print_tick(t, slot, at, length); // freeze plan F2b
         if (slot.kind == EngineKind::Audio) audio_tick(t, slot, at); // freeze plan F3: its pattern's take
         // Its print plays the notes: they go out by MIDI alone (freeze plan F2d: a deep freeze's engine never hears them).
         const bool seq = sound && !slot.print_on && !(slot.freeze && slot.freeze->deep);
-        const auto& events = pattern.events;
-        Slot::Held holding; // this tick's own Slide or Tie, for the notes of a later one
-        bool lanes = !pattern.lanes.empty();
-        for (size_t n = pattern.lower(at); n < events.size() && events[n].tick == at; ++n)
-            if (!lanes || !pattern.own_lane(events[n].key)) play_event(t, slot, pattern, n, at, length, pass, seq, holding);
-        for (const auto& l : pattern.lanes) { // kit lanes of their own length (roadmap P1): each loops, and counts its passes, alone
-            uint32_t loop = std::max<uint32_t>(std::min(l.length, pattern.length), 1); // lane_length(l.key), without looking l up again
-            if (loop >= length) continue;
-            uint32_t lane_at = elapsed % loop;
-            for (size_t n = pattern.lower(lane_at); n < events.size() && events[n].tick == lane_at; ++n)
-                if (events[n].key == l.key) play_event(t, slot, pattern, n, lane_at, loop, elapsed / loop, seq, holding);
-        }
-        if (holding.key >= 0) slot.held = holding;
+        if (slot.kind == EngineKind::Midi) play_ahead(t, slot, seq); // a MIDI track early by its DELAY
+        else play_tick_notes(t, slot, tick_now, slot.pattern, slot.start, seq);
     }
     { // pad-fx C, after this tick's punches are due (one may carry on from the same punch ending here): a kept punch's
       // length; a live punch wins while it sounds, the kept ones back for the rest of theirs after
@@ -2649,6 +2730,78 @@ void EngineHost::tick() {
     until_tick += tick_samples(tick_now);
     ++tick_now;
     tick_count.store(tick_now, std::memory_order_relaxed);
+}
+
+// One track's notes and lanes on tick `at_tick` of `pattern_index`, begun on tick `start` (tick()'s, or a MIDI
+// track's ahead of it: play_ahead()).
+void EngineHost::play_tick_notes(unsigned t, Slot& slot, uint32_t at_tick, unsigned pattern_index, uint32_t start, bool seq) {
+    const auto& pattern = *patterns[t][pattern_index % pattern_count];
+    uint32_t length = std::max<uint32_t>(pattern.length, 1);
+    uint32_t elapsed = at_tick - start;
+    uint32_t at = elapsed % length, pass = elapsed / length;
+    uint32_t from = 0, span = 0;
+    if (edit_loop(t, length, from, span)) { at = from + elapsed % span; pass = elapsed / span; } // its bars over and over
+    if (slot.engine && (at == 0 || !pattern.motion.empty() || slot.locks_on)) play_motion(t, slot, pattern, at);
+    const auto& events = pattern.events;
+    Slot::Held holding; // this tick's own Slide or Tie, for the notes of a later one
+    bool lanes = !pattern.lanes.empty();
+    for (size_t n = pattern.lower(at); n < events.size() && events[n].tick == at; ++n)
+        if (!lanes || !pattern.own_lane(events[n].key)) play_event(t, slot, pattern, n, at, length, pass, seq, holding);
+    for (const auto& l : pattern.lanes) { // kit lanes of their own length (roadmap P1): each loops, and counts its passes, alone
+        uint32_t loop = std::max<uint32_t>(std::min(l.length, pattern.length), 1); // lane_length(l.key), without looking l up again
+        if (loop >= length) continue;
+        uint32_t lane_at = elapsed % loop;
+        for (size_t n = pattern.lower(lane_at); n < events.size() && events[n].tick == lane_at; ++n)
+            if (events[n].key == l.key) play_event(t, slot, pattern, n, lane_at, loop, elapsed / loop, seq, holding);
+    }
+    if (holding.key >= 0) slot.held = holding;
+}
+
+// A MIDI track's negative DELAY: an instrument heard that much after its MIDI (one on a computer, played back over
+// USB-C) lands with the rest. Its MIDI goes that much before its frame is heard; what the output's latency does not
+// cover, the track's notes and lanes play ahead of the other tracks, `lead` ticks, each tick's MIDI at its own frame
+// less the delay (midi_shift). A new start (Play, a launch now, Locate) plays from there again. Past the next bar
+// line it reads what that bar plays, a launch waiting for it included (whose Note Offs and program go first, there and
+// not again at the bar); where that is not known yet (Song's clips, a follow action, a chained track) it waits for it.
+int64_t EngineHost::midi_early(unsigned t) const {
+    if (!is_midi(t)) return 0;
+    int ms = slots[t % track_count].base[midi_track::Delay];
+    return ms < 0 ? int64_t(std::lround(-ms * dsp::sample_rate() / 1000.0)) : 0;
+}
+
+void EngineHost::play_ahead(unsigned t, Slot& slot, bool seq) {
+    const int64_t early = midi_early(t);
+    const int64_t need = early - int64_t(clock.latency_frames());
+    uint32_t lead = 0;
+    if (need > 0 && !slot.chained) lead = uint32_t(std::min(16.0, std::ceil(double(need) / std::max(1.0, tick_samples(tick_now)))));
+    // Where this track's ticks were last read from: a launch read ahead that came as read is kept; any other change
+    // starts again here.
+    if (slot.ahead_bar != UINT32_MAX && slot.start == slot.ahead_bar && slot.pattern == slot.ahead_queued) {
+        slot.ahead_start = slot.start; slot.ahead_pattern = slot.pattern;
+    } else if (slot.start != slot.ahead_start || slot.pattern != slot.ahead_pattern) {
+        slot.ahead_start = slot.start; slot.ahead_pattern = slot.pattern; slot.ahead_next = tick_now;
+    }
+    slot.ahead_bar = slot.ahead_bar != UINT32_MAX && slot.ahead_bar <= tick_now ? UINT32_MAX : slot.ahead_bar;
+    const uint32_t next_bar = (tick_now / bar + 1) * bar;
+    uint32_t last = tick_now + lead;
+    if (song_mode || slot.chained) last = std::min(last, next_bar - 1);
+    if (slot.follow_do && slot.follow_at > tick_now) last = std::min(last, slot.follow_at - 1);
+    int64_t to = 0; // frames from this tick to `tk`
+    for (uint32_t tk = tick_now; tk <= last; to += int64_t(std::lround(tick_samples(tk))), ++tk) {
+        if (tk < slot.ahead_next) continue;
+        const bool queued = tk >= next_bar && slot.queued != 255;
+        const int64_t shift = to - early;
+        if (queued && slot.ahead_bar != next_bar) { // the launch's: the old pattern's notes end, the new one's program
+            slot.ahead_bar = next_bar; slot.ahead_queued = slot.queued;
+            const uint64_t at = uint64_t(std::max<int64_t>(0, int64_t(frame_now + block_at) + shift));
+            if (slot.queued != slot.pattern) midi_all_off(t, at);
+            midi_program(t, at, false, slot.queued);
+        }
+        midi_shift = shift;
+        play_tick_notes(t, slot, tk, queued ? slot.queued : slot.pattern, queued ? next_bar : slot.start, seq);
+        slot.ahead_next = tk + 1;
+    }
+    midi_shift = 0;
 }
 
 // The input source, as Sample Record, Audio Recall and Monitor hear it, after the gain.
@@ -2708,6 +2861,15 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
 #endif
     }
     blocks_seen.fetch_add(1, std::memory_order_relaxed);
+    // Whether a monitor wanted USB-C in this block (direct monitoring plays it then), however the block ends.
+    usb_wanted = false; usb_want_l = usb_want_r = 0;
+    struct HeardUsb {
+        EngineHost& host;
+        ~HeardUsb() {
+            host.usb_gain_l.store(host.usb_want_l, std::memory_order_relaxed); host.usb_gain_r.store(host.usb_want_r, std::memory_order_relaxed);
+            host.usb_heard_now.store(host.usb_wanted, std::memory_order_relaxed);
+        }
+    } heard_usb {*this};
     if (is_parked) { // a project load on the loader's thread (park()): silent and still until it lets go
         if (!park_over()) {
             play_parked(out, frames, stems);
@@ -2758,6 +2920,7 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
         std::fill(out, out + 2 * frames, 0);
         if (fixed) std::fill(fixed, fixed + 2 * frames, 0);
         if (stems) std::fill(stems, stems + size_t(track_count) * block, 0.0f);
+        silence_live_stems();
         for (auto* level : {&out_levels[0], &out_levels[1], &in_levels[0], &in_levels[1]}) level->store(0, std::memory_order_relaxed);
         frame_now += frames;
         if (park_wanted) { park_gain = Ease {0, 0, 0}; go_parked(); } // silent already: no fade to wait for
@@ -2785,6 +2948,9 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
     for (auto& strip : loop_strips) solo |= strip.solo && loops.on();
     for (auto& slot : slots) {
         solo |= slot.soloing();
+        // An empty track (no engine, no print sounding) is read by nothing this block (every reader asks for its
+        // engine first): its buffers are left as they are, and cleared again once it plays.
+        if (!slot.engine && !slot.print.sounding()) { slot.knob_pad_fed = false; slot.print_fed = false; continue; }
         std::fill(slot.buffer, slot.buffer + frames, 0.0f);
         std::fill(slot.left, slot.left + frames, 0.0f); std::fill(slot.right, slot.right + frames, 0.0f);
         slot.knob_pad_fed = false;
@@ -3207,7 +3373,13 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
     // while it is monitored or a take waits or runs, fading in and out as Bypass does. Resample takes the mix itself,
     // so it is taken after the master (below); any other source here, so Monitor can join the mix before the master.
     const bool resampling = source_now.load(std::memory_order_relaxed) == unsigned(InputSource::Resample);
-    const bool monitored = monitor_on.load(std::memory_order_relaxed) && !resampling;
+    // A USB-C source with direct monitoring on: heard straight at the jacks, not here.
+    const bool usb_direct_source = usb_direct.load(std::memory_order_relaxed) && from_usb(InputSource(source_now.load(std::memory_order_relaxed)));
+    if (usb_direct_source && monitor_on.load(std::memory_order_relaxed)) { // its input gain, at a centred pad's pan law
+        usb_wanted = true;
+        usb_want_l += record_gain * pan_centre; usb_want_r += record_gain * pan_centre;
+    }
+    const bool monitored = monitor_on.load(std::memory_order_relaxed) && !resampling && !usb_direct_source;
     auto take_input = [&] {
         select_input(input, usb, frames);
         auto taking = take.state();
@@ -3276,6 +3448,9 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
     if (park_fading && stems)
         for (unsigned t = 0; t < track_count; ++t)
             for (unsigned f = 0; f < frames; ++f) stems[size_t(t) * block + f] *= park_gain.at(f);
+    if (park_fading && live_stems)
+        for (unsigned n = 0; n < 2 * StemRing::stem_count; ++n)
+            for (unsigned f = 0; f < frames; ++f) live_stems[size_t(n) * block + f] *= park_gain.at(f);
     float peak = 0, out_l = meter_from(out_levels[0]), out_r = meter_from(out_levels[1]);
     for (unsigned f = 0; f < frames; ++f) {
         if (click_wait) --click_wait;
@@ -3483,6 +3658,14 @@ void EngineHost::play_loops(unsigned frames) {
     for (unsigned n = 0; n < loop_tracks && monitor != Monitor::Off; ++n) {
         uint8_t s = loops.source(n);
         if (!looper::source_is_direct(s) || (monitor == Monitor::Auto && !loops.listening(n))) continue;
+        if (usb_direct.load(std::memory_order_relaxed) && from_usb(looper::direct_input(s))) { // heard direct, at its strip's level and pan
+            const auto& strip = loop_strips[n];
+            if (!strip.mute) {
+                usb_wanted = true;
+                usb_want_l += strip.gain * strip.pan_left * 1.4142f; usb_want_r += strip.gain * strip.pan_right * 1.4142f;
+            }
+            continue;
+        }
         for (unsigned f = 0; f < std::min(frames, source_frames); ++f) { out_l[n][f] += source_l[s][f]; out_r[n][f] += source_r[s][f]; }
     }
     for (unsigned n = 0; n < loop_tracks; ++n) {

@@ -1,9 +1,8 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #include "melodee/engine/sample_data.h"
 #include "melodee/engine/dsp.h"
 #include "melodee/plugin/polyphase.h"
-#include "dsp/frame_ring.h"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -54,6 +53,7 @@ std::string WavReader::open(const std::string& path, unsigned max_seconds, WavIn
         } else if (info && !std::memcmp(chunk, "smpl", 4) && size >= 60) {
             uint8_t body[60];
             if (!file.read(reinterpret_cast<char*>(body), 60)) break;
+            if (u32(body + 12) < 128) info->root = int(u32(body + 12));
             if (u32(body + 28) > 0 && u32(body + 48) > u32(body + 44)) { info->loop_start = u32(body + 44); info->loop_end = int64_t(u32(body + 48)) + 1; }
             file.seekg(std::streamoff(uint64_t(size) + (size & 1) - 60), std::ios::cur);
         } else {
@@ -160,8 +160,8 @@ void resample(const float* left, const float* right, uint32_t frames, unsigned f
     if (!frames || !from || !to) return;
     const auto length = size_t(std::llround(double(frames) * to / from));
     out_left.assign(length, 0.0f); out_right.assign(length, 0.0f);
-    // The converter's output n sits at input n * from / to (frame_ring.h): nothing to drop at the start; it only
-    // answers `half` frames late, so silence after the last frame lets the end out. The base's SincResampler with
+    // The converter's output n sits at input n * from / to (dsp/sinc.h): nothing to drop at the start; it only
+    // answers `half` frames late, so silence after the last frame lets the end out. The SincResampler (dsp/sinc.h) with
     // each output place's weights worked out once (plugin/polyphase.h): a file's ratio never changes, and on the MPC
     // that is some sixty times the frames a second (a ratio too fine for a table still goes the slow way).
     auto converter = std::make_unique<PolyphaseResampler>();

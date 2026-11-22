@@ -1,8 +1,8 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #pragma once
+#include "melodee/engine/spsc_queue.h"
 #include "melodee/engine/multisample.h"
-#include "surface/midi.h"
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -133,7 +133,7 @@ private:
     Pin pin_fn;
     std::array<Slot, stream_count> slots {};
     std::array<Work, stream_count> work {};
-    MidiQueue<4096, Message> messages;   // one producer: the holder of `sending`
+    SpscQueue<4096, Message> messages;   // one producer: the holder of `sending`
     std::atomic_flag sending = ATOMIC_FLAG_INIT;
     struct Sending { // the producer side for the length of a call
         std::atomic_flag& flag;

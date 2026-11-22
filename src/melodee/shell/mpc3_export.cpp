@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 // The MPC 3 export (shell/mpc3_export.h). The template is a project MPC 3
 // saved (mpc3_template.json), cut down by tools/mpc3_template.py to one of each

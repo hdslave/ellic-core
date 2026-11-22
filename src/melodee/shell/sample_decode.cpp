@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 // An SFZ's samples, whatever kind they are: WAV by the sampler's own reader
 // (it also finds the loop a smpl chunk holds), FLAC, Ogg and AIFF by JUCE's,

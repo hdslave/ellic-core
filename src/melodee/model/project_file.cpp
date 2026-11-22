@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #include "melodee/model/project_file.h"
 #include "melodee/model/keygroup_track.h"
@@ -301,6 +301,15 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
                     if (pattern.events[n].cutoff) { w.u32(n); w.u8(pattern.events[n].cutoff); }
                 w.end(at);
             }
+            uint32_t sliced = 0;
+            for (const auto& e : pattern.events) sliced += e.slice != 0;
+            if (sliced) { // issue 24: kit notes played on Chop, their slice + 1, by their place in EVNT
+                at = w.begin("SLCE");
+                w.u8(t); w.u8(p); w.u32(sliced);
+                for (uint32_t n = 0; n < pattern.events.size(); ++n)
+                    if (pattern.events[n].slice) { w.u32(n); w.u8(pattern.events[n].slice); }
+                w.end(at);
+            }
             uint32_t ratchets = 0;
             for (const auto& e : pattern.events) ratchets += e.hits() > 1 || e.ramp || e.pitch_ramp;
             if (ratchets) { // ratchets (roadmap P1), by their place in EVNT: hits, velocity ramp, pitch ramp
@@ -381,6 +390,15 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
         at = w.begin("TSPD");
         w.u8(track_count);
         for (const auto& tr : project.tracks) w.u8(tr.speed);
+        w.end(at);
+    }
+    bool named = false; // tracks with a name of their own (Tracks, Shift + Push), kept when their sound changes
+    for (const auto& tr : project.tracks) named |= tr.named;
+    if (named) {
+        at = w.begin("TNAM");
+        w.u8(1); // the section's version
+        w.u8(track_count);
+        for (const auto& tr : project.tracks) w.u8(tr.named);
         w.end(at);
     }
     at = w.begin("TIME"); // time signature, BPM per pattern (P1-P16, as older builds read it)
@@ -673,11 +691,11 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
         for (unsigned n = 0; n < lane.count; ++n) { w.u16(lane.points[n].bar); w.u16(lane.points[n].tempo); w.u8(lane.points[n].ramp); }
         w.end(at);
     }
-    for (unsigned n = 0; n < pattern_count; ++n) { // scenes (roadmap P5): a column's name and tempo, where it has either
+    for (unsigned n = 0; n < pattern_count; ++n) { // scenes (roadmap P5): a column's name, tempo and colour, where it has one
         const auto& scene = project.scenes[n];
         if (scene.plain()) continue;
         at = w.begin("SCNE");
-        w.u8(n); w.text(scene.name); w.u16(scene.tempo);
+        w.u8(n); w.text(scene.name); w.u16(scene.tempo); w.u8(scene.colour);
         w.end(at);
     }
     for (unsigned t = 0; t < track_count; ++t) { // a MIDI track (docs/MIDI_TRACKS.md): its port and channel are in TRAK's params
@@ -1036,6 +1054,17 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
                 unsigned cut = r.u8();
                 if (r.ok && place < pattern.events.size()) pattern.events[place].cutoff = uint8_t(std::min(cut, 101u));
             }
+        } else if (name == "SLCE") { // issue 24: slice hits played on Chop; without it each plays its pad's region
+            unsigned t = r.u8(), p = r.u8();
+            if (t >= track_count || p >= pattern_count) continue;
+            auto& pattern = patterns->at[t][p];
+            uint32_t count = std::min<uint32_t>(r.u32(), max_pattern_events);
+            for (uint32_t k = 0; k < count && r.ok; ++k) {
+                uint32_t place = r.u32();
+                unsigned slice = r.u8();
+                // Written in order with their slices, so the places after EVNT's sort are still theirs.
+                if (r.ok && place < pattern.events.size()) pattern.events[place].slice = uint8_t(std::min(slice, max_slices));
+            }
         } else if (name == "RTCH") { // ratchets (roadmap P1); without it every note plays once
             unsigned t = r.u8(), p = r.u8();
             if (t >= track_count || p >= pattern_count) continue;
@@ -1060,6 +1089,12 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
                 uint32_t place = r.u32();
                 unsigned condition = r.u8();
                 if (r.ok && place < pattern.events.size() && condition < trig_count) pattern.events[place].condition = uint8_t(condition);
+            }
+        } else if (name == "TNAM") { // tracks named on the Name sheet; without it, each named after its sound
+            unsigned version = r.u8(), count = r.u8();
+            for (unsigned k = 0; k < count && r.ok && version >= 1; ++k) {
+                bool own = r.u8() != 0;
+                if (k < track_count && r.ok) project->tracks[k].named = own;
             }
         } else if (name == "TSPD") { // the tracks' playback speeds (roadmap P1); without it every track at x1
             unsigned count = r.u8();
@@ -1210,12 +1245,13 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
                 if (r.ok) lane.set(bar, tempo, ramp != 0);
             }
             if (r.ok) project->song.tempo = lane;
-        } else if (name == "SCNE") { // a scene's name and tempo (roadmap P5); without it the column alone
+        } else if (name == "SCNE") { // a scene's name, tempo and colour (roadmap P5); without it the column alone
             unsigned n = r.u8();
             Scene scene;
             r.text(scene.name, sizeof(scene.name));
             unsigned tempo = r.u16();
             scene.tempo = uint16_t(tempo ? std::clamp(tempo, 300u, 3000u) : 0);
+            if (!r.done()) scene.colour = uint8_t(std::min(r.u8(), 16u)); // older files end here: none
             if (r.ok && n < pattern_count) project->scenes[n] = scene;
         } else if (name == "PROG") { // the Prog layout's progression; without it none
             unsigned t = r.u8(), version = r.u8();

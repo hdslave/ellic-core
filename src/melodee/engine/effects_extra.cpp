@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 // The effects parity phase 7 added from the MPC's Knob FX list, written for
 // sample-base: Diff delay, Sample delay, Spring, Pumper, Amp sim, Tube drive,

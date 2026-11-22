@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #include "melodee/shell/mpc_project.h"
 #include "melodee/shell/mpc_wav_slices.h"
@@ -324,7 +324,9 @@ bool has_notes(const juce::var& clip) {
     return false;
 }
 
-unsigned read_notes(const juce::var& clip, const std::array<int, 128>& pad_of_note, Pattern& pattern) {
+// A kit track's clip. A note played on Chop's pads (the stock MPC Sample's Chop pad play) is its pad's note with the
+// slice in its Sample Slice modifier (the sixteenth): a slice hit (mpc_slice_hit()).
+unsigned read_notes(const juce::var& clip, const std::array<int, 128>& pad_of_note, bool slices_relative, Pattern& pattern) {
     unsigned added = 0;
     const auto* events = clip["eventList"]["events"].getArray();
     if (!events) return 0;
@@ -341,6 +343,7 @@ unsigned read_notes(const juce::var& clip, const std::array<int, 128>& pad_of_no
         e.key = uint8_t(sampler_first_note + unsigned(pad_of_note[size_t(key)]));
         e.velocity = uint8_t(std::clamp(std::lround(number(note, "velocity", 1) * 127), 1l, 127l));
         e.chance = uint8_t(std::clamp(integer(note, "probability", 100), 0, 100));
+        e.slice = mpc_slice_hit(flag(note, "modifierActiveState15"), number(note, "modifierValue15"), slices_relative);
         added += pattern.add(e);
     }
     return added;
@@ -459,7 +462,7 @@ std::string import_mpc_project(const std::vector<uint8_t>& file, const std::stri
     if (!tracks) return "Not an MPC Sample project";
 
     project = Project {};
-    patterns = PatternBank {};
+    patterns.clear();
     const fs::path where(path);
     std::snprintf(project.name, sizeof(project.name), "%s", where.stem().string().c_str());
     project.root = 0;
@@ -473,6 +476,9 @@ std::string import_mpc_project(const std::vector<uint8_t>& file, const std::stri
             if (key < pattern_count) sequences[key] = &entry["value"];
             else ++report.over_limit;
         }
+
+    // Notes' Sample Slice modifiers: the slice itself (Absolute, as the MPC Sample saves it) or an offset (Relative).
+    const bool slices_relative = data["modifierPlaybackProperties"]["Sample Slice"].toString() == "Relative";
 
     Samples samples(project, where.parent_path() / (where.stem().string() + "_[ProjectData]"));
     unsigned used = 0;
@@ -628,7 +634,7 @@ std::string import_mpc_project(const std::vector<uint8_t>& file, const std::stri
             auto& pattern = patterns.at[index][n];
             pattern.length = uint32_t(std::clamp<int64_t>(int64_t(number(*sequence, "lengthPulses", 3840) / mpc_ticks_per_tick), 1, project.max_length()));
             pattern.free = false; // the sequence's length, notes or not
-            report.notes += read_notes(clip_of(*sequence, name), pad_of_note, pattern);
+            report.notes += read_notes(clip_of(*sequence, name), pad_of_note, slices_relative, pattern);
         }
     }
     if (!used) return "Nothing to import";

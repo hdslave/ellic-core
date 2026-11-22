@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #pragma once
 #include "melodee/model/tempo_lane.h"
@@ -53,6 +53,9 @@ constexpr uint8_t prophet = 1, fm6 = 2, cz = 3, sid = 4, kit909 = 5;
 // Every pattern of every track (their events on the heap).
 struct PatternBank {
     std::array<std::array<Pattern, pattern_count>, track_count> at;
+    // Every pattern empty again (project.cpp), as `bank = PatternBank {}` was, on which GCC 11 spent minutes at -O2
+    // inline.
+    void clear();
 };
 
 struct ModRoute {
@@ -226,11 +229,13 @@ struct Song {
 };
 
 // Roadmap P5: a scene is a column of patterns across the tracks (pattern n of each), launched together on the next bar,
-// with a name and a tempo of its own (0: none; tenths of a BPM) taking over on that bar.
+// with a name and a tempo of its own (0: none; tenths of a BPM) taking over on that bar, and a colour (issue 19) its
+// cell and pad show (0: none; 1-16 a track colour, ui/shades.h).
 struct Scene {
     char name[12] {};
     uint16_t tempo = 0;
-    bool plain() const { return !name[0] && !tempo; }
+    uint8_t colour = 0;
+    bool plain() const { return !name[0] && !tempo && !colour; }
     void set_name(const char* text) {
         unsigned n = 0;
         for (; n + 1 < sizeof(name) && text[n]; ++n) name[n] = text[n];
@@ -264,6 +269,7 @@ struct Track {
     EngineKind engine = EngineKind::None;
     uint16_t preset = 0;
     char name[name_length] {};
+    bool named = false;   // its name given on the Name sheet (Tracks, Shift + Push): kept when its sound changes
     std::array<int16_t, max_params> params {};
     Mix mix;
     uint8_t pattern = 0;  // the pattern playing
@@ -347,6 +353,8 @@ struct Track {
         for (; n + 1 < name_length && text[n]; ++n) name[n] = text[n];
         std::fill(name + n, name + name_length, '\0');
     }
+    // The name of its sound, plug-in or kit, unless it has one of its own (named).
+    void name_from(const char* text) { if (!named) set_name(text); }
 };
 
 // Time signatures the project can take (Shift + K2 on Patterns), as on the
@@ -380,6 +388,9 @@ struct PluginRef {
 static_assert(sample_slots >= track_count * sampler_pads * pad_layers, "a sample slot for every layer of every pad");
 
 struct Project {
+    // Made in project.cpp alone: inline, GCC 11 spent minutes at -O2 on a Project's construction in each file that
+    // made one. Every member is {} or its own default, so a new Project is zeros but for those, as before.
+    Project();
     char name[32] = "Untitled";
     uint16_t tempo = 1200;  // tenths of a BPM; the global tempo
     // BPM per pattern (B2 on Patterns): with seq_tempo on, launching pattern n
@@ -397,20 +408,20 @@ struct Project {
     uint8_t punch_target = 0, punch_bank = 2, punch_depth = 100, punch_snap = 2, punch_tail = 0;
     bool punch_quantize = true; // Shift + B3 on Pad FX: while playing, a punch waits for its snap grid's next line; off, at once
     PadFxParams pad_fx_params = pad_fx_defaults; // the MPC's Pad FX, K1-K3 each (parity phase 7b)
-    FlexSettings flex;                           // Flex Beat (Shift + Pad FX)
+    FlexSettings flex {};                        // Flex Beat (Shift + Pad FX)
     std::array<Track, track_count> tracks {};
-    KnobFx knob_fx;         // Knob FX (parity phase 7)
-    MasterComp compressor;  // Shift + Pad 5 (parity phase 7)
-    Song song;              // (Motion is each pattern's own since roadmap P1: Pattern::motion)
+    KnobFx knob_fx {};         // Knob FX (parity phase 7)
+    MasterComp compressor {};  // Shift + Pad 5 (parity phase 7)
+    Song song {};              // (Motion is each pattern's own since roadmap P1: Pattern::motion)
     std::array<Bus, bus_count> buses {};
     // Its samples, a slot each (PadSound::sample), in tables that keep only the slots written (model/slot_table.h):
     // samples[n] reads slot n, samples.edit(n) is the slot to write.
-    SlotTable<SampleRef> samples;
-    SlotTable<SampleChop> chops; // roadmap P3: each sample's chop, as Chop left it (CHOP)
+    SlotTable<SampleRef> samples {};
+    SlotTable<SampleChop> chops {}; // roadmap P3: each sample's chop, as Chop left it (CHOP)
     std::array<PluginRef, max_plugins> plugins {};
     Chain master {{}, master_slots};
     // The Looper (docs/LOOPER.md): its settings, and its four tracks' strips and chains.
-    LooperSettings looper;
+    LooperSettings looper {};
     std::array<Mix, loop_tracks> loop_mix {};
     std::array<Chain, loop_tracks> loop_fx = [] { std::array<Chain, loop_tracks> c {}; for (auto& x : c) x.size = track_slots; return c; }();
     // Roadmap P4: LFOs and followers on any lane (MODS), and macros turning several at once (MACR); model/modulators.h.

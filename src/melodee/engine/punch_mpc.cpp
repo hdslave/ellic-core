@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 // Parity phase 7b: the MPC's sixteen Pad FX as punches (Half Speed, Chorus,
 // Flanger, Phaser, Comb, LP / HP / BP with an LFO, Ring Mod, LoFi, Color,

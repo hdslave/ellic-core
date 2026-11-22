@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 // EXS24 instruments as zones. Every block has an 84-byte head: its byte order
 // in its first byte (0 big-endian, 1 little), its kind in the low nibble of

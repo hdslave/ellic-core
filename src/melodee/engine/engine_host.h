@@ -1,6 +1,7 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #pragma once
+#include "melodee/engine/spsc_queue.h"
 #include "melodee/engine/arp.h"
 #include "melodee/engine/note_repeat.h"
 #include "melodee/engine/command.h"
@@ -22,11 +23,11 @@
 #include "melodee/engine/midi_out.h"
 #include "melodee/model/input_config.h"
 #include "melodee/model/project.h"
-#include "surface/midi.h"
 #include <array>
 #include <string>
 #include <atomic>
 #include <bitset>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 
@@ -208,6 +209,12 @@ public:
     Bounce& bounce() { return render_out; }
     // Roadmap P4: stems beside the next render (StemRing, the service thread's; nullptr: none), taken while it runs.
     void set_stems(StemRing* ring) { stem_ring.store(ring, std::memory_order_release); }
+    // Live stems, every block (the Ableton Move's USB submixes): the same stems a render's StemRing gets, each
+    // track as it joins the mix (after its chain, level, pan and mute, eased as heard, its key pad with it) and
+    // each bus's return, written into `rows[(stem * 2 + side) * block + f]`: stems 0-15 the tracks, 16-19 buses
+    // A-D, side 0 left. A track with no engine is silent; a Park's fade is kept, as the stems have it. Audio
+    // thread, before render(), as often as it likes; nullptr (the default): none taken, nothing spent.
+    void set_live_stems(float* rows) { live_stems = rows; }
     const Bounce& bounce() const { return render_out; }
     // A print host: track `track` taken each block as the Track input source does, after its chain (`post`) or as its
     // engine left it; print_left() / print_right() hold the block just rendered.
@@ -230,6 +237,16 @@ public:
     unsigned record_track() const { return source_track.load(std::memory_order_relaxed); } // InputSource::Track: which
     bool record_post() const { return source_post.load(std::memory_order_relaxed); }      // and after its chain
     bool monitoring() const { return monitor_on.load(std::memory_order_relaxed); }
+    // Any thread: Settings' USB-C in Direct (drivers/direct_monitor.h): what a computer plays is then heard straight
+    // at the jacks, so this mix leaves it out wherever it would play it (a MIDI track's AUDIO input with MONITOR on,
+    // Input Config's Monitor, a loop on it); usb_heard() says, after each block, whether one of those wanted it, and
+    // usb_gain_left() / right() at what level each side, before main volume: what those would have given it before
+    // their effects (a MIDI track's AUDIO LEVEL, level and pan; Monitor's input gain at a centred pan; a loop's level
+    // and pan), added up.
+    void set_usb_direct(bool on) { usb_direct.store(on, std::memory_order_relaxed); }
+    bool usb_heard() const { return usb_heard_now.load(std::memory_order_relaxed); }
+    float usb_gain_left() const { return usb_gain_l.load(std::memory_order_relaxed); }
+    float usb_gain_right() const { return usb_gain_r.load(std::memory_order_relaxed); }
     bool input_taken() const { return source_taken.load(std::memory_order_relaxed); }
 
     // Feedback, any thread.
@@ -307,6 +324,9 @@ public:
     bool take_done_track(const TrackPack*& pack) { return done_tracks.pop(pack); }
     // MIDI thread (parity phase 9): what goes out, each at its frame, and the clock that says when that frame is heard.
     bool take_midi(MidiOutEvent& event) { return midi_events.pop(event); }
+    // Before the audio thread starts: called on the audio thread as each MIDI message played by hand is emitted, to
+    // wake the MIDI thread for it (Session::wake_midi()).
+    void set_hand_waker(void (*wake)(void*), void* context) { hand_waker = wake; hand_waker_context = context; }
     const AudioClock& audio_clock() const { return clock; }
     // Audio thread, before the first block at each open of the device (and before it starts): its frames a second and
     // the frames it holds queued (MIDI out lines up with them). A new rate silences render() until the project comes
@@ -325,6 +345,8 @@ public:
     bool take_arp_written(ArpWritten& note) { return arp_written.pop(note); }
     // MIDI thread: a pattern copy the audio thread played until a newer one came (PatternData), to free.
     bool take_retired_pattern(Pattern*& pattern) { return retired_patterns.pop(pattern); }
+    // MIDI thread (issue 24): a sample's chop the audio thread held until a newer one came (Command::Chop), to free.
+    bool take_retired_chop(const Slices*& chop) { return retired_chops.pop(chop); }
     // Any thread (roadmap P4, plug-in delay compensation): device frames everything heard is held back by, so the
     // latest path (a plug-in's latency, its rate converter's, a Limiter's LOOKAHEAD) meets the rest: the tracks' and
     // loops' latest, the buses' and Knob FX's latest after them, and the master's chain. MIDI out, the metronome and
@@ -377,7 +399,7 @@ private:
     struct PendingOn { int32_t key = -1; int16_t velocity = 0; int32_t from = -1; int32_t samples = 0, length = 0; }; // an arp note swung late
     // A ratchet's hit still to come (roadmap P1): `samples` frames on it plays `key` (as the engine plays it; a kit
     // pad's semitones over it) and `midi` out, for `length` frames.
-    struct PendingHit { int32_t key = -1; int16_t midi = -1; uint8_t velocity = 0; bool accent = false, sound = true; int32_t samples = 0, length = 0; };
+    struct PendingHit { int32_t key = -1; int16_t midi = -1; uint8_t velocity = 0; bool accent = false, sound = true; int32_t samples = 0, length = 0, shift = 0; };
     // Roadmap P2, one dispatch a block: a call to a track's engine the sequencing pass made past the block's first
     // frame, kept for the track's job to make at that frame (play_calls()).
     struct EngineCall {
@@ -391,18 +413,29 @@ private:
     };
     static constexpr unsigned calls_a_block = 384; // a track's, more than a pattern's start (every value back) needs
     struct Slot {
+        // What every block reads of every track, an empty one too (render()'s passes over the tracks, run_hits(),
+        // next_hit(), arp_live()): first and side by side. A slot is over 100 kB (the sampler most of it), so these
+        // apart would be ten lines far apart in each slot for a block on a cold cache to wait for, not a few.
         EngineKind kind = EngineKind::None;
-        SamplerEngine sampler;
-        MidiEngine midi; // silent: a MIDI track (docs/MIDI_TRACKS.md)
-        PluginEngine plugin;             // a PLUGIN track: the rack's plug-in for `plugin_entry`
-        uint8_t plugin_entry = no_plugin;
-        Engine* engine = nullptr;
-        float gain = 1, pan_left = 0.7071f, pan_right = 0.7071f;
-        std::array<float, bus_count> sends {}; // into each bus A-D (round 2: four sends a track)
         bool mute = false, solo = false;
         // A solo counts only on a track that plays something (Track::used(), as the pad lights have it): an empty
         // track kept soloed would silence every other track with nothing to show why.
         bool soloing() const { return solo && kind != EngineKind::None; }
+        bool knob_pad_fed = false; // some sub-block of this block put something in knob_pad_l / knob_pad_r
+        bool print_fed = false;    // this block's print is in print_l / print_r (freeze plan F2b, below)
+        Engine* engine = nullptr;
+        unsigned hits_waiting = 0;                   // ratchets' hits (`hits`) still to come
+        int32_t repeat_late = -1, repeat_length = 0; // a swung step of Note Repeat: frames to it, and its notes' length
+        PendingOn arp_late;
+        PrintPlayer print; // the track's prints, their voices (freeze plan F2b, below)
+        Arp arp;
+        NoteRepeat repeat;
+        SamplerEngine sampler;
+        MidiEngine midi; // silent: a MIDI track (docs/MIDI_TRACKS.md)
+        PluginEngine plugin;             // a PLUGIN track: the rack's plug-in for `plugin_entry`
+        uint8_t plugin_entry = no_plugin;
+        float gain = 1, pan_left = 0.7071f, pan_right = 0.7071f;
+        std::array<float, bus_count> sends {}; // into each bus A-D (round 2: four sends a track)
         // As the block plays them (Ease): level and pan on each side, heard (1) or muted / soloed out (0),
         // into Knob FX (1) or not, and each send.
         Ease mix_l, mix_r, audible, knob_share;
@@ -434,17 +467,11 @@ private:
         unsigned locks_on = 0;
         float buffer[block] {};
         float left[block] {}, right[block] {};
-        float knob_pad_l[block] {}, knob_pad_r[block] {}; // a kit's pads under Knob FX, as the sampler left them
-        bool knob_pad_fed = false;                         // and some sub-block of this block put something there
+        float knob_pad_l[block] {}, knob_pad_r[block] {}; // a kit's pads under Knob FX, as the sampler left them (knob_pad_fed)
         struct PadSendBuffers { float l[bus_count][block] {}, r[bus_count][block] {}; };
         std::unique_ptr<PadSendBuffers> pad_sends = std::make_unique<PadSendBuffers>(); // a kit's pad sends, each bus apart (heap: 4 kB a track)
         unsigned send_pad_fed = 0;                                                // a bit a bus: something there this block
-        Arp arp;
-        PendingOn arp_late;
-        NoteRepeat repeat;
-        int32_t repeat_late = -1, repeat_length = 0; // a swung step of Note Repeat: frames to it, and its notes' length
-        std::array<PendingHit, 32> hits {}; // ratchets' hits to come, each on its frame
-        unsigned hits_waiting = 0;
+        std::array<PendingHit, 32> hits {}; // ratchets' hits to come, each on its frame (hits_waiting)
         // Trig conditions (model/trig.h): how the last weighed note went, on the track and on each key (a kit's
         // lanes), and whether one has been weighed since Play (none yet: counted as played, for NEI).
         bool weighed = false, went = false;
@@ -463,24 +490,26 @@ private:
         // Roadmap P5: a follow action (model/follow.h) due on tick `follow_at` (follow_do: the action, 0 none), planned
         // as its pattern starts; it waits while a launch is queued, and a chained track's never come.
         bool chained = false;
+        // A MIDI track ahead (play_ahead()): the next tick to play, the start and pattern read from, and a launch read
+        // ahead (the bar line it comes on, UINT32_MAX none, and its pattern).
+        uint32_t ahead_next = 0, ahead_start = UINT32_MAX, ahead_bar = UINT32_MAX;
+        uint8_t ahead_pattern = 255, ahead_queued = 255;
         uint32_t loop_from = 0, loop_ticks = 0; // an editor's loop (Command::EditLoop): only these ticks play; as written (edit_loop())
         uint8_t follow_do = 0;
         uint32_t follow_at = 0;
         // Freeze plan F2b: the track's prints (none: it plays live), and ones unfrozen whose voices still fade; the
-        // voices; whether the print plays the pattern now (its notes then sequence nothing on the engine), the engine
-        // awake (hand notes or a live pattern; asleep its render and, after the print, its chain are skipped), the
-        // frames it has been quiet, keys held by hand; this block's print (print_l / print_r: its rows of
-        // EngineHost::print_frames, on the heap, so a host on a test's stack stays as small as it was) and its level
-        // and pan.
+        // voices (`print`, at the top); whether the print plays the pattern now (its notes then sequence nothing on
+        // the engine), the engine awake (hand notes or a live pattern; asleep its render and, after the print, its
+        // chain are skipped), the frames it has been quiet, keys held by hand; this block's print (print_l / print_r:
+        // its rows of EngineHost::print_frames, on the heap, so a host on a test's stack stays as small as it was;
+        // `print_fed`, at the top) and its level and pan.
         FreezePack* freeze = nullptr;
         FreezePack* freeze_leaving = nullptr;
-        PrintPlayer print;
         bool print_on = false, awake = true, print_post = true; // print_post: its prints' tap (kept for a fade's end)
         uint32_t quiet = 0;
         std::bitset<256> hand {};
         float* print_l = nullptr;
         float* print_r = nullptr;
-        bool print_fed = false;
         Ease print_mix_l, print_mix_r;
         // Freeze plan F3: an AUDIO track's engine (its takes' voices), its patterns' takes, ones replaced whose voices
         // still fade, and the pattern tick it followed last (a jump when the next is not the one after).
@@ -533,6 +562,12 @@ private:
     void apply(const Command& command);
     void select_engine(Slot& slot, EngineKind kind);
     void tick();       // plays whatever falls on this clock tick, then moves on
+    void play_tick_notes(unsigned t, Slot& slot, uint32_t at_tick, unsigned pattern_index, uint32_t start, bool seq);
+    void play_ahead(unsigned t, Slot& slot, bool seq);
+    int64_t midi_early(unsigned t) const; // a MIDI track's negative DELAY, frames
+    int64_t midi_shift = 0;               // frames this tick's MIDI goes from its frame (play_ahead())
+    uint64_t seq_frame() const { return uint64_t(std::max<int64_t>(0, int64_t(frame_now + block_at) + midi_shift)); }
+    uint64_t early_frame(unsigned t) const { return uint64_t(std::max<int64_t>(0, int64_t(frame_now + block_at) - midi_early(t))); }
     void play_event(unsigned t, Slot& slot, const Pattern& pattern, size_t n, uint32_t at, uint32_t loop, uint32_t pass, bool sound,
                     Slot::Held& holding); // one note of the pattern on this tick (roadmap P1: a kit lane's loop its own)
     void arp_tick();   // the arps' own clock, running whether the song plays or not
@@ -548,12 +583,12 @@ private:
     std::array<FreezePack*, track_count> freeze_next {}; // waiting for the next bar
     static constexpr float sleep_floor = 3.16e-5f; // -90 dB: a frozen track's engine below it a second sleeps
     float pan_centre = 0.7071f;                    // set_pan()'s sides at the centre, as a print was made at
-    MidiQueue<64, FreezePack*> done_freezes;
+    SpscQueue<64, FreezePack*> done_freezes;
     // Freeze plan F3: audio tracks.
     void set_audio(unsigned t, AudioPack* pack);
     void retire_audio(AudioPack* pack);
     void audio_tick(unsigned t, Slot& slot, uint32_t at);
-    MidiQueue<64, AudioPack*> done_audio;
+    SpscQueue<64, AudioPack*> done_audio;
     std::array<AudioPack*, 16> audio_limbo {};
     std::atomic<uint32_t> audio_under {0}, audio_waited {0};
     std::atomic<int> audio_track {-1};   // the track a take is armed or recording for
@@ -609,14 +644,30 @@ private:
     double arp_tick_length() const { return tick_length() * (ticks_per_quarter / arp_ticks_per_quarter); }
     // MIDI out and sync (parity phase 9).
     // Roadmap P4: out as late as everything heard is held back (compensation()), so outside gear lines up with it; a
-    // MIDI track's own by its DELAY too (docs/MIDI_TRACKS.md M4: early by no more than the output's latency).
+    // MIDI track's own by a positive DELAY too (a negative one: the sequencer plays it ahead, play_ahead()).
+    // Played by hand (`from_hand`, while a command take_commands() marks so is applied, or a note's MIDI taken early,
+    // hand_midi()): out at once instead, from the frame it was played at (send_at() plays it a block on), held back
+    // only by a positive DELAY, the MIDI thread woken for it (set_hand_waker()).
     int64_t track_delay(unsigned t) const;
     void emit(const MidiOutEvent& e) {
         MidiOutEvent late = e;
-        late.frame += pdc.total;
-        if (late.track < track_count && late.dest != MidiDest::Config) late.frame = uint64_t(std::max<int64_t>(0, int64_t(late.frame) + track_delay(late.track)));
+        if (from_hand) {
+            late.live = true;
+            late.made_ns = int64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+            late.frame = late.frame > block ? late.frame - block : 0;
+            if (late.track < track_count && late.dest != MidiDest::Config) late.frame += uint64_t(std::max<int64_t>(0, track_delay(late.track)));
+        } else {
+            late.frame += pdc.total;
+            if (late.track < track_count && late.dest != MidiDest::Config) late.frame = uint64_t(std::max<int64_t>(0, int64_t(late.frame) + track_delay(late.track)));
+        }
         if (!midi_events.push(late)) midi_lost.fetch_add(1, std::memory_order_relaxed);
+        else if (late.live && hand_waker) hand_waker(hand_waker_context);
     }
+    static bool by_hand(const Command& c); // its MIDI out goes at once: a note, pressure, the mod wheel, a knob, MIDI in
+    bool hand_midi(const Command& c, unsigned offset); // a note played by hand: its MIDI out as it is taken (true: done)
+    bool from_hand = false, hand_early = false; // applying a command played by hand; the waiting one's MIDI went out
+    void (*hand_waker)(void*) = nullptr;
+    void* hand_waker_context = nullptr;
     bool out_wanted(unsigned t, int key) const;                              // this note of this track goes out
     bool heard(unsigned t) const;                                            // not muted, nor silenced by another's solo
     bool is_midi(unsigned t) const { return slots[t % track_count].kind == EngineKind::Midi; }
@@ -629,7 +680,7 @@ private:
     // A MIDI track's own parameter beyond port and channel: a controller value goes out as a CC; bank and
     // program (any of the three) as the bank selects that are on, then the program, when it is on.
     void midi_param(unsigned t, int id, int value, uint64_t at);
-    void midi_program(unsigned t, uint64_t at, bool force = true); // force: even when it is what was sent last
+    void midi_program(unsigned t, uint64_t at, bool force = true, int pattern_index = -1); // force: even when it is what was sent last; pattern_index: that pattern's
     void midi_slot(unsigned t, int slot, int value, uint64_t at);  // a slot's value as what its address says
     void midi_thinned(unsigned frames);                            // slots' values that waited, when their time comes
     void midi_inputs(const int32_t* input, const float* usb, unsigned frames); // MIDI tracks' inputs as their sound (M5)
@@ -653,7 +704,7 @@ private:
     bool park_over() const { return int32_t(resume_serial.load(std::memory_order_acquire) - park_wanted) >= 0; }
     void play_parked(int32_t* out, unsigned frames, float* stems);
     void go_parked(); // audio thread, the last thing in a block
-    MidiQueue<1024, MidiOutEvent> midi_events;
+    SpscQueue<1024, MidiOutEvent> midi_events;
     std::atomic<unsigned> midi_lost {0};
     AudioClock clock;
     uint64_t frame_now = 0;                                                  // frames rendered before this block
@@ -666,6 +717,9 @@ private:
         return e;
     }
     std::array<MidiOff, 128> midi_offs {};
+    // Some off may be on in midi_offs (only midi_note() puts one there). Without one nothing reads them: 3 kB each
+    // block and on every note let go, which a block on a cold cache waits for while Pad MIDI Out is off.
+    bool midi_offs_held = false;
     SyncOut sync;
     bool sync_started = false;                                                // the song's clocks are going (after any count-in)
     bool sync_clock = false, sync_mtc = false, sync_cv = false;
@@ -693,7 +747,7 @@ private:
     void follow_tempo();  // the tempo now: the global one, or the lead pattern's own (BPM per pattern)
     bool skipped(Slot& slot, unsigned key, uint32_t tick);
 
-    MidiQueue<4096, Command> queue;
+    SpscQueue<4096, Command> queue;
     // The first command not applied yet: a timed note before its frame, or one sent after it, waiting behind it.
     Command waiting {};
     bool has_waiting = false;
@@ -711,34 +765,50 @@ private:
     std::atomic<bool> fill_now {false};
     // Plug-ins: each entry's as the rack offered it; the ones replaced wait in the queue to be freed.
     struct PluginOffer { uint8_t entry = 0; PluginRunner* runner = nullptr; };
-    MidiQueue<64, PluginOffer> plugin_offers;
-    MidiQueue<64, PluginRunner*> retired_plugins;
+    SpscQueue<64, PluginOffer> plugin_offers;
+    SpscQueue<64, PluginRunner*> retired_plugins;
     std::array<PluginRunner*, max_plugins> runners {};
     std::array<PluginRunner*, 16> plugin_limbo {}; // replaced ones the queue had no room for yet
     PluginRunner* runner_of(unsigned entry) const { return entry < max_plugins ? runners[entry] : nullptr; }
     void take_plugins(); // the offers waiting, at the start of a block
     struct Offer { uint16_t slot = 0; const SampleData* sample = nullptr; };
-    MidiQueue<64, Offer> offers;
-    MidiQueue<128, const SampleData*> retired;
-    MidiQueue<8, const ProjectPack*> done_packs;
-    MidiQueue<8, const TrackPack*> done_tracks;
-    MidiQueue<1024, Pattern*> retired_patterns;
+    SpscQueue<64, Offer> offers;
+    SpscQueue<128, const SampleData*> retired;
+    SpscQueue<8, const ProjectPack*> done_packs;
+    SpscQueue<8, const TrackPack*> done_tracks;
+    SpscQueue<1024, Pattern*> retired_patterns;
     std::array<Pattern*, 64> limbo {}; // retired ones the queue had no room for yet
     void retire(Pattern* pattern);
     SamplerEngine::Table samples {};
+    // Issue 24: each sample slot's chop as the shell last sent it, for slice hits (the shell's copies, never changed
+    // in place: a newer one replaces it and it goes back through retired_chops to be freed). Freed with the host.
+    struct ChopTable {
+        SamplerEngine::Chops at {};
+        ChopTable() = default;
+        ChopTable(const ChopTable&) = delete;
+        ChopTable& operator=(const ChopTable&) = delete;
+        ~ChopTable() { for (const Slices* s : at) delete s; }
+    } chops;
+    SpscQueue<1024, const Slices*> retired_chops;
     StreamPager pager;
     TakeRecorder take;
     RecallRing recall_ring; // Audio Recall: the source, always
     Bounce render_out;      // Resample and the song's mixdown
     Bounce audio_in;        // freeze plan F3: an audio track's take, from the input as Sample Record hears it
     std::atomic<StemRing*> stem_ring {nullptr}; // roadmap P4: stems beside it (each track as it joins the mix, the returns)
+    float* live_stems = nullptr;                // audio thread: set_live_stems()'s rows
     void take_stems(unsigned frames);
+    void silence_live_stems() { if (live_stems) std::fill(live_stems, live_stems + size_t(StemRing::stem_count) * 2 * block, 0.0f); }
     std::atomic<unsigned> source_now {1};
     std::atomic<unsigned> source_track {0};
     std::atomic<bool> source_post {true};
     uint32_t auto_quiet = 0;       // RecordAutoEnd: a Free take ends after this long quiet (frames at the model rate; 0 never)
     float auto_silence_db = -60;   // and what quiet is
     std::atomic<bool> monitor_on {false};
+    std::atomic<bool> usb_direct {false}, usb_heard_now {false};
+    std::atomic<float> usb_gain_l {0}, usb_gain_r {0};
+    bool usb_wanted = false;              // this block: a monitor wanted USB-C in, which direct monitoring plays instead
+    float usb_want_l = 0, usb_want_r = 0; // and at what level each side
     std::atomic<bool> source_taken {false}; // InputTaken: the source's ADC side is routed elsewhere
     std::atomic<uint8_t> loop_monitor {uint8_t(Monitor::Auto)}; // Input Config's Monitor, for loops on a hardware input
     float record_gain = 1;  // linear
@@ -750,7 +820,7 @@ private:
     double until_arp = 0;
     uint32_t arp_ticks = 0;
     uint32_t arp_origin = 0;                    // the sequencer's tick at the arp's tick 0 (Play, a locate)
-    MidiQueue<512, ArpWritten> arp_written;     // its notes for Seq Record
+    SpscQueue<512, ArpWritten> arp_written;     // its notes for Seq Record
     bool click = false;
     float click_level = 0.4f, click_env = 0, click_phase = 0, click_step = 0;
     float click_fall = 0.9985f; // the blip's fall a frame: 0.9985 a 44.1 kHz frame, the same time at any rate

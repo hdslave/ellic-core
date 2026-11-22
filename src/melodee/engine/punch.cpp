@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #include "melodee/engine/punch.h"
 #include <algorithm>
@@ -96,22 +96,21 @@ float Punch::read(const float* line, double back) const {
 
 void Punch::process(float* l, float* r, unsigned frames) {
     if (!left) return;
-    constexpr float two_pi = 2 * dsp::pi;
-    // Off, as each of them is nearly always: nothing below changes what is heard, and only the history moves on,
-    // so it takes the block in one or two copies. The loop below does the same a frame at a time (its `amount`
-    // is this one in every frame, as nothing in that case changes `fading`): melodee-hdslave, optimization.md SMP-3.
-    if (!held && fading * depth <= 0) {
+    // Silent all block (neither held nor fading: nothing below moves `held`, `fading` or `begun` while it is): the
+    // sound passes untouched and the history only records it, a block at a time instead of a frame at a time.
+    if ((held ? depth * float(std::min(1.0, double(begun + 1) / ease_in)) : fading * depth) <= 0) {
         frozen = false;
-        for (unsigned done = 0; done < frames;) {
-            const unsigned n = std::min(frames - done, history - write);
-            std::copy(l + done, l + done + n, left.get() + write);
-            std::copy(r + done, r + done + n, right.get() + write);
+        for (unsigned f = 0; f < frames;) {
+            unsigned n = std::min(frames - f, history - write);
+            std::copy(l + f, l + f + n, left.get() + write);
+            std::copy(r + f, r + f + n, right.get() + write);
             write = write + n >= history ? 0 : write + n;
-            done += n;
+            f += n;
         }
-        fresh = std::min(history, fresh + frames);
+        fresh = unsigned(std::min<uint64_t>(history, uint64_t(fresh) + frames));
         return;
     }
+    constexpr float two_pi = 2 * dsp::pi;
     for (unsigned f = 0; f < frames; ++f) {
         float dry_l = l[f], dry_r = r[f];
         // Held, it comes in over seam_seconds (a filter or a crusher switched in at once would step); let go, it fades.

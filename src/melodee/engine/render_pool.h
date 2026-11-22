@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #pragma once
 #include <array>
@@ -26,6 +26,11 @@ namespace melodee {
 
 // The calling thread kept to one core (roadmap P2, Linux; false elsewhere or when refused).
 bool keep_to_core(int core);
+
+// What a platform wants done on each worker's own thread before its first job (none by default): the Move's
+// melodee-move touches the worker's stack, so its pages are locked before a block needs them. Set it before start().
+using WorkerSetup = void (*)();
+void set_worker_setup(WorkerSetup setup);
 
 class RenderPool {
 public:

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #include "melodee/engine/render_pool.h"
 #include <algorithm>
@@ -58,6 +58,8 @@ bool keep_to_core(int core) {
 }
 
 namespace {
+std::atomic<WorkerSetup> worker_setup {nullptr};
+
 void wake_all(std::atomic<uint32_t>& word) {
 #if defined(__linux__)
     syscall(SYS_futex, reinterpret_cast<uint32_t*>(&word), FUTEX_WAKE_PRIVATE, INT_MAX, nullptr, nullptr, 0);
@@ -66,6 +68,8 @@ void wake_all(std::atomic<uint32_t>& word) {
 #endif
 }
 } // namespace
+
+void set_worker_setup(WorkerSetup setup) { worker_setup.store(setup, std::memory_order_release); }
 
 RenderPool::~RenderPool() { stop(); }
 
@@ -134,6 +138,7 @@ void RenderPool::wake() {
 
 void RenderPool::work(unsigned n, int core) {
     flush_denormals();
+    if (auto setup = worker_setup.load(std::memory_order_acquire)) setup();
 #if defined(__linux__)
     if (core >= 0) keep_to_core(core);
     tids[n].store(int(syscall(SYS_gettid)), std::memory_order_release);

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 // SoundFont 2 as the format's own specification (2.04) lays it out: a RIFF
 // "sfbk" with its sounds in sdta (smpl, and sm24's low bytes) and its lists in
