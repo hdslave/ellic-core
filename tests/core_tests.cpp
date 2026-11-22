@@ -73,6 +73,7 @@
 #include "melodee/shell/stream_holds.h"
 #include "melodee/engine/stream_pager.h"
 #include "melodee/shell/free_length.h"
+#include "melodee/shell/follow_tempo.h"
 #include "melodee/shell/project_kits.h"
 #include "melodee/shell/pad_gap.h"
 #include "melodee/shell/zone_shapes.h"
@@ -1858,6 +1859,87 @@ void beat_grid() {
     add_kick(wave, 0.1);
     auto one = analysed(wave);
     CHECK(!one.grid.found() && one.grid.at.empty());
+}
+
+// A sample's tempo (engine/onsets.cpp) on the loops it read wrong against 1739 Apple Loops of known tempo: bass and
+// guitar lines read at half their tempo, or a dotted eighth taken for the beat; and the tempo Follow plays a region
+// at (shell/follow_tempo.h).
+void loop_tempos() {
+    auto tempo = [](const std::vector<float>& wave) {
+        std::array<Hit, max_hits> hits {};
+        BeatGrid grid;
+        find_hits_in(wave, hits, grid);
+        return grid.found() ? grid.tempo / 10.0 : 0.0;
+    };
+    // A plucked note (three harmonics, a 4 ms attack) and a held chord (a 30 ms attack).
+    auto pluck = [](std::vector<float>& w, double at, double hz, double seconds, double level) {
+        for (uint32_t n = uint32_t(at * 44100), end = std::min<uint32_t>(uint32_t(w.size()), n + uint32_t(seconds * 44100)); n < end; ++n) {
+            double u = (n - at * 44100) / 44100, shape = std::min(1.0, u / 0.004) * std::exp(-u / 0.25) * std::min(1.0, (seconds - u) / 0.01);
+            w[n] += float(level * shape * (std::sin(2 * M_PI * hz * u) + 0.4 * std::sin(4 * M_PI * hz * u) + 0.2 * std::sin(6 * M_PI * hz * u)));
+        }
+    };
+    auto chord = [](std::vector<float>& w, double at, std::initializer_list<double> hz, double seconds, double level) {
+        for (uint32_t n = uint32_t(at * 44100), end = std::min<uint32_t>(uint32_t(w.size()), n + uint32_t(seconds * 44100)); n < end; ++n) {
+            double u = (n - at * 44100) / 44100, sum = 0;
+            for (double f : hz) sum += std::sin(2 * M_PI * f * u);
+            w[n] += float(level * std::min(1.0, u / 0.03) * std::min(1.0, (seconds - u) / 0.05) * sum / double(hz.size()));
+        }
+    };
+
+    // Funk bass on 3 + 3 + 2 sixteenths twice a bar, 4 bars at 128 BPM: 128 exactly (read as 64 before), and cut
+    // off its bars (from a third of a beat in, 11.3 beats long) within 1%.
+    {
+        const double beat = 60 / 128.0;
+        std::vector<float> wave(size_t(std::lround(16 * beat * 44100)), 0.0f);
+        const double roots[] = {55, 55, 82.4, 73.4};
+        for (unsigned bar = 0; bar < 4; ++bar)
+            for (double s : {0.0, 3.0, 6.0, 8.0, 11.0, 14.0}) pluck(wave, (bar * 16 + s) / 4 * beat, roots[bar], 0.18, 0.5);
+        CHECK(tempo(wave) == 128.0);
+        std::vector<float> cut(wave.begin() + std::lround(0.37 * beat * 44100), wave.begin() + std::lround(11.7 * beat * 44100));
+        CHECK(std::fabs(tempo(cut) / 128 - 1) < 0.01);
+    }
+    // A bass line with long notes on 1 and 3 and short ones on the ands of 2 and 4, 2 bars at 120 and at 116 BPM:
+    // its own tempo, not half (60 and 58 before).
+    for (double bpm : {120.0, 116.0}) {
+        const double beat = 60 / bpm;
+        std::vector<float> wave(size_t(std::lround(8 * beat * 44100)), 0.0f);
+        for (unsigned bar = 0; bar < 2; ++bar) {
+            const double at = bar * 4 * beat;
+            pluck(wave, at, 55, 1.4 * beat, 0.6);
+            pluck(wave, at + 1.5 * beat, 65.4, 0.4 * beat, 0.5);
+            pluck(wave, at + 2 * beat, 73.4, 1.9 * beat, 0.6);
+            pluck(wave, at + 3.5 * beat, 82.4, 0.4 * beat, 0.4);
+        }
+        CHECK(tempo(wave) == bpm);
+    }
+    // Notes on sixteenths 1, 4, 7, 11 and 14 of each bar over a held chord, 4 bars at 115 BPM: 115, not the
+    // dotted eighth's pulse (158 before).
+    {
+        const double beat = 60 / 115.0;
+        std::vector<float> wave(size_t(std::lround(16 * beat * 44100)), 0.0f);
+        for (unsigned bar = 0; bar < 4; ++bar) {
+            for (double s : {0.0, 3.0, 6.0, 10.0, 13.0}) pluck(wave, (bar * 16 + s) / 4 * beat, 110 * (1 + (int(s) % 3) * 0.25), 0.15, 0.4);
+            chord(wave, bar * 4 * beat, {220, 277, 330}, 3.8 * beat, 0.08);
+        }
+        CHECK(tempo(wave) == 115.0);
+    }
+
+    // Follow's tempo for a region (tenths of a BPM). Found: in the octave nearest the project's tempo, exact at
+    // whole bars of the region. 2 bars at 70 BPM read as 140: 70 in a 90 BPM project, 140 in a 130 BPM one.
+    const auto bars_at = [](double bars, double bpm) { return uint32_t(std::lround(bars * 4 * 60 * 44100 / bpm)); };
+    CHECK(follow_tempo(bars_at(2, 70), 1400, 900) == 700 && follow_tempo(bars_at(2, 70), 1400, 1300) == 1400);
+    // Found up to 4% off 4 bars (the region a few frames short of them, too): exact. 3 bars at 90 BPM: 90 (not 4
+    // bars' 120), exact within 1.5%, else as found.
+    CHECK(follow_tempo(bars_at(4, 128) - 300, 1279, 1200) == 1281);
+    CHECK(follow_tempo(bars_at(4, 128), 1268, 1200) == 1280 && follow_tempo(bars_at(4, 128), 1240, 1200) == 1280);
+    CHECK(follow_tempo(bars_at(3, 90), 902, 1200) == 900 && follow_tempo(bars_at(3, 90), 930, 1200) == 930);
+    // Not whole bars (2.6 bars at 100 BPM) or 5% off them: the found tempo as it is; one and two beats are whole.
+    CHECK(follow_tempo(bars_at(2.6, 100), 1000, 1200) == 1000 && follow_tempo(bars_at(4, 100), 1050, 1200) == 1050);
+    CHECK(follow_tempo(bars_at(0.25, 100), 990, 1200) == 1000 && follow_tempo(bars_at(0.5, 100), 1010, 1200) == 1000);
+    // None found: the whole number of bars nearest the project's tempo between 70 and 180 BPM, as before (4 s is 2
+    // bars at 120, or 1 at 60, which is out); a hit under 0.1 s keeps its speed.
+    CHECK(follow_tempo(44100 * 4, 0, 900) == 1200 && follow_tempo(44100 * 4, 0, 1700) == 1200);
+    CHECK(follow_tempo(bars_at(2, 70), 0, 900) == 700 && follow_tempo(4000, 1200, 1200) == 0);
 }
 
 
@@ -8879,6 +8961,7 @@ int main() {
     onset_hits();
     sample_roots();
     beat_grid();
+    loop_tempos();
     hits_on_time();
     punches();
     kept_punches();
