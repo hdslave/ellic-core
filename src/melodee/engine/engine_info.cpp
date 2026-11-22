@@ -91,10 +91,11 @@ const EngineInfo& engine_info(EngineKind kind) {
     // rack's), so the engine states none here and its Edit page draws the plug-in's. Melodee's synths are plug-ins
     // of this kind (Melodee Poly, PD and Chip, docs/MELODEE.md, Synths).
     static const Sound plugin_sounds[] {{"PLUG-IN", {{{-1, 0}}}}};
-    // B1 the plug-in: its presets (or its face when it has none), then its parameters; B2 ARP, CHORD; B3 MIX,
-    // SENDS, FX (engine_info.h, stage_mix).
+    // B1 the plug-in: its presets (or its face when it has none), its own screen (PANEL, when it draws one), then
+    // its parameters; B2 ARP, CHORD; B3 MIX, SENDS, FX (engine_info.h, stage_mix).
     static const StageGroups plugin_stage {{{
-        {{{{"PRESETS", StageKind::PluginSound, StagePicture::PluginSound}, {"EDIT", StageKind::PluginEdit, StagePicture::PluginEdit}}}, 2},
+        {{{{"PRESETS", StageKind::PluginSound, StagePicture::PluginSound}, {"PANEL", StageKind::PluginScreen, StagePicture::PluginEdit},
+           {"EDIT", StageKind::PluginEdit, StagePicture::PluginEdit}}}, 3},
         {{{stage_arp, stage_chord}}, 2},
         {{{stage_mix, stage_sends, stage_fx}}, 3},
     }}};

@@ -79,6 +79,7 @@ enum class StageKind : uint8_t {
     // Freeze plan F3, an audio track: the take of the pattern in hand (CLIP its level, start and end; FADES its fade in,
     // fade out and reverse; WARP how it follows the tempo), and what it records (INPUT: source, monitor, gain).
     Clip, Fades, Warp, AudioInput,
+    PluginScreen,      // a PLUGIN track's own screen, drawn by the plug-in (PANEL); passed over when it has none
 };
 // What the picture over the knobs draws.
 enum class StagePicture : uint8_t {
