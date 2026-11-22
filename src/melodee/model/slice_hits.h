@@ -91,7 +91,7 @@ inline unsigned lay_slice_hits(Project& project, PatternBank& patterns, const Ch
                         if (unsigned(slice) < s.count) {
                             while (next < sampler_pads && track.pads[next].used()) ++next;
                             to = -1;
-                            if (next < sampler_pads) { track.pads[next] = slice_sound(parent, s.start[size_t(slice)], s.stop[size_t(slice)]); to = int(next); }
+                            if (next < sampler_pads) { track.pads[next] = slice_sound(parent, s.start[size_t(slice)], s.stop[size_t(slice)], region_frames(parent, project.samples[parent.sample].frames)); to = int(next); }
                         }
                     }
                     at = laid.emplace(std::make_pair(pad, slice), to).first;

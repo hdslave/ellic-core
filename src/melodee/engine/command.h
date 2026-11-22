@@ -45,7 +45,7 @@ struct Command {
         Return,      // index = bus, value = 0..100
         Pressure,    // track, index = key, value = 0..127 (poly aftertouch)
         Pad,         // track, index = kit pad, pad
-        Audition,    // track, pad (sample, start, end), value = velocity: a region on no pad
+        Audition,    // track, pad (sample, start, end), value = velocity: a region on no pad; index = a kit pad + 1 whose speed it takes
         PadNote,     // track, index = kit pad, value = velocity, pattern = semitones + 64, position = cutoff + 1 (0: the pad's): 16 Levels;
                      // micros = a slice + 1 of the pad's sample's chop (0: the pad's region): Chop under Seq Record (issue 24)
         // track = InputSource, index = sample slot, value = threshold dB (-96: at once), pattern = rec length

@@ -180,10 +180,23 @@ constexpr uint32_t full_colour(uint32_t rgb) {
     return up(r) << 16 | up(g) << 8 | up(b);
 }
 
+// The length of `pad`'s region in 44.1 kHz frames, `frames` the sample's (0 unknown): an end of 0, or past the
+// sample's end, is the sample's end. 0 when that is not known.
+inline uint32_t region_frames(const PadSound& pad, uint32_t frames) {
+    const uint32_t end = pad.end && (!frames || pad.end <= frames) ? pad.end : frames;
+    return end > pad.start ? end - pad.start : 0;
+}
+// The tempo (tenths of a BPM) `beats` beats over `region` frames (44.1 kHz) were played at; 0 unknown.
+inline uint16_t beats_tempo(unsigned beats, uint32_t region) {
+    if (!beats || !region) return 0;
+    return uint16_t(std::clamp<long long>(std::llround(beats * 60.0 * 44100.0 * 10.0 / region), 1, 65535));
+}
+
 // Chop's slice [start, end) of `parent`'s sample as a pad of its own: the parent pad's values (tune, Warp and the
 // tempo it was played at, mute group, play, envelope, filter, level, pan), with what belongs to the parent's region
-// alone left out (its layers, Pad Link, a loop point inside it, # Beats).
-inline PadSound slice_sound(const PadSound& parent, uint32_t start, uint32_t end) {
+// alone left out (its layers, Pad Link, a loop point inside it). Warp's Seq by # Beats counts the parent's region
+// (`region` frames, 0 unknown): the slice keeps the tempo that gives as its own, so it plays at the parent's speed.
+inline PadSound slice_sound(const PadSound& parent, uint32_t start, uint32_t end, uint32_t region) {
     PadSound one = parent;
     one.start = start; one.end = end;
     one.layers = {};
@@ -191,7 +204,20 @@ inline PadSound slice_sound(const PadSound& parent, uint32_t start, uint32_t end
     one.layer_play = LayerPlay::Velocity;
     one.link = 0;
     one.loop_lock = true; one.loop_start = 0;
+    if (parent.warp == warp_seq && parent.beats) {
+        if (const uint16_t tempo = beats_tempo(parent.beats, region)) one.own_tempo = tempo;
+    }
     one.beats = 0;
+    return one;
+}
+// Chop's audition of the slice [start, end) at `parent`'s speed and pitch (Warp, the tempo it was played at, Semi
+// and Fine), as the slice's pad plays it; nothing else of the pad's (it stays a plain one shot).
+inline PadSound slice_heard(const PadSound& parent, uint32_t start, uint32_t end, uint32_t region) {
+    const PadSound full = slice_sound(parent, start, end, region);
+    PadSound one;
+    one.sample = full.sample; one.start = start; one.end = end;
+    one.pitch = full.pitch; one.fine = full.fine;
+    one.warp = full.warp; one.own_tempo = full.own_tempo;
     return one;
 }
 

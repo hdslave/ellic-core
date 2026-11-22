@@ -84,8 +84,9 @@ public:
     void set_pad_mute(unsigned pad, bool on, bool fade = true);
     void set_pad_mutes(const std::array<uint64_t, (sampler_pads + 63) / 64>& bits, bool fade = true);
     bool pad_muted(unsigned pad) const { return pad < sampler_pads && ((muted[pad / 64] >> (pad % 64)) & 1); }
-    // A region of a sample on no pad, for Chop's audition (plays one shot).
-    void audition(uint16_t sample, uint32_t start, uint32_t end, int velocity);
+    // A region of a sample on no pad, for Chop's audition (plays one shot). With kit pad `pad` holding the sample, at
+    // that pad's speed and pitch (Warp, Semi, Fine) as its slice's pad plays it; -1 as the file is.
+    void audition(uint16_t sample, uint32_t start, uint32_t end, int velocity, int pad = -1);
     // A sample is about to change: whatever plays it stops now.
     void sample_gone(uint16_t sample);
     // A kit pad shifted by `semitones`, its filter at `cutoff` (0..100; -1 its
@@ -297,6 +298,7 @@ private:
     void drop_key(int pad, int semitones);               // let go
     const HeldKey* newest_held(int pad) const;
     Multisample* multi_of(const PadSound& sound) const;
+    uint32_t model_frames(uint16_t slot) const; // sample slot `slot`'s length as the project counts it (44.1 kHz); 0 unknown
     void end_stream(Voice& v);
     void stream_from(Voice& v);   // a long sample's voice moved: its stream again from there
     void follow_stream(Voice& v); // and after its block: where it reads, or round its loop

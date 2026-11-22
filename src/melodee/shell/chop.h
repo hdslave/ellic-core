@@ -354,7 +354,8 @@ inline std::vector<KitSound> kit_sounds(const Slices& s, uint32_t frames, const 
 }
 // Slice n's pad, from the chopped pad's sound, as `play` lays it; `group` the mute group MONO and THRU share.
 inline PadSound slice_pad(const PadSound& parent, const Slices& s, unsigned n, uint32_t frames, SlicePlay play, uint8_t group) {
-    PadSound one = slice_sound(parent, s.start[n], play == SlicePlay::Thru ? s.end(s.count - 1, frames) : s.end(n, frames));
+    PadSound one = slice_sound(parent, s.start[n], play == SlicePlay::Thru ? s.end(s.count - 1, frames) : s.end(n, frames),
+                                region_frames(parent, frames));
     if (play != SlicePlay::Poly) one.group = group;
     return one;
 }

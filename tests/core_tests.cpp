@@ -5968,11 +5968,50 @@ void chop_slices_keep_pad() {
     parent.filter = PadFilter::Lpf4; parent.cutoff = 40; parent.decay = 30;
     parent.link = 2; parent.loop = true; parent.loop_lock = false; parent.loop_start = 5000;
     parent.layers[0].sample = 7; parent.low_velocity = 40;
-    PadSound one = slice_sound(parent, 20000, 30000);
+    // Warp's Seq by # Beats: 8 beats over the parent's 89000 frames is 237.8 BPM, the slice's own tempo.
+    CHECK(region_frames(parent, 0) == 89000 && region_frames(parent, 50000) == 49000);
+    PadSound one = slice_sound(parent, 20000, 30000, region_frames(parent, 0));
     CHECK(one.sample == 3 && one.start == 20000 && one.end == 30000);
-    CHECK(one.pitch == -5 && one.fine == 20 && one.warp == warp_seq && one.own_tempo == 924 && one.group == 4);
+    CHECK(one.pitch == -5 && one.fine == 20 && one.warp == warp_seq && one.own_tempo == 2378 && one.group == 4);
     CHECK(one.play == PadPlay::Gate && one.mono && one.level == 80 && one.pan == -12 && one.filter == PadFilter::Lpf4 && one.cutoff == 40 && one.decay == 30);
     CHECK(one.loop && one.loop_point() == 20000 && one.link == 0 && one.beats == 0 && !one.layered() && one.plain_layers());
+    CHECK(slice_sound(parent, 20000, 30000, 0).own_tempo == 924); // the region unknown: the tempo it had
+    PadSound by_tempo = parent; by_tempo.beats = 0;
+    CHECK(slice_sound(by_tempo, 20000, 30000, 89000).own_tempo == 924);
+    PadSound longer = parent; longer.warp = 150;
+    CHECK(slice_sound(longer, 20000, 30000, 89000).own_tempo == 924 && slice_sound(longer, 20000, 30000, 89000).warp == 150);
+    PadSound whole = parent; whole.end = 0; // to the sample's end
+    CHECK(region_frames(whole, 89000) == 88000 && beats_tempo(2, 44100) == 1200);
+    // Chop's audition: the pad's speed and pitch alone.
+    const PadSound heard = slice_heard(parent, 20000, 30000, 89000);
+    CHECK(heard.sample == 3 && heard.start == 20000 && heard.end == 30000 && heard.pitch == -5 && heard.fine == 20);
+    CHECK(heard.warp == warp_seq && heard.own_tempo == 2378 && heard.beats == 0);
+    CHECK(heard.play == PadPlay::OneShot && !heard.loop && heard.group == 0 && heard.filter == PadFilter::Off && heard.level == 100 && heard.pan == 0);
+}
+
+// Chop's audition with a kit pad plays at that pad's speed: Warp 200 % twice as long; with no pad, or a pad that
+// holds another sample, as the file is.
+void chop_audition_pad_speed() {
+    dsp::device_rate.store(44100.0f);
+    SampleData data;
+    data.frames = 44100; data.left.assign(44100, 0.5f); data.right.assign(44100, 0.5f);
+    SamplerEngine::Table table {};
+    table[2] = &data;
+    auto blocks = [&](int pad, uint16_t holds) {
+        SamplerEngine engine;
+        engine.set_samples(&table);
+        PadSound p; p.sample = holds; p.warp = 200;
+        engine.set_pad(4, p);
+        engine.audition(2, 0, 4410, 100, pad);
+        std::vector<float> l(128), r(128);
+        unsigned n = 0;
+        while (engine.sounding() && n < 400) { engine.render_stereo(l.data(), r.data(), 128); ++n; }
+        return n;
+    };
+    const unsigned plain = blocks(-1, 2), warped = blocks(4, 2), other = blocks(4, 3);
+    CHECK(plain > 30 && plain < 45);
+    CHECK(warped > plain * 18 / 10 && warped < plain * 22 / 10);
+    CHECK(other == plain);
 }
 
 
@@ -8710,7 +8749,7 @@ void slice_hit_notes() {
     };
     auto loudest = [](const std::vector<float>& v) { float m = 0; for (float x : v) m = std::max(m, std::fabs(x)); return m; };
     const auto hit = render(whole, pad_note(key, 0, -1, 1));
-    CHECK(loudest(hit) > 0.05f && hit == render(slice_sound(whole, 10000, 20000), key));
+    CHECK(loudest(hit) > 0.05f && hit == render(slice_sound(whole, 10000, 20000, 0), key));
     CHECK(hit != render(whole, key));
     CHECK(loudest(render(whole, pad_note(key, 0, -1, 5))) == 0.0f);
     CHECK(render(whole, 0, 1) == hit);
@@ -8722,7 +8761,7 @@ void slice_hit_notes() {
     project->chops.edit(7).slices = chop;
     project->chops.edit(7).to = 44100;
     auto laid_project = std::make_unique<Project>(*project);
-    laid_project->tracks[2].pads[5] = slice_sound(whole, 10000, 20000);
+    laid_project->tracks[2].pads[5] = slice_sound(whole, 10000, 20000, 0);
     auto beat = std::make_unique<PatternBank>(), laid_beat = std::make_unique<PatternBank>();
     beat->at[2][0].add([&] { Event e = a; e.slice = 2; return e; }());     // slice 2 (index 1)
     laid_beat->at[2][0].add([&] { Event e = a; e.slice = 0; e.key = uint8_t(key + 1); return e; }()); // A06, that slice
@@ -8797,6 +8836,7 @@ int main() {
     levels_cutoff_kept();
     pad_link_chains();
     chop_slices_keep_pad();
+    chop_audition_pad_speed();
     instrument_p3();
     instrument_formats_p3();
     plugins();

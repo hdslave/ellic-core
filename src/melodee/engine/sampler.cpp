@@ -392,7 +392,7 @@ void SamplerEngine::refresh(Voice& v) {
     if (v.slice >= 0) { // a slice hit (issue 24): the pad's sound now over its slice as the chop has it now
         const Slices* chop = chops && own.used() && own.sample < sample_slots ? (*chops)[own.sample] : nullptr;
         if (!chop || unsigned(v.slice) >= chop->count) return; // its slice gone: it plays on as it was
-        layered = slice_sound(own, chop->start[size_t(v.slice)], chop->stop[size_t(v.slice)]);
+        layered = slice_sound(own, chop->start[size_t(v.slice)], chop->stop[size_t(v.slice)], region_frames(own, model_frames(own.sample)));
         sound = &layered;
     }
     if (!sound->used() || sound->sample != v.slot) return;
@@ -641,7 +641,8 @@ void SamplerEngine::hit(int pad, int velocity, int semitones, int cutoff, int sl
     if (chop && chop->count) {
         if (unsigned(slice) >= chop->count) return;
         Voice& v = free_voice();
-        start(v, slice_sound(sound, chop->start[size_t(slice)], chop->stop[size_t(slice)]), pad, velocity, semitones, cutoff, -1);
+        start(v, slice_sound(sound, chop->start[size_t(slice)], chop->stop[size_t(slice)], region_frames(sound, model_frames(sound.sample))),
+              pad, velocity, semitones, cutoff, -1);
         if (v.pad >= 0) v.slice = int8_t(slice);
         return;
     }
@@ -781,12 +782,24 @@ void SamplerEngine::release_zones(int pad, int semitones) {
     }
 }
 
-void SamplerEngine::audition(uint16_t sample, uint32_t from, uint32_t to, int velocity) {
+uint32_t SamplerEngine::model_frames(uint16_t slot) const {
+    if (!samples || slot >= samples->size()) return 0;
+    const SampleData* data = (*samples)[slot];
+    return data && !data->multi ? data->model_frames() : 0;
+}
+
+void SamplerEngine::audition(uint16_t sample, uint32_t from, uint32_t to, int velocity, int pad) {
     PadSound sound;
+    const bool as_pad = pad >= 0 && pad < int(sampler_pads) && pads[size_t(pad)].used() && pads[size_t(pad)].sample == sample;
+    if (as_pad) sound = slice_heard(pads[size_t(pad)], from, to, region_frames(pads[size_t(pad)], model_frames(sample)));
     sound.sample = sample; sound.start = from; sound.end = to;
     for (auto& v : voices) if (v.pad == int(sampler_pads)) v.choked = true; // one audition at a time
     if (sample == no_sample) return; // only that: the audition stops
-    start(free_voice(), sound, int(sampler_pads), velocity);
+    Voice& v = free_voice();
+    start(v, sound, int(sampler_pads), velocity);
+    // At the pad's speed with its pitch kept (Warp by Beats or Tones): stretched, as the pad's voice is. An audition
+    // as the file is never stretches (the kit's Tune under PITCH Stretch moves it as tape does, as before).
+    if (as_pad && v.pad >= 0 && !v.stretch && std::fabs(v.step - v.advance) > 1e-6) begin_stretch(v, false);
 }
 
 void SamplerEngine::sample_gone(uint16_t slot) {
