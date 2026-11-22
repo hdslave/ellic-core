@@ -24,6 +24,9 @@ struct MpcImport {
     // later than its start: a pattern plays one take, from its top).
     unsigned regions = 0, regions_left_out = 0;
     std::vector<std::pair<unsigned, std::string>> takes;
+    // The song (model/song_steps.h): its steps laid out in Song, steps left out (a sequence not in the file, or past
+    // Song's room), and other songs with steps (Song holds one: the first).
+    unsigned song_steps = 0, steps_left_out = 0, songs_left_out = 0;
 };
 
 bool is_mpc_project(const std::string& path);
