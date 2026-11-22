@@ -332,6 +332,142 @@ void sequenced_legato() {
         CHECK(down >= 0 && tied == down + 1 && on == tied + 1 && up > on);
     }
 }
+// Issue 27, Settings' Mute Notes: a muted track or kit pad starts no new notes, and what it plays rings on to its
+// own end (a MIDI track's note gets its Note Off when it was due, not at once); back to Audio, what still sounds goes.
+void note_mutes() {
+    using K = MidiOutEvent::Kind;
+    // A MIDI track: C4 on step 1 held six steps, D4 on step 9; muted on step 3.
+    auto midi = [](bool notes) {
+        auto project = std::make_unique<Project>();
+        auto bank = std::make_unique<PatternBank>();
+        load_sound(project->tracks[0], EngineKind::Midi, 0);
+        project->tracks[0].params[midi_track::Port] = midi_track::UsbC; project->tracks[0].params[midi_track::Channel] = 1;
+        project->tempo = 1200;
+        put(bank->at[0][0], 0, 60, 100, 6); put(bank->at[0][0], 8, 62, 100, 4);
+        EngineHost host;
+        host.load(*project, *bank);
+        host.set_audio_format(44100, 384);
+        host.send({Command::Type::MuteMode, 0, 0, 0, int16_t(notes)});
+        host.send({Command::Type::Play});
+        std::vector<int32_t> out(256);
+        std::vector<MidiOutEvent> events;
+        for (unsigned n = 0; n < 500; ++n) {
+            if (n == 90) host.send({Command::Type::Mute, 0, 0, 0, 1});
+            if (n == 200) host.send({Command::Type::NoteOn, 0, 0, 70, 100}); // played by hand on the muted track
+            host.render(out.data(), 128, 1);
+            MidiOutEvent e;
+            while (host.take_midi(e)) events.push_back(e);
+        }
+        return events;
+    };
+    auto find = [](const std::vector<MidiOutEvent>& events, K kind, uint8_t key) {
+        int count = 0; uint64_t at = 0;
+        for (auto& e : events) if (e.kind == kind && e.a == key) { if (!count) at = e.frame; ++count; }
+        return std::pair<int, uint64_t> {count, at};
+    };
+    for (bool notes : {false, true}) {
+        auto events = midi(notes);
+        auto on60 = find(events, K::NoteOn, 60), off60 = find(events, K::NoteOff, 60);
+        CHECK(on60.first == 1 && off60.first == 1);
+        CHECK(find(events, K::NoteOn, 62).first == 0 && find(events, K::NoteOn, 70).first == 0); // nothing new either way
+        if (notes) CHECK(off60.second > on60.second + 25000); // its own end, six steps on
+        else CHECK(off60.second < on60.second + 14000);       // cut at the mute
+    }
+
+    // A kit: pad 1 on step 1 held six steps and again on step 9; the track or pad 1 muted on step 3. `back`: Audio again
+    // on step 4.
+    enum class What { Nothing, Track, Pad };
+    auto kit = [](bool notes, What what, bool back = false) {
+        auto project = std::make_unique<Project>();
+        auto bank = std::make_unique<PatternBank>();
+        tone_kit(*project, 0);
+        project->tempo = 1200;
+        put(bank->at[0][0], 0, uint8_t(sampler_first_note), 100, 6); put(bank->at[0][0], 8, uint8_t(sampler_first_note), 100, 4);
+        EngineHost host;
+        host.load(*project, *bank);
+        auto tone = tone_sample();
+        CHECK(host.offer_sample(0, &tone));
+        host.send({Command::Type::MuteMode, 0, 0, 0, int16_t(notes)});
+        host.send({Command::Type::Play});
+        std::vector<int32_t> out(256);
+        std::vector<float> left;
+        for (unsigned n = 0; n < 500; ++n) {
+            if (n == 90 && what == What::Track) host.send({Command::Type::Mute, 0, 0, 0, 1});
+            if (n == 90 && what == What::Pad) host.send({Command::Type::PadMute, 0, 0, 0, 1});
+            if (n == 150 && back) host.send({Command::Type::MuteMode, 0, 0, 0, 0});
+            host.render(out.data(), 128, 1);
+            for (unsigned f = 0; f < 128; ++f) left.push_back(out[2 * f] / 2147483648.0f);
+        }
+        return left;
+    };
+    auto open = kit(true, What::Nothing);
+    CHECK(peak_of(open, 14000, 28000) > 0.05f && peak_of(open, 48000, 56000) > 0.05f); // the two notes, as heard unmuted
+    for (auto what : {What::Track, What::Pad}) {
+        auto cut = kit(false, what), rings = kit(true, what), back = kit(true, what, true);
+        CHECK(peak_of(cut, 14000, 28000) < 1e-4f);                                       // Audio: silent at once
+        CHECK(peak_of(rings, 14000, 28000) > 0.05f && peak_of(rings, 48000, 60000) < 1e-4f); // Notes: rings on, nothing new
+        CHECK(peak_of(back, 21000, 28000) < 1e-4f);                                      // Audio again: it goes
+    }
+}
+
+// Issue 32: a kit pad's mute recorded as a lane: it mutes and unmutes the pad where its points are, the pattern's
+// start and Stop put the mute back as set (Mute + pad), and pad gaps and lane_own() know it as a lane on a pad.
+void pad_mute_lane() {
+    CHECK(is_pad_lane(motion_pad_mute) && is_pad_lane(motion_pad_param(PadParam::Level)) && !is_pad_lane(motion_level));
+    CHECK(pad_param_of(motion_pad_mute) < 0 && !is_mix_lane(motion_pad_mute));
+    auto run = [](unsigned blocks, bool stop_and_hit) {
+        auto project = std::make_unique<Project>();
+        auto bank = std::make_unique<PatternBank>();
+        tone_kit(*project, 0);
+        project->tempo = 1200;
+        auto& p = bank->at[0][0];
+        for (unsigned step : {0u, 4u, 8u, 12u}) put(p, step, uint8_t(sampler_first_note), 100, 2);
+        p.write_motion(point(4, motion_pad_mute, 1)); p.write_motion(point(8, motion_pad_mute, 0)); p.write_motion(point(12, motion_pad_mute, 1));
+        EngineHost host;
+        host.load(*project, *bank);
+        auto tone = tone_sample();
+        CHECK(host.offer_sample(0, &tone));
+        host.send({Command::Type::Play});
+        std::vector<int32_t> out(256);
+        std::vector<float> left;
+        auto render = [&](unsigned n) {
+            for (unsigned b = 0; b < n; ++b) {
+                host.render(out.data(), 128, 1);
+                for (unsigned f = 0; f < 128; ++f) left.push_back(out[2 * f] / 2147483648.0f);
+            }
+        };
+        render(blocks);
+        if (stop_and_hit) {
+            host.send({Command::Type::Stop});
+            render(20);
+            left.clear();
+            host.send({Command::Type::NoteOn, 0, 0, uint16_t(sampler_first_note), 100}); // the pad as set: not muted
+            render(40);
+        }
+        return left;
+    };
+    auto pass = run(800, false); // two passes and a bit (88200 frames a pass)
+    CHECK(peak_of(pass, 2000, 20000) > 0.05f);  // step 1: heard
+    CHECK(peak_of(pass, 24000, 43000) < 1e-4f); // steps 5-8: muted by the lane, its note too
+    CHECK(peak_of(pass, 45500, 52000) > 0.05f); // step 9: unmuted
+    CHECK(peak_of(pass, 68000, 87500) < 1e-4f); // steps 13-16: muted again
+    CHECK(peak_of(pass, 89500, 96000) > 0.05f); // the next pass starts as set: heard
+    auto stopped = run(560, true); // stopped on step 13, muted by the lane
+    CHECK(peak_of(stopped) > 0.05f);
+
+    // A pad gap closed under the lane moves it with its pad (its pad gone: the lane too); lane_own() reads the pad's
+    // mute as set.
+    Project project;
+    tone_kit(project, 0);
+    project.tracks[0].pads[1].sample = no_sample; // A02 empty: A03 and A04 move down one
+    auto patterns = std::make_unique<std::array<Pattern, pattern_count>>();
+    (*patterns)[0].write_motion(point(0, motion_pad_mute, 1, 2)); (*patterns)[0].write_motion(point(2, motion_pad_mute, 1, 1));
+    close_pad_gap(project.tracks[0], *patterns, 1);
+    CHECK((*patterns)[0].motion.size() == 1 && (*patterns)[0].motion[0].pad == 1 && (*patterns)[0].motion[0].param == motion_pad_mute);
+    project.tracks[0].set_pad_muted(2, true);
+    CHECK(lane_own(project, 0, motion_pad_mute, 2) == 1 && lane_own(project, 0, motion_pad_mute, 1) == 0);
+}
+
 void motion() {
     // The store (a pattern's own since roadmap P1): a second write at the same place replaces, clear drops one lane,
     // and it fills at the limit.
@@ -8714,6 +8850,8 @@ int main() {
     arrange();
     audio_takes();
     motion();
+    note_mutes();
+    pad_mute_lane();
     layouts();
     host_sequencer();
     sequenced_legato();

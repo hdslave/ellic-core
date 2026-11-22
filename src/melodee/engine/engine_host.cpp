@@ -395,6 +395,7 @@ void EngineHost::load_track(unsigned t, const Track& track) {
     for (unsigned pad = 0; pad < sampler_pads; ++pad) slot.sampler.set_pad(pad, track.pads[pad]);
     slot.sampler.set_trims(track.zone_trims);
     slot.sampler.set_pad_mutes(track.pad_mutes);
+    slot.pad_mutes = track.pad_mutes; slot.pad_mutes_moved = false; // issue 32
     if (slot.engine) for (unsigned p = 0; p < info.param_count; ++p) slot.engine->set_param(int(p), track.params[p]);
     apply({Command::Type::Level, uint8_t(t), 0, 0, track.mix.level});
     apply({Command::Type::Pan, uint8_t(t), 0, 0, track.mix.pan});
@@ -597,10 +598,16 @@ void EngineHost::apply(const Command& c) {
         slot.sampler.set_trim(c.index, c.position, c.micros, int(c.pattern) - 128, c.value);
         break;
     case Type::KeyedRoot: slot.sampler.set_keyed_root(c.value); break;
-    case Type::PadMute:
-        if (c.index == 0xffff) for (unsigned pad = 0; pad < sampler_pads; ++pad) slot.sampler.set_pad_mute(pad, c.value != 0);
-        else slot.sampler.set_pad_mute(c.index, c.value != 0);
+    case Type::PadMute: { // Mute Notes (issue 27): what the pad plays rings on
+        bool fade = !mutes_notes(slot);
+        for (unsigned pad = 0; pad < sampler_pads; ++pad) {
+            if (c.index != 0xffff && pad != c.index) continue;
+            slot.sampler.set_pad_mute(pad, c.value != 0, fade);
+            uint64_t bit = uint64_t(1) << (pad % 64);
+            slot.pad_mutes[pad / 64] = c.value ? slot.pad_mutes[pad / 64] | bit : slot.pad_mutes[pad / 64] & ~bit; // as set (issue 32)
+        }
         break;
+    }
     case Type::TrackLoad:
         if (c.track_pack) {
             const auto& pack = *c.track_pack;
@@ -806,6 +813,7 @@ void EngineHost::apply(const Command& c) {
         break;
     case Type::PadNote:
         if (slot.freeze && slot.freeze->deep) break; // freeze plan F2d
+        if (note_muted(c.track)) break; // Mute Notes (issue 27): no new note, MIDI out's neither
         if (slot.freeze) wake(slot);
         if (slot.engine == &slot.sampler) {
             EngineCall call;
@@ -923,7 +931,7 @@ void EngineHost::apply(const Command& c) {
         slot.sends[c.index % bus_count] = std::clamp<int>(c.value, 0, 100) / 100.0f;
         if (mods_on) mod_note(c.track % track_count, motion_send(c.index), 0, slot.mix_sends[c.index % bus_count], true);
         break;
-    case Type::Mute: slot.mute = c.value != 0; midi_silenced(); break;
+    case Type::Mute: slot.mute = c.value != 0; midi_silenced(); break; // Mute Notes: heard on, its notes ring (issue 27)
     case Type::Solo: slot.solo = c.value != 0; midi_silenced(); break;
     case Type::PatternData:
         if (c.data) {
@@ -1097,6 +1105,15 @@ void EngineHost::apply(const Command& c) {
     }
     case Type::Swing: swing = uint8_t(std::clamp<int>(c.value, 50, 75)); break;
     case Type::Fill: fill = c.value != 0; fill_now.store(fill, std::memory_order_relaxed); break;
+    case Type::MuteMode: // issue 27: back to Audio, what muted tracks and kit pads still play goes now
+        if (note_mutes == (c.value != 0)) break;
+        note_mutes = c.value != 0;
+        if (note_mutes) break;
+        for (auto& s : slots)
+            for (unsigned pad = 0; pad < sampler_pads; ++pad)
+                if (s.sampler.pad_muted(pad)) s.sampler.set_pad_mute(pad, true);
+        midi_silenced();
+        break;
     case Type::TrackSpeed: speeds_now[c.track % track_count].store(uint8_t(std::clamp<int>(c.value, 0, int(speed_count) - 1)), std::memory_order_relaxed); break;
     case Type::AudioRegions: // freeze plan F3
         if (c.track >= track_count) retire_audio(c.audio);
@@ -1262,12 +1279,14 @@ void EngineHost::make_call(unsigned t, Slot& slot, const EngineCall& c) {
     case Op::MovePad: slot.sampler.move_pad(unsigned(c.a), PadParam(c.b), c.c); break;
     case Op::RestorePad: slot.sampler.restore_pad(unsigned(c.a), PadParam(c.b)); break;
     case Op::RestorePads: slot.sampler.restore_pads(); break;
+    case Op::PadMute: slot.sampler.set_pad_mute(unsigned(c.a), c.b != 0, c.flag); break;
     case Op::PadFxParam: (*pad_fx)[t % track_count][unsigned(c.a) % sampler_pads][unsigned(c.b) % pad_slots].set_param(unsigned(c.c), c.d); break;
     }
 }
 
 // accent < 0: none set around it (a note by hand); else the sequencer's, back to 1 after.
 void EngineHost::engine_note_on(Slot& slot, int key, int velocity, float accent) {
+    if (slot.mute && mutes_notes(slot)) return; // Mute Notes (issue 27): a muted track starts nothing new
     EngineCall call;
     call.op = EngineCall::Op::NoteOn; call.a = key; call.b = velocity; call.flag = accent >= 0; call.x = accent;
     if (!keep_call(slot, call)) make_call(unsigned(&slot - slots.data()), slot, call);
@@ -1645,6 +1664,13 @@ void EngineHost::restore(Slot& slot) {
         call.op = EngineCall::Op::RestorePads;
         if (!keep_call(slot, call)) slot.sampler.restore_pads();
     }
+    if (slot.pad_mutes_moved) { // issue 32: the kit's pad mutes back as set
+        for (unsigned pad = 0; pad < sampler_pads; ++pad) {
+            bool own = (slot.pad_mutes[pad / 64] >> (pad % 64)) & 1;
+            if (slot.sampler.pad_muted(pad) != own) pad_mute_call(slot, pad, own);
+        }
+        slot.pad_mutes_moved = false;
+    }
     for (auto& l : slot.locks) l.param = -1; // locks end with everything they moved
     slot.locks_on = 0;
     if (mods_on) mod_back(unsigned(&slot - slots.data())); // roadmap P4: modulators swing around the values as set again
@@ -1741,6 +1767,10 @@ void EngineHost::move_lane(unsigned t, Slot& slot, unsigned param, unsigned pad,
         if (slot.engine) { engine_bend(slot, std::clamp(value / 64.0f, -1.0f, 1.0f)); slot.bend_moved = true; }
         return;
     }
+    if (param == motion_pad_mute) { // issue 32: a kit pad's mute
+        if (slot.kind == EngineKind::Sampler || slot.kind == EngineKind::Keygroup) { pad_mute_call(slot, pad % sampler_pads, value != 0); slot.pad_mutes_moved = true; }
+        return;
+    }
     if (param >= motion_pad_base) { // a kit pad's own value (a keygroup's sound's)
         if (slot.kind == EngineKind::Sampler || slot.kind == EngineKind::Keygroup) {
             EngineCall call;
@@ -1765,6 +1795,10 @@ void EngineHost::restore_lane(unsigned t, Slot& slot, unsigned param, unsigned p
     if (is_mix_lane(param)) { restore_mix(slot, param); return; } // roadmap P4
     if (param == motion_wheel) { engine_wheel(slot, slot.wheel); return; }
     if (param == motion_bend) { engine_bend(slot, slot.bend); return; }
+    if (param == motion_pad_mute) { // issue 32: the pad's mute as set
+        if (slot.kind == EngineKind::Sampler || slot.kind == EngineKind::Keygroup) pad_mute_call(slot, pad % sampler_pads, (slot.pad_mutes[pad % sampler_pads / 64] >> (pad % 64)) & 1);
+        return;
+    }
     if (param >= motion_pad_base) {
         if (slot.kind == EngineKind::Sampler || slot.kind == EngineKind::Keygroup) {
             EngineCall call;
@@ -1781,6 +1815,12 @@ void EngineHost::restore_lane(unsigned t, Slot& slot, unsigned param, unsigned p
     if (!slot.engine || param >= max_params) return;
     engine_param(slot, int(param), slot.base[param]);
     if (slot.kind == EngineKind::Midi) midi_param(t, int(param), slot.base[param], seq_frame());
+}
+
+void EngineHost::pad_mute_call(Slot& slot, unsigned pad, bool on) {
+    EngineCall call;
+    call.op = EngineCall::Op::PadMute; call.a = int32_t(pad); call.b = on; call.flag = !mutes_notes(slot);
+    if (!keep_call(slot, call)) slot.sampler.set_pad_mute(pad, on, call.flag);
 }
 
 // Swing stretches the first sixteenth of every eighth and shortens the second.
@@ -2124,6 +2164,7 @@ void EngineHost::arp_note(Slot& slot, int key, int velocity, int from, int32_t l
 bool EngineHost::out_wanted(unsigned t, int key) const {
     t %= track_count;
     if (key < 0 || key > 127) return false;
+    if (note_muted(t)) return false; // Mute Notes (issue 27): no new note goes out; the offs owed still do
     if (is_midi(t)) return heard(t); // a MIDI track: always, unless muted (docs/MIDI_TRACKS.md)
     if (!out_channel[t] || !out_mode[t]) return false;
     if (out_mode[t] == 1) return true;
@@ -2137,7 +2178,7 @@ bool EngineHost::heard(unsigned t) const {
     bool solo = false;
     for (const auto& s : slots) solo |= s.solo;
     const auto& slot = slots[t % track_count];
-    return !slot.mute && !(solo && !slot.solo);
+    return !(slot.mute && !mutes_notes(slot)) && !(solo && !slot.solo);
 }
 
 void EngineHost::midi_silenced() {
@@ -2526,7 +2567,7 @@ void EngineHost::play_event(unsigned t, Slot& slot, const Pattern& pattern, size
         slot.keys_weighed[e.key / 64 % 4] |= bit;
         word = go ? word | bit : word & ~bit;
     }
-    if (!go) return;
+    if (!go || note_muted(t)) return; // Mute Notes (issue 27): weighed as ever, not played
     // Held for its length, a touch short; with Slide or Tie, until the next note starts (and past
     // it, so that note finds it held and takes it over: no new attack; a slide glides there).
     // A ratchet: its hits spread over its length, each held as long as a hit of that length would be;
@@ -3145,7 +3186,7 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
             bool keying = keyed && t == key && pad_keyed < 0;
             // Monitored, the tapped track is heard through the input (gain, Rec Input FX) instead: once, as it records.
             bool through_input = tap && monitor_on.load(std::memory_order_relaxed);
-            bool heard = !slot.mute && !(solo && !slot.solo) && !through_input;
+            bool heard = !(slot.mute && !mutes_notes(slot)) && !(solo && !slot.solo) && !through_input; // Mute Notes: on (issue 27)
             bool knobbed = knob_heard && ((knob_tracks >> t) & 1);
             // Mute and solo, Knob FX's pick and the sends ease across the block too, so none of them clicks.
             slot.audible.aim(heard ? 1.0f : 0.0f, frames, snap_mix);

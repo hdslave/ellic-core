@@ -30,6 +30,12 @@ constexpr unsigned motion_pad_param(PadParam p) { return motion_pad_base + unsig
 constexpr int pad_param_of(unsigned param) {
     return param >= motion_pad_base && param < motion_pad_base + pad_param_count ? int(param - motion_pad_base) : -1;
 }
+// Issue 32: a kit pad's mute as a lane on that pad (Mute + pad while Seq Record runs), 1 muted, 0 not, each point a
+// step (nothing between). Not a PadParam: the mute is the track's (Track::pad_mutes), not the pad's sound.
+constexpr unsigned motion_pad_mute = motion_mix_base - 1;
+static_assert(motion_pad_base + pad_param_count <= motion_pad_mute, "pad value lanes end before the pad mute lane");
+// A lane on one kit pad (MotionPoint::pad): one of its values, or its mute.
+constexpr bool is_pad_lane(unsigned param) { return pad_param_of(param) >= 0 || param == motion_pad_mute; }
 
 inline bool pad_param_built(PadParam p) { return unsigned(p) < pad_param_count; }
 

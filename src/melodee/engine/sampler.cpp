@@ -683,15 +683,15 @@ void SamplerEngine::note_on(int key, int velocity) {
 
 void SamplerEngine::play_pad(unsigned pad, int velocity, int semitones, int cutoff, int slice) { hit(int(pad), velocity, semitones, cutoff, slice); }
 
-void SamplerEngine::set_pad_mute(unsigned pad, bool on) {
+void SamplerEngine::set_pad_mute(unsigned pad, bool on, bool fade) {
     if (pad >= sampler_pads) return;
     uint64_t bit = uint64_t(1) << (pad % 64);
     muted[pad / 64] = on ? muted[pad / 64] | bit : muted[pad / 64] & ~bit;
-    if (on) for (auto& v : voices) if (v.pad == int(pad)) v.choked = true; // fades out over a few milliseconds
+    if (on && fade) for (auto& v : voices) if (v.pad == int(pad)) v.choked = true; // fades out over a few milliseconds
 }
 
-void SamplerEngine::set_pad_mutes(const std::array<uint64_t, (sampler_pads + 63) / 64>& bits) {
-    for (unsigned pad = 0; pad < sampler_pads; ++pad) set_pad_mute(pad, (bits[pad / 64] >> (pad % 64)) & 1);
+void SamplerEngine::set_pad_mutes(const std::array<uint64_t, (sampler_pads + 63) / 64>& bits, bool fade) {
+    for (unsigned pad = 0; pad < sampler_pads; ++pad) set_pad_mute(pad, (bits[pad / 64] >> (pad % 64)) & 1, fade);
 }
 
 void SamplerEngine::set_bend(float amount) {

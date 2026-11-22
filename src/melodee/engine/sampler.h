@@ -80,9 +80,9 @@ public:
     void restore_pad(unsigned pad, PadParam which) {
         if (pad < sampler_pads) { set_pad_param(pads[pad], which, pad_param_value(base[pad], which)); mark(pad); }
     }
-    // Mute: a muted pad does not start and what it plays fades out now.
-    void set_pad_mute(unsigned pad, bool on);
-    void set_pad_mutes(const std::array<uint64_t, (sampler_pads + 63) / 64>& bits);
+    // Mute: a muted pad does not start and what it plays fades out now (`fade` false: plays on, issue 27's Notes).
+    void set_pad_mute(unsigned pad, bool on, bool fade = true);
+    void set_pad_mutes(const std::array<uint64_t, (sampler_pads + 63) / 64>& bits, bool fade = true);
     bool pad_muted(unsigned pad) const { return pad < sampler_pads && ((muted[pad / 64] >> (pad % 64)) & 1); }
     // A region of a sample on no pad, for Chop's audition (plays one shot).
     void audition(uint16_t sample, uint32_t start, uint32_t end, int velocity);

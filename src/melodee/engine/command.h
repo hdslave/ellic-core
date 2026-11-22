@@ -160,7 +160,10 @@ struct Command {
         InputTaken,
         // Issue 24: index = a sample slot, chop = its chop as slice hits play it now (the shell's copy; none: no chop).
         // The one it replaces goes back to be freed (EngineHost::take_retired_chop()).
-        Chop
+        Chop,
+        // Issue 27, Settings > SEQ > Mute: value 1 Notes, a muted track or kit pad starts no new notes and what it
+        // plays rings on (a MIDI track sends no All Notes Off); 0 Audio, a mute silences it at once.
+        MuteMode
 
     };
     Command() = default;

@@ -388,9 +388,9 @@ private:
     // frame, kept for the track's job to make at that frame (play_calls()).
     struct EngineCall {
         enum class Op : uint8_t { NoteOn, NoteOff, Slide, Param, Wheel, Pressure, Mod, PlayPad, Audition, MovePad, RestorePad,
-                                  RestorePads, PadFxParam, Bend, Control };
+                                  RestorePads, PadFxParam, Bend, Control, PadMute };
         Op op = Op::NoteOn;
-        bool flag = false;  // Slide: glide
+        bool flag = false;  // Slide: glide; PadMute: fade (Mute Audio)
         uint16_t frame = 0; // into the block
         int32_t a = 0, b = 0, c = 0, d = 0;
         float x = 1;        // NoteOn, Slide: the accent's gain; Wheel, Pressure, Bend: the value
@@ -441,6 +441,9 @@ private:
         std::array<int16_t, bus_count> mix_sends {};
         bool mix_moved = false, master_moved = false;
         bool moved = false;                       // motion changed a value since Play
+        // Issue 32: a kit's pad mutes as set (Mute + pad; a mute lane only borrows them), and whether a lane moved one.
+        std::array<uint64_t, (sampler_pads + 63) / 64> pad_mutes {};
+        bool pad_mutes_moved = false;
         float wheel = 0;                          // the mod wheel as the fader left it, 0..1
         bool wheel_moved = false;                 // and motion moved it since (parity phase 8)
         float bend = 0;                           // a PLUGIN track's pitch bend as the fader left it, -1..1
@@ -589,6 +592,7 @@ private:
     void play_motion(unsigned track, Slot& slot, const Pattern& pattern, uint32_t at);
     void move_lane(unsigned track, Slot& slot, unsigned param, unsigned pad, int value); // a Motion lane to `value`
     void restore_lane(unsigned track, Slot& slot, unsigned param, unsigned pad);        // and back to the track's own
+    void pad_mute_call(Slot& slot, unsigned pad, bool on); // issue 32: a lane's mute on a kit pad, on its frame
     void restore(Slot& slot);
     // Roadmap P4: a mix lane of track `t` to `value` (its level, pan or a send; the master's chain or a return), and
     // back to the track's own (the master's as set).
@@ -651,7 +655,12 @@ private:
     void (*hand_waker)(void*) = nullptr;
     void* hand_waker_context = nullptr;
     bool out_wanted(unsigned t, int key) const;                              // this note of this track goes out
-    bool heard(unsigned t) const;                                            // not muted, nor silenced by another's solo
+    bool heard(unsigned t) const;                                            // not muted (Audio), nor silenced by another's solo
+    // Issue 27, Settings' Mute Notes: a muted track or kit pad starts no new notes and what it plays rings on. Not on
+    // an AUDIO track or a frozen one: what they play is audio, which a mute silences either way.
+    bool note_mutes = false;
+    bool mutes_notes(const Slot& s) const { return note_mutes && s.kind != EngineKind::Audio && !s.freeze; }
+    bool note_muted(unsigned t) const { const auto& s = slots[t % track_count]; return s.mute && mutes_notes(s); }
     bool is_midi(unsigned t) const { return slots[t % track_count].kind == EngineKind::Midi; }
     void midi_silenced();                                                    // MIDI tracks muted or soloed out: their notes end
     void midi_note(unsigned t, int key, int velocity, uint64_t at, int64_t length); // and its off after `length` frames (-1 none)
