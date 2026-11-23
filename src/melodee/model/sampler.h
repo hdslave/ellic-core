@@ -281,20 +281,20 @@ struct SampleRef {
     // program (.xpm, the MPC 3's .xty), a Logic EXS24 instrument (.exs), one
     // pad of an MPC drum program or project, "<file>#<pad>", an .sf2's preset
     // "<file>.sf2#<preset>" or a DecentSampler preset (.dspreset; roadmap P3).
+    // The pad's or preset's '#' comes after the file's extension: a '#' in a
+    // file's own name ("Strings C#.sfz", "Lead F#.dspreset") is part of it.
     bool instrument() const {
+        // Whether the three letters before `end` are the extension `want` (lower case).
+        auto kind = [](const char* begin, const char* end, const char* want) {
+            if (end - begin < 4 || end[-4] != '.') return false;
+            for (int k = 0; k < 3; ++k) if (char(end[k - 3] | 32) != want[k]) return false;
+            return true;
+        };
         const char* end = path + std::strlen(path);
-        const char* mark = std::strrchr(path, '#');
-        const bool pad = mark && mark + 1 < end;
-        if (pad) end = mark;
-        if (!pad && dspreset()) return true;
-        if (end - path < 4 || end[-4] != '.') return false;
-        const char kind[3] = {char(end[-3] | 32), char(end[-2] | 32), char(end[-1] | 32)};
-        const bool xpm = kind[0] == 'x' && kind[1] == 'p' && kind[2] == 'm';
-        const bool xty = kind[0] == 'x' && kind[1] == 't' && kind[2] == 'y';
-        const bool sf2 = kind[0] == 's' && kind[1] == 'f' && kind[2] == '2';
-        if (pad) return xpm || xty || sf2 || (kind[0] == 'x' && kind[1] == 'p' && kind[2] == 'j'); // sf2: "<file>.sf2#<preset>"
-        const bool exs = kind[0] == 'e' && kind[1] == 'x' && kind[2] == 's';
-        return (kind[0] == 's' && kind[1] == 'f' && kind[2] == 'z') || xpm || xty || exs;
+        if (const char* mark = std::strrchr(path, '#'); mark && mark + 1 < end)
+            if (kind(path, mark, "xpm") || kind(path, mark, "xty") || kind(path, mark, "xpj") || kind(path, mark, "sf2")) return true;
+        if (dspreset()) return true;
+        return kind(path, end, "sfz") || kind(path, end, "xpm") || kind(path, end, "xty") || kind(path, end, "exs");
     }
     // A DecentSampler preset (roadmap P3).
     bool dspreset() const {

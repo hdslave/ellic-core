@@ -5509,6 +5509,19 @@ void note_pitches() {
     CHECK(ref.instrument());
     std::strcpy(ref.path, "/media/card/Expansions/Kits/Kit.XTY#5");
     CHECK(ref.instrument());
+    // A '#' in a file's own name or its folder's is no pad or preset: the file is what its extension says.
+    std::strcpy(ref.path, "/media/card/Strings/Strings C#.sfz");
+    CHECK(ref.instrument());
+    std::strcpy(ref.path, "/media/card/Leads/Lead F#.dspreset");
+    CHECK(ref.instrument());
+    std::strcpy(ref.path, "/media/card/C# Kits/Kit.xpm#4");
+    CHECK(ref.instrument());
+    std::strcpy(ref.path, "/media/card/Piano.sf2#7");
+    CHECK(ref.instrument());
+    std::strcpy(ref.path, "/content/Samples/Phrases/KeysPh-Kalim1 G#m90 MP.WAV");
+    CHECK(!ref.instrument());
+    std::strcpy(ref.path, "/media/card/Kits/Kit.sfz#2"); // an SFZ has no pads
+    CHECK(!ref.instrument());
     Track kit; kit.engine = EngineKind::Sampler;
     CHECK(note_key(kit, 20) == -1 && note_key(kit, 20, true) == 20 && note_key(kit, 127, true) == 127 && note_key(kit, 128, true) == -1);
     // 16 Levels: the keyboard plays the 16 Levels pad, a single sample as well as an instrument (key 60 its root)
