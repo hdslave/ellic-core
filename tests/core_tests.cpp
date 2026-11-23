@@ -34,6 +34,7 @@
 #include "melodee/engine/take_recorder.h"
 #include "melodee/shell/chop.h"
 #include "melodee/shell/xpm_write.h"
+#include "melodee/shell/drum_rack.h"
 #include "melodee/engine/auto_probe.h"
 #include "melodee/engine/external_notes.h"
 #include "melodee/engine/release_fit.h"
@@ -223,6 +224,101 @@ void layouts() {
 
 // A solo counts only on a track that plays something (Track::used(), as the pad lights have it): an empty track left
 // soloed, as a project kept it from Track Mute's Shift + pad, silences nothing; a kit soloed still silences the other.
+void drum_racks() {
+    // Ableton's Drum Rack presets (shell/drum_rack.h): their samples found in the libraries, each pad's values in
+    // the kit's terms, the pads by note, and the rack as a project of one kit track.
+    const AbletonLibraries move {"/data/CoreLibrary", "/data/UserData/UserLibrary"};
+    CHECK(ableton_sample_path("ableton:/packs/abl-core-library/Samples/Drums/Kick/Kick%20808%20Solid.wav", "/x", move) ==
+          "/data/CoreLibrary/Samples/Drums/Kick/Kick 808 Solid.wav");
+    CHECK(ableton_sample_path("ableton:/user-library/Recordings/Take%201.wav", "/x", move) == "/data/UserData/UserLibrary/Recordings/Take 1.wav");
+    CHECK(ableton_sample_path("ableton:/packs/another-pack/Samples/A.wav", "/x", move).empty());
+    CHECK(ableton_sample_path("ableton:/user-library/A.wav", "/x", AbletonLibraries {}).empty()); // no library named
+    CHECK(ableton_sample_path("file:///card/One%20Shot.wav", "/x", move) == "/card/One Shot.wav");
+    CHECK(ableton_sample_path("Samples/Clap.wav", "/kits", move) == "/kits/Samples/Clap.wav");
+    CHECK(ableton_sample_path("/card/Clap.wav", "/kits", move) == "/card/Clap.wav");
+    CHECK(ableton_sample_path("", "/kits", move).empty());
+    // Notes onto pads: 36 is A01, as the kit's notes run; past H16 or below 36, none.
+    CHECK(drum_rack_pad(36) == 0 && drum_rack_pad(51) == 15 && drum_rack_pad(52) == 16);
+    CHECK(drum_rack_pad(35) == -1 && drum_rack_pad(163) == 127 && drum_rack_pad(164) == -1);
+    // A pad's values in the kit's terms.
+    DrumRackPad kick;
+    kick.note = 36; kick.volume_db = -6; kick.pan = 0.5; kick.transpose = -2; kick.detune = 0.25;
+    kick.start = 0.25; kick.length = 0.5; kick.choke = 1; kick.velocity_to_volume = 0.5; kick.gate = true;
+    kick.filter = "Lowpass"; kick.cutoff_hz = 1000; kick.resonance = 0.3;
+    PadSound pad;
+    drum_rack_pad_sound(kick, 44100, pad);
+    CHECK(pad.start == 11025 && pad.end == 33075);
+    CHECK(pad.level == 69 && std::fabs(volume_db(pad.level) + 6.0f) < 0.2f && pad.pan == 25 && pad.pitch == -2 && pad.fine == 25);
+    CHECK(pad.group == 1 && pad.velocity_sense == 50 && pad.play == PadPlay::Gate);
+    CHECK(pad.filter == PadFilter::Lpf4 && pad.cutoff == 57 && pad.resonance == 30); // 1 kHz: 5.6 octaves over 20 Hz
+    DrumRackPad plain;
+    plain.note = 37; plain.volume_db = -9; plain.filter = "Lowpass"; plain.cutoff_hz = 21999.99;
+    PadSound whole;
+    drum_rack_pad_sound(plain, 0, whole);
+    CHECK(whole.start == 0 && whole.end == 0 && whole.level == 57 && whole.velocity_sense == 35 && whole.group == 0);
+    CHECK(whole.filter == PadFilter::Off && whole.play == PadPlay::OneShot);
+    plain.filter = "Lowpass 12dB"; plain.cutoff_hz = 3000;
+    drum_rack_pad_sound(plain, 0, whole);
+    CHECK(whole.filter == PadFilter::Lpf2);
+    plain.filter = "Highpass"; plain.cutoff_hz = 30; // its lowest: open
+    drum_rack_pad_sound(plain, 0, whole);
+    CHECK(whole.filter == PadFilter::Off);
+    plain.cutoff_hz = 200;
+    drum_rack_pad_sound(plain, 0, whole);
+    CHECK(whole.filter == PadFilter::Hpf4 && whole.cutoff == 33);
+    plain.filter = "Peak"; // no pad filter to go to
+    drum_rack_pad_sound(plain, 0, whole);
+    CHECK(whole.filter == PadFilter::Off);
+    plain.volume_db = -INFINITY; // a Gain of 0
+    drum_rack_pad_sound(plain, 0, whole);
+    CHECK(whole.level == 0);
+    plain.volume_db = 6;
+    drum_rack_pad_sound(plain, 0, whole);
+    CHECK(whole.level == 127);
+    // The rack as a kit: pads whose files are there, on their notes' pads, each file once; the rest left empty.
+    namespace fs = std::filesystem;
+    const auto folder = fs::temp_directory_path() / ("melodee-drum-rack-" + std::to_string(getpid()));
+    fs::create_directories(folder);
+    const auto kick_file = (folder / "Kick.wav").string(), snare_file = (folder / "Snare.wav").string();
+    std::ofstream(kick_file) << "RIFF";
+    std::ofstream(snare_file) << "RIFF";
+    DrumRack rack;
+    rack.name = "Test Kit";
+    kick.uri = kick.file = kick_file;
+    plain = DrumRackPad {}; plain.note = 37; plain.uri = plain.file = snare_file;
+    DrumRackPad again = plain; again.note = 52; // the same file on A17's note: B01
+    DrumRackPad none; none.note = 38;           // no sample
+    DrumRackPad other; other.note = 39; other.uri = "ableton:/packs/another-pack/Samples/A.wav";
+    DrumRackPad gone; gone.note = 40; gone.uri = gone.file = (folder / "Gone.wav").string();
+    DrumRackPad low; low.note = 20; low.uri = low.file = kick_file; // below the kit
+    rack.pads = {kick, plain, again, none, other, gone, low};
+    auto project = std::make_unique<Project>();
+    unsigned missing = 0, asked = 0;
+    auto frames_of = [&](const std::string&) { ++asked; return uint32_t(88200); };
+    CHECK(import_drum_rack(rack, *project, missing, frames_of).empty());
+    const auto& track = project->tracks[0];
+    CHECK(track.engine == EngineKind::Sampler && std::string(track.name) == "Test Kit" && std::string(project->name) == "Test Kit");
+    CHECK(missing == 2 && asked == 1); // the other pack's and the one gone; only the kick plays part of its sample
+    CHECK(track.pads[0].used() && track.pads[1].used() && track.pads[16].used());
+    CHECK(!track.pads[2].used() && !track.pads[3].used() && !track.pads[4].used());
+    CHECK(track.pads[1].sample == track.pads[16].sample && track.pads[0].sample != track.pads[1].sample);
+    CHECK(std::string(project->samples[track.pads[0].sample].path) == kick_file && std::string(project->samples[track.pads[1].sample].name) == "Snare");
+    CHECK(track.pads[0].start == 22050 && track.pads[0].end == 66150 && track.pads[0].group == 1);
+    DrumRack empty;
+    empty.pads = {none, other};
+    CHECK(import_drum_rack(empty, *project, missing, frames_of) == "NO SAMPLES");
+    fs::remove_all(folder);
+    // Which files are presets.
+    const auto preset = (folder.string() + ".json"), synth = (folder.string() + "-synth.json");
+    std::ofstream(preset) << R"({"$schema": "http://tech.ableton.com/schema/song/1.8.3/devicePreset.json", "kind": "instrumentRack",)"
+                             R"( "chains": [{"devices": [{"kind": "drumRack", "chains": []}]}]})";
+    std::ofstream(synth) << R"({"$schema": "http://tech.ableton.com/schema/song/1.8.3/devicePreset.json", "kind": "instrumentRack",)"
+                            R"( "chains": [{"devices": [{"kind": "drift"}]}]})";
+    CHECK(is_drum_rack_preset(preset) && !is_drum_rack_preset(synth) && !is_drum_rack_preset(kick_file));
+    fs::remove(preset);
+    fs::remove(synth);
+}
+
 void solo_empty_track() {
     auto project = std::make_unique<Project>();
     auto bank = std::make_unique<PatternBank>();
@@ -9092,6 +9188,7 @@ int main() {
     layouts();
     host_sequencer();
     solo_empty_track();
+    drum_racks();
     sequenced_legato();
     audio_quality();
     std::puts("core ok");
