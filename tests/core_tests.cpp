@@ -1852,12 +1852,15 @@ void beat_grid() {
     auto sixteenths = chop(ChopMode::Beats, 1, loop.sample.frames, loop.hits, loop.count, 1200, &loop.grid);
     CHECK(sixteenths.count == 32);
     for (unsigned n = 1; n < sixteenths.count; ++n) CHECK(near_grid(sixteenths.start[n], n * beat / 4));
-    // Past 64 slices the rest are left out and the chop says so; 4 bars of 1/16 is 64 exactly, nothing left out.
+    // Past 128 slices the rest are left out and the chop says so; 8 bars of 1/16 is 128 exactly, nothing left out.
     {
         std::array<Hit, max_hits> none {};
         bool capped = false;
+        CHECK(max_slices == 128);
         auto full = chop(ChopMode::Beats, 1, 0, 0, 44100 * 20, none, 0, 1200, nullptr, &capped); // 160 16ths at 120 BPM
         CHECK(capped && full.count == max_slices);
+        auto most = chop(ChopMode::Beats, 1, 0, 0, 44100 * 16, none, 0, 1200, nullptr, &capped);
+        CHECK(!capped && most.count == 128);
         auto exact = chop(ChopMode::Beats, 1, 0, 0, 44100 * 8, none, 0, 1200, nullptr, &capped);
         CHECK(!capped && exact.count == 64);
         CHECK(chop(ChopMode::Beats, 4, 0, 0, 44100 * 8, none, 0, 1200, nullptr, &capped).count == 16 && !capped);
@@ -1900,10 +1903,10 @@ void beat_grid() {
         HandCuts between; between.pin(66000); // well between two lines: both stay
         auto both = with_hand(quarters, between, frames);
         CHECK(both.count == 5 && has(both, 44100) && has(both, 66000) && has(both, 88200));
-        bool full = false; // 64 regions and a hand cut between two of them: one too many, the hand cut kept
+        bool full = false; // 128 regions and a hand cut between two of them: one too many, the hand cut kept
         HandCuts early;
         early.pin(1000);
-        auto most = with_hand(chop(ChopMode::Regions, 64, 0, 0, frames, none, 0, 1200), early, frames, &full);
+        auto most = with_hand(chop(ChopMode::Regions, int(max_slices), 0, 0, 2 * frames, none, 0, 1200), early, 2 * frames, &full);
         CHECK(full && most.count == max_slices && most.start[1] == 1000);
         HandCuts other = hand;
         CHECK(other.same(hand) && !other.same(near));
@@ -8981,6 +8984,10 @@ void slice_hit_notes() {
     CHECK(note_slice(pad_note(int(key), 0, -1, 5)) == 5 && (pad_note(int(key), 0, -1, 5) & 0xffff) == key);
     CHECK(note_slice(pad_note(int(key), -3, 40, 0)) == 0 && note_slice(int(key)) == -1);
     CHECK(note_slice(int(int16_t(pad_note(int(key), -12)))) == -1); // a pad's key and semitones in 16 bits, sign and all
+    // The last of 128 slices over the top cutoff and the lowest semitones: each part reads back, the note stays positive.
+    const int last = pad_note(int(key), -12, 100, int(max_slices) - 1);
+    CHECK(last > 0 && note_slice(last) == int(max_slices) - 1 && ((last >> 16) & 0x7f) == 101 && int8_t(last >> 8) == -12);
+    CHECK(((pad_note(int(key), 0, 127, -1) >> 16) & 0x7f) == 101 && note_slice(pad_note(int(key), 0, 127, -1)) == -1);
 
     // The file: SLCE, by place in EVNT; a file without it plays each note's pad region.
     auto project = std::make_unique<Project>();

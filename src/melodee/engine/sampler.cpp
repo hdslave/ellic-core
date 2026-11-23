@@ -678,7 +678,7 @@ void SamplerEngine::note_on(int key, int velocity) {
         for (unsigned n = 0; n < pedal_count; ++n) if ((pedal_offs[n] & 0xffff) != (key & 0xffff)) pedal_offs[kept++] = pedal_offs[n];
         pedal_count = kept;
     }
-    const int cutoff = (key >> 16) & 0xff;
+    const int cutoff = (key >> 16) & 0x7f; // bits 16-22: a slice + 1 starts at bit 23 (model/sampler.h)
     hit((key & 0xff) - int(sampler_first_note), velocity, int8_t(key >> 8), cutoff ? std::min(cutoff - 1, 100) : -1, note_slice(key));
 }
 

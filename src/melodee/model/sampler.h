@@ -309,15 +309,18 @@ struct SampleRef {
 // A note of a pad, with the semitones it plays at from the pad's root over the key.
 constexpr int pad_note(int key, int semitones) { return semitones ? key | (int(uint8_t(int8_t(semitones))) << 8) : key; }
 // Roadmap P3: the same with 16 Levels' cutoff (0..100) above them, as the sampler's note_on takes it from a pattern
-// (a cutoff + 1 in bits 16-23; -1 none). Note offs need only the key and semitones.
-constexpr int pad_note(int key, int semitones, int cutoff) { return pad_note(key, semitones) | (cutoff >= 0 ? (cutoff + 1) << 16 : 0); }
-// Issue 24: and above those a slice of the pad's sample's chop it plays (a slice + 1 in bits 24-30; -1 none, the pad's
-// own region), as the sampler takes a slice hit (Event::slice). The shell's held notes carry it the same way.
+// (a cutoff + 1 in bits 16-22; -1 none). Note offs need only the key and semitones.
+constexpr int pad_note(int key, int semitones, int cutoff) {
+    return pad_note(key, semitones) | (cutoff >= 0 ? (cutoff > 100 ? 101 : cutoff + 1) << 16 : 0);
+}
+// Issue 24: and above those a slice of the pad's sample's chop it plays (a slice + 1 in bits 23-30, so all 128 of a
+// chop's slices; -1 none, the pad's own region), as the sampler takes a slice hit (Event::slice). The shell's held
+// notes carry it the same way. Bit 31 stays clear: a negative note has no slice.
 constexpr int pad_note(int key, int semitones, int cutoff, int slice) {
-    return pad_note(key, semitones, cutoff) | (slice >= 0 && slice < 127 ? (slice + 1) << 24 : 0);
+    return pad_note(key, semitones, cutoff) | (slice >= 0 && slice < 255 ? (slice + 1) << 23 : 0);
 }
 // -1: none (a negative note is a pad's key and semitones kept in 16 bits, sign and all: no slice).
-constexpr int note_slice(int note) { return note < 0 ? -1 : ((note >> 24) & 0x7f) - 1; }
+constexpr int note_slice(int note) { return note < 0 ? -1 : ((note >> 23) & 0xff) - 1; }
 
 // The pad's label as the boards print it: A01 .. D16.
 inline void pad_label(unsigned pad, char out[4]) {

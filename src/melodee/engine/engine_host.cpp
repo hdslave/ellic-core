@@ -819,7 +819,7 @@ void EngineHost::apply(const Command& c) {
         if (slot.engine == &slot.sampler) {
             EngineCall call;
             call.op = EngineCall::Op::PlayPad; call.b = c.value; call.c = int(c.pattern) - 64; call.d = int(c.position) - 1;
-            call.a = int(c.index & 0xffff) | int(std::min<uint32_t>(c.micros, 127)) << 16; // the pad, a slice + 1 above it (issue 24)
+            call.a = int(c.index & 0xffff) | int(std::min<uint32_t>(c.micros, 255)) << 16; // the pad, a slice + 1 above it (issue 24)
             if (!keep_call(slot, call)) make_call(c.track % track_count, slot, call);
         }
         if (!hand_early) midi_note(c.track % track_count, int(sampler_first_note + c.index), c.value, frame_now + block_at, -1); // 16 Levels: the pad's note
@@ -1276,7 +1276,7 @@ void EngineHost::make_call(unsigned t, Slot& slot, const EngineCall& c) {
     case Op::Pressure: e->set_pressure(c.a, c.x); break;
     case Op::Control: e->control(c.a, c.b); break;
     case Op::Mod: e->set_mod(unsigned(c.a), ModRoute {uint8_t(c.b), uint8_t(c.c), int8_t(c.d)}); break;
-    case Op::PlayPad: if (e == &slot.sampler) slot.sampler.play_pad(unsigned(c.a & 0xffff), c.b, c.c, c.d, ((c.a >> 16) & 0x7f) - 1); break;
+    case Op::PlayPad: if (e == &slot.sampler) slot.sampler.play_pad(unsigned(c.a & 0xffff), c.b, c.c, c.d, ((c.a >> 16) & 0xff) - 1); break;
     case Op::Audition: if (e == &slot.sampler) slot.sampler.audition(uint16_t(c.a), uint32_t(c.b), uint32_t(c.c), c.d & 0xff, ((c.d >> 8) & 0xff) - 1); break;
     case Op::MovePad: slot.sampler.move_pad(unsigned(c.a), PadParam(c.b), c.c); break;
     case Op::RestorePad: slot.sampler.restore_pad(unsigned(c.a), PadParam(c.b)); break;
