@@ -22,6 +22,7 @@ inline int lane_own(const Project& project, unsigned t, unsigned param, unsigned
         return slot < max_slots ? project.master.slots[slot].params[q] : 0;
     }
     if (int which = pad_param_of(param); which >= 0) return pad_param_value(track.pads[pad % sampler_pads], PadParam(which));
+    if (param == motion_pad_mute) return track.pad_muted(pad); // issue 32
     if (param >= motion_fx_base) {
         unsigned slot = (param - motion_fx_base) / 6, q = (param - motion_fx_base) % 6;
         return slot < max_slots ? track.fx.slots[slot].params[q] : 0;

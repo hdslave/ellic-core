@@ -6,6 +6,8 @@
 #include "melodee/engine/dsp.h"
 #include "melodee/engine/sample_data.h"
 #include "melodee/model/scales.h"
+#include "melodee/model/scene_links.h"
+#include "melodee/model/song_steps.h"
 #include <juce_core/juce_core.h>
 #include <algorithm>
 #include <array>
@@ -78,6 +80,34 @@ bool flag(const juce::var& object, const char* key, bool fallback = false) {
     const auto& value = object[key];
     return value.isVoid() ? fallback : bool(value);
 }
+// A song step's value: the MPC writes "item.sequenceIndex" and "item.repeats" (the names in the stock app); a plain
+// key, or one inside "item", is read too.
+int step_value(const juce::var& step, const char* key, int fallback) {
+    const auto name = std::string("item.") + key;
+    for (const auto* value : {&step[name.c_str()], &step[key], &step["item"][key]})
+        if (!value->isVoid()) return int(*value);
+    return fallback;
+}
+
+// A sequence's name as its scene's: what the Name sheet can type (shell/name_entry.h), cut to the scene's length at
+// the last whole word that fits. A default name ("Sequence 01", or none) leaves the scene unnamed.
+void scene_name(const juce::String& text, Scene& scene) {
+    static constexpr const char* typed = " ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.()&'";
+    const auto name = text.trim();
+    if (name.isEmpty() || name == "(unnamed)") return;
+    if (name.startsWithIgnoreCase("Sequence") && name.substring(8).trim().containsOnly("0123456789")) return;
+    std::string kept;
+    for (auto c : name.toStdString())
+        if (c && std::strchr(typed, c) && !(c == ' ' && (kept.empty() || kept.back() == ' '))) kept += c;
+    const size_t room = sizeof(scene.name) - 1;
+    if (kept.size() > room) {
+        const size_t space = kept.rfind(' ', room); // a space at `room` ends a whole word that fits
+        kept.resize(space != std::string::npos && space > 0 ? space : room);
+    }
+    while (!kept.empty() && kept.back() == ' ') kept.pop_back();
+    if (!kept.empty()) scene.set_name(kept.c_str());
+}
+
 uint8_t percent(double value) { return uint8_t(std::clamp(std::lround(value * 100), 0l, 100l)); }
 uint16_t tenths(double bpm) { return uint16_t(std::clamp(std::lround(bpm * 10), 300l, 3000l)); }
 
@@ -653,6 +683,11 @@ std::string import_mpc_project(const std::vector<uint8_t>& file, const std::stri
     if (!master && sequences.count(current)) project.tempo = project.pattern_tempo[current];
     if (sequences.count(current))
         for (unsigned t = 0; t < used; ++t) project.tracks[t].pattern = uint8_t(current);
+    // Each sequence's own name, as Sequences shows it.
+    for (const auto& [n, sequence] : sequences) scene_name((*sequence)["name"].toString(), project.scenes[n]);
+    // Each sequence keeps its own number on every track, as the MPC plays it (model/scene_links.h).
+    keep_columns(project, patterns);
+    if (sequences.count(current)) project.scene = uint8_t(current % pattern_count);
 
     // One time signature for every pattern, as in Melodee: the first sequence's.
     if (!sequences.empty()) {
@@ -663,6 +698,34 @@ std::string import_mpc_project(const std::vector<uint8_t>& file, const std::stri
             for (unsigned n = 0; n < time_signature_count; ++n)
                 if (time_signatures[n].beats == beats && time_signatures[n].unit == unit) project.signature = uint8_t(n);
         }
+    }
+
+    // The song: the first of the file's songs with steps (the MPC Sample's Song page edits one), laid out as Song's
+    // clips, a marker a step, and the tempo lane for sequences of their own tempo (model/song_steps.h).
+    const juce::var* song = nullptr;
+    if (const auto* songs = data["songs"].getArray())
+        for (const auto& candidate : *songs) {
+            const auto* items = candidate["items"].getArray();
+            if (!items || items->isEmpty()) continue;
+            if (song) ++report.songs_left_out;
+            else song = &candidate;
+        }
+    if (song) {
+        std::vector<SongStep> steps;
+        const unsigned bar = std::max(project.bar_ticks(), 1u);
+        for (const auto& item : *(*song)["items"].getArray()) {
+            const int index = step_value(item, "sequenceIndex", -1);
+            if (index < 0 || !sequences.count(unsigned(index))) { ++report.steps_left_out; continue; } // not in the file
+            const auto ticks = std::clamp<int64_t>(int64_t(number(*sequences[unsigned(index)], "lengthPulses", 3840) / mpc_ticks_per_tick), 1, project.max_length());
+            SongStep step;
+            step.sequence = uint8_t(index);
+            step.repeats = uint16_t(std::clamp(step_value(item, "repeats", 1), 1, int(song_bars)));
+            step.bars = uint16_t((uint64_t(ticks) + bar - 1) / bar);
+            steps.push_back(step);
+        }
+        const unsigned left = song_from_steps(project, patterns, steps, !master && !flag(*song, "ignoreTempo"));
+        report.song_steps = unsigned(steps.size()) - left;
+        report.steps_left_out += left;
     }
     return {};
 }

@@ -45,7 +45,7 @@ struct Command {
         Return,      // index = bus, value = 0..100
         Pressure,    // track, index = key, value = 0..127 (poly aftertouch)
         Pad,         // track, index = kit pad, pad
-        Audition,    // track, pad (sample, start, end), value = velocity: a region on no pad
+        Audition,    // track, pad (sample, start, end), value = velocity: a region on no pad; index = a kit pad + 1 whose speed it takes
         PadNote,     // track, index = kit pad, value = velocity, pattern = semitones + 64, position = cutoff + 1 (0: the pad's): 16 Levels;
                      // micros = a slice + 1 of the pad's sample's chop (0: the pad's region): Chop under Seq Record (issue 24)
         // track = InputSource, index = sample slot, value = threshold dB (-96: at once), pattern = rec length
@@ -160,7 +160,10 @@ struct Command {
         InputTaken,
         // Issue 24: index = a sample slot, chop = its chop as slice hits play it now (the shell's copy; none: no chop).
         // The one it replaces goes back to be freed (EngineHost::take_retired_chop()).
-        Chop
+        Chop,
+        // Issue 27, Settings > SEQ > Mute: value 1 Notes, a muted track or kit pad starts no new notes and what it
+        // plays rings on (a MIDI track sends no All Notes Off); 0 Audio, a mute silences it at once.
+        MuteMode
 
     };
     Command() = default;

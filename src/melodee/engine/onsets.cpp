@@ -223,14 +223,15 @@ void analyse(const std::vector<float>& mono, std::vector<Hit>& found, std::vecto
 }
 
 // The beats (Ellis, "Beat tracking by dynamic programming", 2007, laid out as librosa does it, held tighter to
-// the tempo: loops keep time). The tempo: the flux's autocorrelation from 40 to 240 BPM with its multiples',
-// weighted toward 120 BPM (an octave away counts 0.6 as much) and toward a tempo the sample is 2, 4 ... 256
-// beats long at (a loop cut to its bars, 1.3 times). The beats: for each frame the best chain of beats ending
-// on it, each about a period after the one before (the further off, the more it costs) and on strong flux; the
-// chain from the last strong frame back, without weak beats at its ends. Each beat then moves onto the hit nearest it within 30 ms (the hits sit where the attacks
+// the tempo: loops keep time). The tempo: the best scored of the flux's autocorrelation peaks from 40 to 240 BPM,
+// each twice and half as fast, and the tempos the sample is 2, 4 ... 256 beats long at (below). The beats: for
+// each frame the best chain of beats ending on it, each about a period after the one before (the further off, the
+// more it costs) and on strong flux; the chain from the last strong frame back, without weak beats at its ends
+// (a whole-bar tempo with under two strong beats: a beat a period from the start). Each beat then moves onto the hit nearest it within 30 ms (the hits sit where the attacks
 // start; a frame peaks about 10 ms before); one with no hit there goes between the nearest beats that have one.
 // The tempo shown is the beats' average spacing, or exact where the sample is 2, 4, 8, 16, 32 or 64 such beats
-// long within 4% (a loop cut to its bars). None for under a second, under four hits or no steady pulse.
+// long within 4%, or the whole-bar tempo chosen (a loop cut to its bars). None for under a second, under four
+// hits or no steady pulse.
 BeatGrid track_beats(const std::vector<float>& flux, const std::vector<Hit>& hits, uint32_t frames, bool starts) {
     BeatGrid grid;
     constexpr double fps = 44100.0 / hop;
@@ -243,9 +244,10 @@ BeatGrid track_beats(const std::vector<float>& flux, const std::vector<Hit>& hit
     spread = std::sqrt(spread / double(n));
     if (spread <= 0) return grid;
 
-    // The tempo: the lag (frames a beat) whose autocorrelation, with its multiples' (a beat's pulse comes back a
-    // beat, two, three and four later; a lag of three quarters of a beat, which swung or triplet hats bring, does
-    // not every time), weighted, is highest; refined between frames.
+    // The flux's autocorrelation, and at a lag (frames a beat; between frames for a tempo from the sample's length)
+    // with its multiples': a beat's pulse comes back a beat, two, three and four later (a lag of three quarters of
+    // a beat, which swung or triplet hats bring, does not every time). Each multiple counts 1/k as much, at its
+    // highest within k - 1 frames (a take's drift).
     const size_t shortest = size_t(fps * 60 / 240), longest = std::min(size_t(fps * 60 / 40), n * 2 / 3);
     if (longest < shortest + 2) return grid;
     std::vector<double> ac(std::min(n * 2 / 3, 4 * longest) + 2, 0.0);
@@ -254,26 +256,81 @@ BeatGrid track_beats(const std::vector<float>& flux, const std::vector<Hit>& hit
         for (size_t t = 0; t + lag < n; ++t) sum += (flux[t] - mean) * (flux[t + lag] - mean);
         ac[lag] = sum / double(n - lag) / (spread * spread);
     }
-    size_t lag = 0;
-    double best = 0;
-    for (size_t l = shortest; l <= longest; ++l) {
-        if (ac[l] <= 0 || ac[l] < ac[l - 1] || ac[l] < ac[l + 1]) continue;
+    auto comb = [&](double lag) {
         double sum = 0, weight = 0;
-        for (size_t k = 1; k <= 4 && k * l + k < ac.size(); ++k) {
-            double most = ac[k * l];
-            for (size_t m = k * l - (k - 1); m <= k * l + (k - 1); ++m) most = std::max(most, ac[m]);
-            sum += most / double(k);
-            weight += 1.0 / double(k);
+        for (unsigned k = 1; k <= 4; ++k) {
+            const auto lo = int64_t(std::floor(k * lag - (k - 1))), hi = int64_t(std::ceil(k * lag + (k - 1)));
+            if (lo < 1 || hi + 1 >= int64_t(ac.size())) break;
+            double most = ac[size_t(lo)];
+            for (int64_t m = lo + 1; m <= hi; ++m) most = std::max(most, ac[size_t(m)]);
+            sum += most / k;
+            weight += 1.0 / k;
         }
-        double bpm_l = 60 * fps / double(l), octaves = std::log2(bpm_l / 120), prior = std::exp(-0.5 * octaves * octaves);
-        for (unsigned k = 2; k <= 256; k *= 2)
-            if (std::fabs(k * 60.0 * 44100 / frames / bpm_l - 1) < 0.02) { prior *= 1.3; break; }
-        double weighted = sum / weight * prior;
-        if (weighted > best) { best = weighted; lag = l; }
+        return weight ? sum / weight : 0.0;
+    };
+    // The flux (over its spread) at a frame, the highest within 20 ms of it (swing, a take's drift); and its
+    // average on a beat every `step` frames from `from`.
+    std::vector<double> near_peak(n);
+    for (size_t t = 0; t < n; ++t) {
+        float most = flux[t];
+        for (size_t i = t > 2 ? t - 2 : 0; i <= std::min(n - 1, t + 2); ++i) most = std::max(most, flux[i]);
+        near_peak[t] = (double(most) - mean) / spread;
     }
-    if (!lag || ac[lag] < 0.1) return grid;
-    double period = double(lag), bend = ac[lag - 1] - 2 * ac[lag] + ac[lag + 1];
-    if (bend < 0) period += 0.5 * (ac[lag - 1] - ac[lag + 1]) / bend;
+    auto on_grid = [&](double step, double from) {
+        double sum = 0;
+        unsigned count = 0;
+        for (double x = from; x < double(n); x += step) {
+            const int64_t c = std::llround(x);
+            if (c >= 0 && c < int64_t(n)) { sum += near_peak[size_t(c)]; ++count; }
+        }
+        return count ? sum / count : 0.0;
+    };
+
+    // The tempo, from candidates: each peak of the autocorrelation from 40 to 240 BPM, the beat twice and half as
+    // fast, and each tempo the sample is 2, 4 ... 256 beats long at (a loop cut to its bars, its exact tempo). Each
+    // is scored on its autocorrelation; its distance from 135 BPM in octaves; how high the flux stands on its beats,
+    // on its eighths and on its sixteenths at their best phase (a beat read twice too fast leaves the eighths between
+    // its beats empty, one read too slow finds beats there); and for a whole-bar length a little more, less where its
+    // beats counted from the sample's start miss the flux (a loop cut to its bars starts on a beat). The weights were
+    // fitted on 1739 Apple Loops of known tempo (drums, bass, keys, guitars, cut to their bars and cut off them):
+    // the beat and eighth terms lean toward the slower reading, the 135 BPM centre toward the faster one, and
+    // together they land on the tempo loops are labelled with. A peak is then refined between frames; none where
+    // the chosen tempo's autocorrelation is under 0.05 (no steady pulse).
+    struct Candidate { double period; size_t lag; double times; bool bars; };
+    std::vector<Candidate> candidates;
+    for (size_t l = shortest; l <= longest; ++l)
+        if (ac[l] > 0 && ac[l] >= ac[l - 1] && ac[l] >= ac[l + 1])
+            for (double times : {1.0, 0.5, 2.0}) candidates.push_back({l * times, l, times, false});
+    for (unsigned k = 2; k <= 256; k *= 2) {
+        const double whole = frames / double(hop) / k;
+        candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
+                                        [&](const Candidate& c) { return std::fabs(c.period / whole - 1) < 0.005; }),
+                         candidates.end());
+        candidates.push_back({whole, 0, 1, true});
+    }
+    const Candidate* chosen = nullptr;
+    double best = -1e300;
+    for (const auto& c : candidates) {
+        const double bpm_c = 60 * fps / c.period;
+        if (bpm_c < 40 || bpm_c > 240 || c.period < 2 || c.period + 2 >= double(ac.size())) continue;
+        double on = -1e300, phase = 0;
+        for (double from = 0; from < c.period; from += 0.5) {
+            const double g = on_grid(c.period, from);
+            if (g > on) { on = g; phase = from; }
+        }
+        const double octaves = std::log2(bpm_c / 135);
+        double score = 1.5 * comb(c.period) - 2 * octaves * octaves + 0.45 * on + 0.35 * on_grid(c.period, phase + c.period / 2)
+                     + 0.2 * (on_grid(c.period, phase + c.period / 4) + on_grid(c.period, phase + 3 * c.period / 4));
+        if (c.bars) score += 0.25 + 0.25 * (on_grid(c.period, 0) - on);
+        if (score > best) { best = score; chosen = &c; }
+    }
+    if (!chosen || comb(chosen->period) < 0.05) return grid;
+    double period = chosen->period;
+    if (!chosen->bars) {
+        const size_t lag = chosen->lag;
+        const double bend = ac[lag - 1] - 2 * ac[lag] + ac[lag + 1];
+        if (bend < 0) period = (lag + 0.5 * (ac[lag - 1] - ac[lag + 1]) / bend) * chosen->times;
+    }
 
     // The flux (over its spread) smoothed over a 32nd of a beat, and the best chain ending on each frame.
     const int64_t reach = int64_t(std::ceil(period / 8));
@@ -318,6 +375,10 @@ BeatGrid track_beats(const std::vector<float>& flux, const std::vector<Hit>& hit
     const double weak = beats.empty() ? 0 : 0.5 * std::sqrt(power / double(beats.size()));
     while (!beats.empty() && local[beats.front()] < weak) beats.erase(beats.begin());
     while (!beats.empty() && local[beats.back()] < weak) beats.pop_back();
+    if (beats.size() < 2 && chosen->bars) { // too few strong beats in a loop cut to its bars: a beat a period from its start
+        beats.clear();
+        for (double at_beat = 0; std::llround(at_beat) < int64_t(n); at_beat += period) beats.push_back(size_t(std::llround(at_beat)));
+    }
     if (beats.size() < 2) return grid;
 
     // Onto the hits; the rest between their neighbours that moved.
@@ -356,6 +417,7 @@ BeatGrid track_beats(const std::vector<float>& flux, const std::vector<Hit>& hit
         double loop = k * 60.0 * 44100 / frames;
         if (std::fabs(loop / bpm - 1) < 0.04) bpm = loop;
     }
+    if (chosen->bars) bpm = 60 * fps / period; // a loop cut to its bars keeps the tempo its length gives
     if (bpm < 30 || bpm > 300) return grid;
     grid.tempo = uint16_t(std::lround(bpm * 10));
     grid.at = std::move(at);
@@ -367,10 +429,7 @@ BeatGrid track_beats(const std::vector<float>& flux, const std::vector<Hit>& hit
     // kicks and snares alone did not tell it apart (about 4 loops in 10); the region's start says it.
     auto level = [&](double x) {
         int64_t c = std::llround(x);
-        if (c < 0 || c >= int64_t(n)) return std::nan("");
-        float most = flux[size_t(c)];
-        for (int64_t i = std::max<int64_t>(0, c - 2); i <= std::min<int64_t>(int64_t(n) - 1, c + 2); ++i) most = std::max(most, flux[size_t(i)]);
-        return (double(most) - mean) / spread;
+        return c < 0 || c >= int64_t(n) ? std::nan("") : near_peak[size_t(c)];
     };
     const double step = 60 * fps / bpm, bars = frames / (4 * step * hop);
     int64_t phase = 0;

@@ -4,6 +4,7 @@
 #include "melodee/model/keygroup_track.h"
 #include "melodee/model/fader.h"
 #include "melodee/model/pad_params.h"
+#include "melodee/model/scene_links.h"
 #include "melodee/model/scales.h"
 #include "melodee/engine/engine_info.h"
 #include "melodee/engine/midi_engine.h"
@@ -698,6 +699,29 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
         w.u8(n); w.text(scene.name); w.u16(scene.tempo); w.u8(scene.colour);
         w.end(at);
     }
+    { // sequence links (model/scene_links.h): the scene in hand, the tracks off, each track's pattern in each scene
+        at = w.begin("SEQL");
+        w.u8(1); // the section's version
+        w.u8(project.scene);
+        uint16_t off = 0;
+        unsigned listed = 0;
+        for (unsigned t = 0; t < track_count; ++t) {
+            const auto& track = project.tracks[t];
+            if (track.off) off = uint16_t(off | 1u << t);
+            for (auto v : track.in_scene) if (v) { ++listed; break; }
+        }
+        w.u16(off);
+        w.u8(uint8_t(listed));
+        for (unsigned t = 0; t < track_count; ++t) {
+            const auto& track = project.tracks[t];
+            bool any = false;
+            for (auto v : track.in_scene) any |= v != 0;
+            if (!any) continue;
+            w.u8(uint8_t(t));
+            for (auto v : track.in_scene) w.u8(v);
+        }
+        w.end(at);
+    }
     for (unsigned t = 0; t < track_count; ++t) { // a MIDI track (docs/MIDI_TRACKS.md): its port and channel are in TRAK's params
         if (project.tracks[t].engine != EngineKind::Midi) continue;
         at = w.begin("MIDT");
@@ -815,6 +839,7 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
     PrintTable prints;
     unsigned file_version = 0;
     bool keygroups_known = false; // KGVR: saved since keygroup tracks
+    bool links_known = false;     // SEQL: saved since sequence links
     std::array<std::bitset<pattern_count>, track_count> played_on; // KEPT: patterns whose punches may reach past their end
     if (data.size() < 8 || std::memcmp(data.data(), magic, 8)) return "not a Melodee project";
     auto project = std::make_unique<Project>();
@@ -1253,6 +1278,18 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
             scene.tempo = uint16_t(tempo ? std::clamp(tempo, 300u, 3000u) : 0);
             if (!r.done()) scene.colour = uint8_t(std::min(r.u8(), 16u)); // older files end here: none
             if (r.ok && n < pattern_count) project->scenes[n] = scene;
+        } else if (name == "SEQL") { // sequence links (model/scene_links.h); without it the scenes are columns (keep_columns)
+            if (r.u8() < 1) continue; // a later version would add after these
+            links_known = true;
+            project->scene = uint8_t(r.u8() % pattern_count);
+            unsigned off = r.u16(), listed = r.u8();
+            for (unsigned t = 0; t < track_count; ++t) project->tracks[t].off = (off >> t & 1) != 0;
+            for (unsigned k = 0; k < listed && r.ok; ++k) {
+                unsigned t = r.u8();
+                std::array<uint8_t, pattern_count> values {};
+                for (auto& v : values) { v = uint8_t(r.u8()); if (v != scene_off && v > pattern_count) v = 0; }
+                if (r.ok && t < track_count) project->tracks[t].in_scene = values;
+            }
         } else if (name == "PROG") { // the Prog layout's progression; without it none
             unsigned t = r.u8(), version = r.u8();
             Progression prog;
@@ -1549,6 +1586,8 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
         for (unsigned p = 0; p < pattern_count; ++p) if (played_on[t].test(p)) split_punches(patterns->at[t][p]);
     // From before keygroup tracks: each kit's instrument pad its own keygroup track (model/keygroup_track.h).
     if (!keygroups_known) migrate_instrument_pads(*project, *patterns);
+    // From before sequence links: each scene with notes, a name, tempo or colour plays its column, as it did.
+    if (!links_known) keep_columns(*project, *patterns);
     for (unsigned t = 0; t < track_count; ++t) // freeze plan F3: takes only on audio tracks' patterns
         if (project->tracks[t].engine != EngineKind::Audio) for (auto& p : patterns->at[t]) p.audio = AudioRegion {};
     target = *project;

@@ -85,7 +85,7 @@ public:
         cleared = DelayPool::block_floats;
         ++changed;
     }
-    // Resting (melodee-hdslave; optimization.md HOST-1). An effect that hears silence and holds nothing gives
+    // Resting. An effect that hears silence and holds nothing gives
     // silence, and nothing in it moves but its slow swings: its host need not run it (EngineHost::run_chain()).
     //
     // process_silent(): process() for a block its caller knows is silent going in. True when the effect came out of

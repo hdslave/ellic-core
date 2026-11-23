@@ -34,6 +34,7 @@
 #include "melodee/engine/take_recorder.h"
 #include "melodee/shell/chop.h"
 #include "melodee/shell/xpm_write.h"
+#include "melodee/shell/drum_rack.h"
 #include "melodee/engine/auto_probe.h"
 #include "melodee/engine/external_notes.h"
 #include "melodee/engine/release_fit.h"
@@ -73,6 +74,7 @@
 #include "melodee/shell/stream_holds.h"
 #include "melodee/engine/stream_pager.h"
 #include "melodee/shell/free_length.h"
+#include "melodee/shell/follow_tempo.h"
 #include "melodee/shell/project_kits.h"
 #include "melodee/shell/pad_gap.h"
 #include "melodee/shell/zone_shapes.h"
@@ -218,6 +220,101 @@ void layouts() {
     CHECK(pad_note(project, track, 5).key == 43);
     track.layout = PadLayout::Levels; track.last_note = 57;
     CHECK(pad_note(project, track, 9).key == 57 && level_velocity(0) < level_velocity(15) && level_velocity(15) == 127);
+}
+
+void drum_racks() {
+    // Ableton's Drum Rack presets (shell/drum_rack.h): their samples found in the libraries, each pad's values in
+    // the kit's terms, the pads by note, and the rack as a project of one kit track.
+    const AbletonLibraries move {"/data/CoreLibrary", "/data/UserData/UserLibrary"};
+    CHECK(ableton_sample_path("ableton:/packs/abl-core-library/Samples/Drums/Kick/Kick%20808%20Solid.wav", "/x", move) ==
+          "/data/CoreLibrary/Samples/Drums/Kick/Kick 808 Solid.wav");
+    CHECK(ableton_sample_path("ableton:/user-library/Recordings/Take%201.wav", "/x", move) == "/data/UserData/UserLibrary/Recordings/Take 1.wav");
+    CHECK(ableton_sample_path("ableton:/packs/another-pack/Samples/A.wav", "/x", move).empty());
+    CHECK(ableton_sample_path("ableton:/user-library/A.wav", "/x", AbletonLibraries {}).empty()); // no library named
+    CHECK(ableton_sample_path("file:///card/One%20Shot.wav", "/x", move) == "/card/One Shot.wav");
+    CHECK(ableton_sample_path("Samples/Clap.wav", "/kits", move) == "/kits/Samples/Clap.wav");
+    CHECK(ableton_sample_path("/card/Clap.wav", "/kits", move) == "/card/Clap.wav");
+    CHECK(ableton_sample_path("", "/kits", move).empty());
+    // Notes onto pads: 36 is A01, as the kit's notes run; past H16 or below 36, none.
+    CHECK(drum_rack_pad(36) == 0 && drum_rack_pad(51) == 15 && drum_rack_pad(52) == 16);
+    CHECK(drum_rack_pad(35) == -1 && drum_rack_pad(163) == 127 && drum_rack_pad(164) == -1);
+    // A pad's values in the kit's terms.
+    DrumRackPad kick;
+    kick.note = 36; kick.volume_db = -6; kick.pan = 0.5; kick.transpose = -2; kick.detune = 0.25;
+    kick.start = 0.25; kick.length = 0.5; kick.choke = 1; kick.velocity_to_volume = 0.5; kick.gate = true;
+    kick.filter = "Lowpass"; kick.cutoff_hz = 1000; kick.resonance = 0.3;
+    PadSound pad;
+    drum_rack_pad_sound(kick, 44100, pad);
+    CHECK(pad.start == 11025 && pad.end == 33075);
+    CHECK(pad.level == 69 && std::fabs(volume_db(pad.level) + 6.0f) < 0.2f && pad.pan == 25 && pad.pitch == -2 && pad.fine == 25);
+    CHECK(pad.group == 1 && pad.velocity_sense == 50 && pad.play == PadPlay::Gate);
+    CHECK(pad.filter == PadFilter::Lpf4 && pad.cutoff == 57 && pad.resonance == 30); // 1 kHz: 5.6 octaves over 20 Hz
+    DrumRackPad plain;
+    plain.note = 37; plain.volume_db = -9; plain.filter = "Lowpass"; plain.cutoff_hz = 21999.99;
+    PadSound whole;
+    drum_rack_pad_sound(plain, 0, whole);
+    CHECK(whole.start == 0 && whole.end == 0 && whole.level == 57 && whole.velocity_sense == 35 && whole.group == 0);
+    CHECK(whole.filter == PadFilter::Off && whole.play == PadPlay::OneShot);
+    plain.filter = "Lowpass 12dB"; plain.cutoff_hz = 3000;
+    drum_rack_pad_sound(plain, 0, whole);
+    CHECK(whole.filter == PadFilter::Lpf2);
+    plain.filter = "Highpass"; plain.cutoff_hz = 30; // its lowest: open
+    drum_rack_pad_sound(plain, 0, whole);
+    CHECK(whole.filter == PadFilter::Off);
+    plain.cutoff_hz = 200;
+    drum_rack_pad_sound(plain, 0, whole);
+    CHECK(whole.filter == PadFilter::Hpf4 && whole.cutoff == 33);
+    plain.filter = "Peak"; // no pad filter to go to
+    drum_rack_pad_sound(plain, 0, whole);
+    CHECK(whole.filter == PadFilter::Off);
+    plain.volume_db = -INFINITY; // a Gain of 0
+    drum_rack_pad_sound(plain, 0, whole);
+    CHECK(whole.level == 0);
+    plain.volume_db = 6;
+    drum_rack_pad_sound(plain, 0, whole);
+    CHECK(whole.level == 127);
+    // The rack as a kit: pads whose files are there, on their notes' pads, each file once; the rest left empty.
+    namespace fs = std::filesystem;
+    const auto folder = fs::temp_directory_path() / ("melodee-drum-rack-" + std::to_string(getpid()));
+    fs::create_directories(folder);
+    const auto kick_file = (folder / "Kick.wav").string(), snare_file = (folder / "Snare.wav").string();
+    std::ofstream(kick_file) << "RIFF";
+    std::ofstream(snare_file) << "RIFF";
+    DrumRack rack;
+    rack.name = "Test Kit";
+    kick.uri = kick.file = kick_file;
+    plain = DrumRackPad {}; plain.note = 37; plain.uri = plain.file = snare_file;
+    DrumRackPad again = plain; again.note = 52; // the same file on A17's note: B01
+    DrumRackPad none; none.note = 38;           // no sample
+    DrumRackPad other; other.note = 39; other.uri = "ableton:/packs/another-pack/Samples/A.wav";
+    DrumRackPad gone; gone.note = 40; gone.uri = gone.file = (folder / "Gone.wav").string();
+    DrumRackPad low; low.note = 20; low.uri = low.file = kick_file; // below the kit
+    rack.pads = {kick, plain, again, none, other, gone, low};
+    auto project = std::make_unique<Project>();
+    unsigned missing = 0, asked = 0;
+    auto frames_of = [&](const std::string&) { ++asked; return uint32_t(88200); };
+    CHECK(import_drum_rack(rack, *project, missing, frames_of).empty());
+    const auto& track = project->tracks[0];
+    CHECK(track.engine == EngineKind::Sampler && std::string(track.name) == "Test Kit" && std::string(project->name) == "Test Kit");
+    CHECK(missing == 2 && asked == 1); // the other pack's and the one gone; only the kick plays part of its sample
+    CHECK(track.pads[0].used() && track.pads[1].used() && track.pads[16].used());
+    CHECK(!track.pads[2].used() && !track.pads[3].used() && !track.pads[4].used());
+    CHECK(track.pads[1].sample == track.pads[16].sample && track.pads[0].sample != track.pads[1].sample);
+    CHECK(std::string(project->samples[track.pads[0].sample].path) == kick_file && std::string(project->samples[track.pads[1].sample].name) == "Snare");
+    CHECK(track.pads[0].start == 22050 && track.pads[0].end == 66150 && track.pads[0].group == 1);
+    DrumRack empty;
+    empty.pads = {none, other};
+    CHECK(import_drum_rack(empty, *project, missing, frames_of) == "NO SAMPLES");
+    fs::remove_all(folder);
+    // Which files are presets.
+    const auto preset = (folder.string() + ".json"), synth = (folder.string() + "-synth.json");
+    std::ofstream(preset) << R"({"$schema": "http://tech.ableton.com/schema/song/1.8.3/devicePreset.json", "kind": "instrumentRack",)"
+                             R"( "chains": [{"devices": [{"kind": "drumRack", "chains": []}]}]})";
+    std::ofstream(synth) << R"({"$schema": "http://tech.ableton.com/schema/song/1.8.3/devicePreset.json", "kind": "instrumentRack",)"
+                            R"( "chains": [{"devices": [{"kind": "drift"}]}]})";
+    CHECK(is_drum_rack_preset(preset) && !is_drum_rack_preset(synth) && !is_drum_rack_preset(kick_file));
+    fs::remove(preset);
+    fs::remove(synth);
 }
 
 // A solo counts only on a track that plays something (Track::used(), as the pad lights have it): an empty track left
@@ -366,6 +463,142 @@ void sequenced_legato() {
         CHECK(down >= 0 && tied == down + 1 && on == tied + 1 && up > on);
     }
 }
+// Issue 27, Settings' Mute Notes: a muted track or kit pad starts no new notes, and what it plays rings on to its
+// own end (a MIDI track's note gets its Note Off when it was due, not at once); back to Audio, what still sounds goes.
+void note_mutes() {
+    using K = MidiOutEvent::Kind;
+    // A MIDI track: C4 on step 1 held six steps, D4 on step 9; muted on step 3.
+    auto midi = [](bool notes) {
+        auto project = std::make_unique<Project>();
+        auto bank = std::make_unique<PatternBank>();
+        load_sound(project->tracks[0], EngineKind::Midi, 0);
+        project->tracks[0].params[midi_track::Port] = midi_track::UsbC; project->tracks[0].params[midi_track::Channel] = 1;
+        project->tempo = 1200;
+        put(bank->at[0][0], 0, 60, 100, 6); put(bank->at[0][0], 8, 62, 100, 4);
+        EngineHost host;
+        host.load(*project, *bank);
+        host.set_audio_format(44100, 384);
+        host.send({Command::Type::MuteMode, 0, 0, 0, int16_t(notes)});
+        host.send({Command::Type::Play});
+        std::vector<int32_t> out(256);
+        std::vector<MidiOutEvent> events;
+        for (unsigned n = 0; n < 500; ++n) {
+            if (n == 90) host.send({Command::Type::Mute, 0, 0, 0, 1});
+            if (n == 200) host.send({Command::Type::NoteOn, 0, 0, 70, 100}); // played by hand on the muted track
+            host.render(out.data(), 128, 1);
+            MidiOutEvent e;
+            while (host.take_midi(e)) events.push_back(e);
+        }
+        return events;
+    };
+    auto find = [](const std::vector<MidiOutEvent>& events, K kind, uint8_t key) {
+        int count = 0; uint64_t at = 0;
+        for (auto& e : events) if (e.kind == kind && e.a == key) { if (!count) at = e.frame; ++count; }
+        return std::pair<int, uint64_t> {count, at};
+    };
+    for (bool notes : {false, true}) {
+        auto events = midi(notes);
+        auto on60 = find(events, K::NoteOn, 60), off60 = find(events, K::NoteOff, 60);
+        CHECK(on60.first == 1 && off60.first == 1);
+        CHECK(find(events, K::NoteOn, 62).first == 0 && find(events, K::NoteOn, 70).first == 0); // nothing new either way
+        if (notes) CHECK(off60.second > on60.second + 25000); // its own end, six steps on
+        else CHECK(off60.second < on60.second + 14000);       // cut at the mute
+    }
+
+    // A kit: pad 1 on step 1 held six steps and again on step 9; the track or pad 1 muted on step 3. `back`: Audio again
+    // on step 4.
+    enum class What { Nothing, Track, Pad };
+    auto kit = [](bool notes, What what, bool back = false) {
+        auto project = std::make_unique<Project>();
+        auto bank = std::make_unique<PatternBank>();
+        tone_kit(*project, 0);
+        project->tempo = 1200;
+        put(bank->at[0][0], 0, uint8_t(sampler_first_note), 100, 6); put(bank->at[0][0], 8, uint8_t(sampler_first_note), 100, 4);
+        EngineHost host;
+        host.load(*project, *bank);
+        auto tone = tone_sample();
+        CHECK(host.offer_sample(0, &tone));
+        host.send({Command::Type::MuteMode, 0, 0, 0, int16_t(notes)});
+        host.send({Command::Type::Play});
+        std::vector<int32_t> out(256);
+        std::vector<float> left;
+        for (unsigned n = 0; n < 500; ++n) {
+            if (n == 90 && what == What::Track) host.send({Command::Type::Mute, 0, 0, 0, 1});
+            if (n == 90 && what == What::Pad) host.send({Command::Type::PadMute, 0, 0, 0, 1});
+            if (n == 150 && back) host.send({Command::Type::MuteMode, 0, 0, 0, 0});
+            host.render(out.data(), 128, 1);
+            for (unsigned f = 0; f < 128; ++f) left.push_back(out[2 * f] / 2147483648.0f);
+        }
+        return left;
+    };
+    auto open = kit(true, What::Nothing);
+    CHECK(peak_of(open, 14000, 28000) > 0.05f && peak_of(open, 48000, 56000) > 0.05f); // the two notes, as heard unmuted
+    for (auto what : {What::Track, What::Pad}) {
+        auto cut = kit(false, what), rings = kit(true, what), back = kit(true, what, true);
+        CHECK(peak_of(cut, 14000, 28000) < 1e-4f);                                       // Audio: silent at once
+        CHECK(peak_of(rings, 14000, 28000) > 0.05f && peak_of(rings, 48000, 60000) < 1e-4f); // Notes: rings on, nothing new
+        CHECK(peak_of(back, 21000, 28000) < 1e-4f);                                      // Audio again: it goes
+    }
+}
+
+// Issue 32: a kit pad's mute recorded as a lane: it mutes and unmutes the pad where its points are, the pattern's
+// start and Stop put the mute back as set (Mute + pad), and pad gaps and lane_own() know it as a lane on a pad.
+void pad_mute_lane() {
+    CHECK(is_pad_lane(motion_pad_mute) && is_pad_lane(motion_pad_param(PadParam::Level)) && !is_pad_lane(motion_level));
+    CHECK(pad_param_of(motion_pad_mute) < 0 && !is_mix_lane(motion_pad_mute));
+    auto run = [](unsigned blocks, bool stop_and_hit) {
+        auto project = std::make_unique<Project>();
+        auto bank = std::make_unique<PatternBank>();
+        tone_kit(*project, 0);
+        project->tempo = 1200;
+        auto& p = bank->at[0][0];
+        for (unsigned step : {0u, 4u, 8u, 12u}) put(p, step, uint8_t(sampler_first_note), 100, 2);
+        p.write_motion(point(4, motion_pad_mute, 1)); p.write_motion(point(8, motion_pad_mute, 0)); p.write_motion(point(12, motion_pad_mute, 1));
+        EngineHost host;
+        host.load(*project, *bank);
+        auto tone = tone_sample();
+        CHECK(host.offer_sample(0, &tone));
+        host.send({Command::Type::Play});
+        std::vector<int32_t> out(256);
+        std::vector<float> left;
+        auto render = [&](unsigned n) {
+            for (unsigned b = 0; b < n; ++b) {
+                host.render(out.data(), 128, 1);
+                for (unsigned f = 0; f < 128; ++f) left.push_back(out[2 * f] / 2147483648.0f);
+            }
+        };
+        render(blocks);
+        if (stop_and_hit) {
+            host.send({Command::Type::Stop});
+            render(20);
+            left.clear();
+            host.send({Command::Type::NoteOn, 0, 0, uint16_t(sampler_first_note), 100}); // the pad as set: not muted
+            render(40);
+        }
+        return left;
+    };
+    auto pass = run(800, false); // two passes and a bit (88200 frames a pass)
+    CHECK(peak_of(pass, 2000, 20000) > 0.05f);  // step 1: heard
+    CHECK(peak_of(pass, 24000, 43000) < 1e-4f); // steps 5-8: muted by the lane, its note too
+    CHECK(peak_of(pass, 45500, 52000) > 0.05f); // step 9: unmuted
+    CHECK(peak_of(pass, 68000, 87500) < 1e-4f); // steps 13-16: muted again
+    CHECK(peak_of(pass, 89500, 96000) > 0.05f); // the next pass starts as set: heard
+    auto stopped = run(560, true); // stopped on step 13, muted by the lane
+    CHECK(peak_of(stopped) > 0.05f);
+
+    // A pad gap closed under the lane moves it with its pad (its pad gone: the lane too); lane_own() reads the pad's
+    // mute as set.
+    Project project;
+    tone_kit(project, 0);
+    project.tracks[0].pads[1].sample = no_sample; // A02 empty: A03 and A04 move down one
+    auto patterns = std::make_unique<std::array<Pattern, pattern_count>>();
+    (*patterns)[0].write_motion(point(0, motion_pad_mute, 1, 2)); (*patterns)[0].write_motion(point(2, motion_pad_mute, 1, 1));
+    close_pad_gap(project.tracks[0], *patterns, 1);
+    CHECK((*patterns)[0].motion.size() == 1 && (*patterns)[0].motion[0].pad == 1 && (*patterns)[0].motion[0].param == motion_pad_mute);
+    project.tracks[0].set_pad_muted(2, true);
+    CHECK(lane_own(project, 0, motion_pad_mute, 2) == 1 && lane_own(project, 0, motion_pad_mute, 1) == 0);
+}
+
 void motion() {
     // The store (a pattern's own since roadmap P1): a second write at the same place replaces, clear drops one lane,
     // and it fills at the limit.
@@ -1619,12 +1852,15 @@ void beat_grid() {
     auto sixteenths = chop(ChopMode::Beats, 1, loop.sample.frames, loop.hits, loop.count, 1200, &loop.grid);
     CHECK(sixteenths.count == 32);
     for (unsigned n = 1; n < sixteenths.count; ++n) CHECK(near_grid(sixteenths.start[n], n * beat / 4));
-    // Past 64 slices the rest are left out and the chop says so; 4 bars of 1/16 is 64 exactly, nothing left out.
+    // Past 128 slices the rest are left out and the chop says so; 8 bars of 1/16 is 128 exactly, nothing left out.
     {
         std::array<Hit, max_hits> none {};
         bool capped = false;
+        CHECK(max_slices == 128);
         auto full = chop(ChopMode::Beats, 1, 0, 0, 44100 * 20, none, 0, 1200, nullptr, &capped); // 160 16ths at 120 BPM
         CHECK(capped && full.count == max_slices);
+        auto most = chop(ChopMode::Beats, 1, 0, 0, 44100 * 16, none, 0, 1200, nullptr, &capped);
+        CHECK(!capped && most.count == 128);
         auto exact = chop(ChopMode::Beats, 1, 0, 0, 44100 * 8, none, 0, 1200, nullptr, &capped);
         CHECK(!capped && exact.count == 64);
         CHECK(chop(ChopMode::Beats, 4, 0, 0, 44100 * 8, none, 0, 1200, nullptr, &capped).count == 16 && !capped);
@@ -1667,10 +1903,10 @@ void beat_grid() {
         HandCuts between; between.pin(66000); // well between two lines: both stay
         auto both = with_hand(quarters, between, frames);
         CHECK(both.count == 5 && has(both, 44100) && has(both, 66000) && has(both, 88200));
-        bool full = false; // 64 regions and a hand cut between two of them: one too many, the hand cut kept
+        bool full = false; // 128 regions and a hand cut between two of them: one too many, the hand cut kept
         HandCuts early;
         early.pin(1000);
-        auto most = with_hand(chop(ChopMode::Regions, 64, 0, 0, frames, none, 0, 1200), early, frames, &full);
+        auto most = with_hand(chop(ChopMode::Regions, int(max_slices), 0, 0, 2 * frames, none, 0, 1200), early, 2 * frames, &full);
         CHECK(full && most.count == max_slices && most.start[1] == 1000);
         HandCuts other = hand;
         CHECK(other.same(hand) && !other.same(near));
@@ -1756,6 +1992,87 @@ void beat_grid() {
     add_kick(wave, 0.1);
     auto one = analysed(wave);
     CHECK(!one.grid.found() && one.grid.at.empty());
+}
+
+// A sample's tempo (engine/onsets.cpp) on the loops it read wrong against 1739 Apple Loops of known tempo: bass and
+// guitar lines read at half their tempo, or a dotted eighth taken for the beat; and the tempo Follow plays a region
+// at (shell/follow_tempo.h).
+void loop_tempos() {
+    auto tempo = [](const std::vector<float>& wave) {
+        std::array<Hit, max_hits> hits {};
+        BeatGrid grid;
+        find_hits_in(wave, hits, grid);
+        return grid.found() ? grid.tempo / 10.0 : 0.0;
+    };
+    // A plucked note (three harmonics, a 4 ms attack) and a held chord (a 30 ms attack).
+    auto pluck = [](std::vector<float>& w, double at, double hz, double seconds, double level) {
+        for (uint32_t n = uint32_t(at * 44100), end = std::min<uint32_t>(uint32_t(w.size()), n + uint32_t(seconds * 44100)); n < end; ++n) {
+            double u = (n - at * 44100) / 44100, shape = std::min(1.0, u / 0.004) * std::exp(-u / 0.25) * std::min(1.0, (seconds - u) / 0.01);
+            w[n] += float(level * shape * (std::sin(2 * M_PI * hz * u) + 0.4 * std::sin(4 * M_PI * hz * u) + 0.2 * std::sin(6 * M_PI * hz * u)));
+        }
+    };
+    auto chord = [](std::vector<float>& w, double at, std::initializer_list<double> hz, double seconds, double level) {
+        for (uint32_t n = uint32_t(at * 44100), end = std::min<uint32_t>(uint32_t(w.size()), n + uint32_t(seconds * 44100)); n < end; ++n) {
+            double u = (n - at * 44100) / 44100, sum = 0;
+            for (double f : hz) sum += std::sin(2 * M_PI * f * u);
+            w[n] += float(level * std::min(1.0, u / 0.03) * std::min(1.0, (seconds - u) / 0.05) * sum / double(hz.size()));
+        }
+    };
+
+    // Funk bass on 3 + 3 + 2 sixteenths twice a bar, 4 bars at 128 BPM: 128 exactly (read as 64 before), and cut
+    // off its bars (from a third of a beat in, 11.3 beats long) within 1%.
+    {
+        const double beat = 60 / 128.0;
+        std::vector<float> wave(size_t(std::lround(16 * beat * 44100)), 0.0f);
+        const double roots[] = {55, 55, 82.4, 73.4};
+        for (unsigned bar = 0; bar < 4; ++bar)
+            for (double s : {0.0, 3.0, 6.0, 8.0, 11.0, 14.0}) pluck(wave, (bar * 16 + s) / 4 * beat, roots[bar], 0.18, 0.5);
+        CHECK(tempo(wave) == 128.0);
+        std::vector<float> cut(wave.begin() + std::lround(0.37 * beat * 44100), wave.begin() + std::lround(11.7 * beat * 44100));
+        CHECK(std::fabs(tempo(cut) / 128 - 1) < 0.01);
+    }
+    // A bass line with long notes on 1 and 3 and short ones on the ands of 2 and 4, 2 bars at 120 and at 116 BPM:
+    // its own tempo, not half (60 and 58 before).
+    for (double bpm : {120.0, 116.0}) {
+        const double beat = 60 / bpm;
+        std::vector<float> wave(size_t(std::lround(8 * beat * 44100)), 0.0f);
+        for (unsigned bar = 0; bar < 2; ++bar) {
+            const double at = bar * 4 * beat;
+            pluck(wave, at, 55, 1.4 * beat, 0.6);
+            pluck(wave, at + 1.5 * beat, 65.4, 0.4 * beat, 0.5);
+            pluck(wave, at + 2 * beat, 73.4, 1.9 * beat, 0.6);
+            pluck(wave, at + 3.5 * beat, 82.4, 0.4 * beat, 0.4);
+        }
+        CHECK(tempo(wave) == bpm);
+    }
+    // Notes on sixteenths 1, 4, 7, 11 and 14 of each bar over a held chord, 4 bars at 115 BPM: 115, not the
+    // dotted eighth's pulse (158 before).
+    {
+        const double beat = 60 / 115.0;
+        std::vector<float> wave(size_t(std::lround(16 * beat * 44100)), 0.0f);
+        for (unsigned bar = 0; bar < 4; ++bar) {
+            for (double s : {0.0, 3.0, 6.0, 10.0, 13.0}) pluck(wave, (bar * 16 + s) / 4 * beat, 110 * (1 + (int(s) % 3) * 0.25), 0.15, 0.4);
+            chord(wave, bar * 4 * beat, {220, 277, 330}, 3.8 * beat, 0.08);
+        }
+        CHECK(tempo(wave) == 115.0);
+    }
+
+    // Follow's tempo for a region (tenths of a BPM). Found: in the octave nearest the project's tempo, exact at
+    // whole bars of the region. 2 bars at 70 BPM read as 140: 70 in a 90 BPM project, 140 in a 130 BPM one.
+    const auto bars_at = [](double bars, double bpm) { return uint32_t(std::lround(bars * 4 * 60 * 44100 / bpm)); };
+    CHECK(follow_tempo(bars_at(2, 70), 1400, 900) == 700 && follow_tempo(bars_at(2, 70), 1400, 1300) == 1400);
+    // Found up to 4% off 4 bars (the region a few frames short of them, too): exact. 3 bars at 90 BPM: 90 (not 4
+    // bars' 120), exact within 1.5%, else as found.
+    CHECK(follow_tempo(bars_at(4, 128) - 300, 1279, 1200) == 1281);
+    CHECK(follow_tempo(bars_at(4, 128), 1268, 1200) == 1280 && follow_tempo(bars_at(4, 128), 1240, 1200) == 1280);
+    CHECK(follow_tempo(bars_at(3, 90), 902, 1200) == 900 && follow_tempo(bars_at(3, 90), 930, 1200) == 930);
+    // Not whole bars (2.6 bars at 100 BPM) or 5% off them: the found tempo as it is; one and two beats are whole.
+    CHECK(follow_tempo(bars_at(2.6, 100), 1000, 1200) == 1000 && follow_tempo(bars_at(4, 100), 1050, 1200) == 1050);
+    CHECK(follow_tempo(bars_at(0.25, 100), 990, 1200) == 1000 && follow_tempo(bars_at(0.5, 100), 1010, 1200) == 1000);
+    // None found: the whole number of bars nearest the project's tempo between 70 and 180 BPM, as before (4 s is 2
+    // bars at 120, or 1 at 60, which is out); a hit under 0.1 s keeps its speed.
+    CHECK(follow_tempo(44100 * 4, 0, 900) == 1200 && follow_tempo(44100 * 4, 0, 1700) == 1200);
+    CHECK(follow_tempo(bars_at(2, 70), 0, 900) == 700 && follow_tempo(4000, 1200, 1200) == 0);
 }
 
 
@@ -4906,7 +5223,7 @@ void sampler_zones() {
         SamplerEngine::held_taken = 0;
         const auto plain = render(true);
         CHECK(SamplerEngine::plain_taken > 200);
-        CHECK(SamplerEngine::held_taken > 50); // a zone holding its sustain: the run without the tests (melodee-hdslave)
+        CHECK(SamplerEngine::held_taken > 50); // a zone holding its sustain: the run without the tests
         {
             SamplerEngine::held_runs = false;
             const auto unheld = render(true);
@@ -5291,6 +5608,19 @@ void note_pitches() {
     CHECK(ref.instrument());
     std::strcpy(ref.path, "/media/card/Expansions/Kits/Kit.XTY#5");
     CHECK(ref.instrument());
+    // A '#' in a file's own name or its folder's is no pad or preset: the file is what its extension says.
+    std::strcpy(ref.path, "/media/card/Strings/Strings C#.sfz");
+    CHECK(ref.instrument());
+    std::strcpy(ref.path, "/media/card/Leads/Lead F#.dspreset");
+    CHECK(ref.instrument());
+    std::strcpy(ref.path, "/media/card/C# Kits/Kit.xpm#4");
+    CHECK(ref.instrument());
+    std::strcpy(ref.path, "/media/card/Piano.sf2#7");
+    CHECK(ref.instrument());
+    std::strcpy(ref.path, "/content/Samples/Phrases/KeysPh-Kalim1 G#m90 MP.WAV");
+    CHECK(!ref.instrument());
+    std::strcpy(ref.path, "/media/card/Kits/Kit.sfz#2"); // an SFZ has no pads
+    CHECK(!ref.instrument());
     Track kit; kit.engine = EngineKind::Sampler;
     CHECK(note_key(kit, 20) == -1 && note_key(kit, 20, true) == 20 && note_key(kit, 127, true) == 127 && note_key(kit, 128, true) == -1);
     // 16 Levels: the keyboard plays the 16 Levels pad, a single sample as well as an instrument (key 60 its root)
@@ -5874,11 +6204,50 @@ void chop_slices_keep_pad() {
     parent.filter = PadFilter::Lpf4; parent.cutoff = 40; parent.decay = 30;
     parent.link = 2; parent.loop = true; parent.loop_lock = false; parent.loop_start = 5000;
     parent.layers[0].sample = 7; parent.low_velocity = 40;
-    PadSound one = slice_sound(parent, 20000, 30000);
+    // Warp's Seq by # Beats: 8 beats over the parent's 89000 frames is 237.8 BPM, the slice's own tempo.
+    CHECK(region_frames(parent, 0) == 89000 && region_frames(parent, 50000) == 49000);
+    PadSound one = slice_sound(parent, 20000, 30000, region_frames(parent, 0));
     CHECK(one.sample == 3 && one.start == 20000 && one.end == 30000);
-    CHECK(one.pitch == -5 && one.fine == 20 && one.warp == warp_seq && one.own_tempo == 924 && one.group == 4);
+    CHECK(one.pitch == -5 && one.fine == 20 && one.warp == warp_seq && one.own_tempo == 2378 && one.group == 4);
     CHECK(one.play == PadPlay::Gate && one.mono && one.level == 80 && one.pan == -12 && one.filter == PadFilter::Lpf4 && one.cutoff == 40 && one.decay == 30);
     CHECK(one.loop && one.loop_point() == 20000 && one.link == 0 && one.beats == 0 && !one.layered() && one.plain_layers());
+    CHECK(slice_sound(parent, 20000, 30000, 0).own_tempo == 924); // the region unknown: the tempo it had
+    PadSound by_tempo = parent; by_tempo.beats = 0;
+    CHECK(slice_sound(by_tempo, 20000, 30000, 89000).own_tempo == 924);
+    PadSound longer = parent; longer.warp = 150;
+    CHECK(slice_sound(longer, 20000, 30000, 89000).own_tempo == 924 && slice_sound(longer, 20000, 30000, 89000).warp == 150);
+    PadSound whole = parent; whole.end = 0; // to the sample's end
+    CHECK(region_frames(whole, 89000) == 88000 && beats_tempo(2, 44100) == 1200);
+    // Chop's audition: the pad's speed and pitch alone.
+    const PadSound heard = slice_heard(parent, 20000, 30000, 89000);
+    CHECK(heard.sample == 3 && heard.start == 20000 && heard.end == 30000 && heard.pitch == -5 && heard.fine == 20);
+    CHECK(heard.warp == warp_seq && heard.own_tempo == 2378 && heard.beats == 0);
+    CHECK(heard.play == PadPlay::OneShot && !heard.loop && heard.group == 0 && heard.filter == PadFilter::Off && heard.level == 100 && heard.pan == 0);
+}
+
+// Chop's audition with a kit pad plays at that pad's speed: Warp 200 % twice as long; with no pad, or a pad that
+// holds another sample, as the file is.
+void chop_audition_pad_speed() {
+    dsp::device_rate.store(44100.0f);
+    SampleData data;
+    data.frames = 44100; data.left.assign(44100, 0.5f); data.right.assign(44100, 0.5f);
+    SamplerEngine::Table table {};
+    table[2] = &data;
+    auto blocks = [&](int pad, uint16_t holds) {
+        SamplerEngine engine;
+        engine.set_samples(&table);
+        PadSound p; p.sample = holds; p.warp = 200;
+        engine.set_pad(4, p);
+        engine.audition(2, 0, 4410, 100, pad);
+        std::vector<float> l(128), r(128);
+        unsigned n = 0;
+        while (engine.sounding() && n < 400) { engine.render_stereo(l.data(), r.data(), 128); ++n; }
+        return n;
+    };
+    const unsigned plain = blocks(-1, 2), warped = blocks(4, 2), other = blocks(4, 3);
+    CHECK(plain > 30 && plain < 45);
+    CHECK(warped > plain * 18 / 10 && warped < plain * 22 / 10);
+    CHECK(other == plain);
 }
 
 
@@ -6858,7 +7227,7 @@ struct LatePlugin final : PluginRunner {
     unsigned latency() const override { return late; }
 };
 
-// melodee-hdslave (optimization.md HOST-1): a chain that hears nothing and holds nothing rests, and what comes out of
+// A chain that hears nothing and holds nothing rests, and what comes out of
 // the engine is the same to the last bit as when every chain is run in every block. Every kind of effect in turn, a
 // kind a chain on sixteen kits and four buses: a second of sound, a silence long enough for chains to rest, then
 // the sound that wakes them.
@@ -8652,6 +9021,10 @@ void slice_hit_notes() {
     CHECK(note_slice(pad_note(int(key), 0, -1, 5)) == 5 && (pad_note(int(key), 0, -1, 5) & 0xffff) == key);
     CHECK(note_slice(pad_note(int(key), -3, 40, 0)) == 0 && note_slice(int(key)) == -1);
     CHECK(note_slice(int(int16_t(pad_note(int(key), -12)))) == -1); // a pad's key and semitones in 16 bits, sign and all
+    // The last of 128 slices over the top cutoff and the lowest semitones: each part reads back, the note stays positive.
+    const int last = pad_note(int(key), -12, 100, int(max_slices) - 1);
+    CHECK(last > 0 && note_slice(last) == int(max_slices) - 1 && ((last >> 16) & 0x7f) == 101 && int8_t(last >> 8) == -12);
+    CHECK(((pad_note(int(key), 0, 127, -1) >> 16) & 0x7f) == 101 && note_slice(pad_note(int(key), 0, 127, -1)) == -1);
 
     // The file: SLCE, by place in EVNT; a file without it plays each note's pad region.
     auto project = std::make_unique<Project>();
@@ -8711,7 +9084,7 @@ void slice_hit_notes() {
     };
     auto loudest = [](const std::vector<float>& v) { float m = 0; for (float x : v) m = std::max(m, std::fabs(x)); return m; };
     const auto hit = render(whole, pad_note(key, 0, -1, 1));
-    CHECK(loudest(hit) > 0.05f && hit == render(slice_sound(whole, 10000, 20000), key));
+    CHECK(loudest(hit) > 0.05f && hit == render(slice_sound(whole, 10000, 20000, 0), key));
     CHECK(hit != render(whole, key));
     CHECK(loudest(render(whole, pad_note(key, 0, -1, 5))) == 0.0f);
     CHECK(render(whole, 0, 1) == hit);
@@ -8723,7 +9096,7 @@ void slice_hit_notes() {
     project->chops.edit(7).slices = chop;
     project->chops.edit(7).to = 44100;
     auto laid_project = std::make_unique<Project>(*project);
-    laid_project->tracks[2].pads[5] = slice_sound(whole, 10000, 20000);
+    laid_project->tracks[2].pads[5] = slice_sound(whole, 10000, 20000, 0);
     auto beat = std::make_unique<PatternBank>(), laid_beat = std::make_unique<PatternBank>();
     beat->at[2][0].add([&] { Event e = a; e.slice = 2; return e; }());     // slice 2 (index 1)
     laid_beat->at[2][0].add([&] { Event e = a; e.slice = 0; e.key = uint8_t(key + 1); return e; }()); // A06, that slice
@@ -8897,6 +9270,7 @@ int main() {
     levels_cutoff_kept();
     pad_link_chains();
     chop_slices_keep_pad();
+    chop_audition_pad_speed();
     instrument_p3();
     instrument_formats_p3();
     plugins();
@@ -8939,6 +9313,7 @@ int main() {
     onset_hits();
     sample_roots();
     beat_grid();
+    loop_tempos();
     hits_on_time();
     punches();
     kept_punches();
@@ -8950,9 +9325,12 @@ int main() {
     arrange();
     audio_takes();
     motion();
+    note_mutes();
+    pad_mute_lane();
     layouts();
     host_sequencer();
     solo_empty_track();
+    drum_racks();
     sequenced_legato();
     midi_multi_channel();
     audio_quality();

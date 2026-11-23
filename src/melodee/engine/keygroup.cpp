@@ -241,7 +241,7 @@ uint8_t mpc_level(double value) {
 
 int8_t mpc_pan(double value) { return int8_t(std::clamp(std::lround((value - 0.5) * 100), -50l, 50l)); }
 
-// Past Melodee's 64 slices, a slice no chop has: the hit is silent, as one past its chop's end.
+// Slice 1-128, as many as a chop holds; a slice past the chop's end is silent.
 uint8_t mpc_slice_hit(bool active, double value, bool relative) {
     if (!active || relative || !(value >= 0)) return 0;
     return uint8_t(std::min<long>(std::lround(std::min(value, 1.0) * 127), long(max_slices)) + 1);

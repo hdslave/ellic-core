@@ -366,7 +366,7 @@ void Effect::frames_of(float* left, float* right, unsigned frames, const float* 
     const bool comp_short = Kind == K::Compressor && a > -119.0f;
     const float comp_quiet = comp_short ? db(a) * 0.99f : 0.0f;
     // The echoes' SYNC: its note value and the tempo stand for the whole call, so what sync_back() looked up for
-    // every frame is looked up once; each frame keeps only its glide (melodee-hdslave; optimization.md FX-4).
+    // every frame is looked up once; each frame keeps only its glide.
     const bool syncs = Kind == K::Echo || Kind == K::TapeEcho || Kind == K::PingPong;
     const float sync_limit = float(DelayPool::half - 64);
     double sync_quarters = 0;

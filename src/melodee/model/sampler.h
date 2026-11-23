@@ -180,10 +180,23 @@ constexpr uint32_t full_colour(uint32_t rgb) {
     return up(r) << 16 | up(g) << 8 | up(b);
 }
 
+// The length of `pad`'s region in 44.1 kHz frames, `frames` the sample's (0 unknown): an end of 0, or past the
+// sample's end, is the sample's end. 0 when that is not known.
+inline uint32_t region_frames(const PadSound& pad, uint32_t frames) {
+    const uint32_t end = pad.end && (!frames || pad.end <= frames) ? pad.end : frames;
+    return end > pad.start ? end - pad.start : 0;
+}
+// The tempo (tenths of a BPM) `beats` beats over `region` frames (44.1 kHz) were played at; 0 unknown.
+inline uint16_t beats_tempo(unsigned beats, uint32_t region) {
+    if (!beats || !region) return 0;
+    return uint16_t(std::clamp<long long>(std::llround(beats * 60.0 * 44100.0 * 10.0 / region), 1, 65535));
+}
+
 // Chop's slice [start, end) of `parent`'s sample as a pad of its own: the parent pad's values (tune, Warp and the
 // tempo it was played at, mute group, play, envelope, filter, level, pan), with what belongs to the parent's region
-// alone left out (its layers, Pad Link, a loop point inside it, # Beats).
-inline PadSound slice_sound(const PadSound& parent, uint32_t start, uint32_t end) {
+// alone left out (its layers, Pad Link, a loop point inside it). Warp's Seq by # Beats counts the parent's region
+// (`region` frames, 0 unknown): the slice keeps the tempo that gives as its own, so it plays at the parent's speed.
+inline PadSound slice_sound(const PadSound& parent, uint32_t start, uint32_t end, uint32_t region) {
     PadSound one = parent;
     one.start = start; one.end = end;
     one.layers = {};
@@ -191,7 +204,20 @@ inline PadSound slice_sound(const PadSound& parent, uint32_t start, uint32_t end
     one.layer_play = LayerPlay::Velocity;
     one.link = 0;
     one.loop_lock = true; one.loop_start = 0;
+    if (parent.warp == warp_seq && parent.beats) {
+        if (const uint16_t tempo = beats_tempo(parent.beats, region)) one.own_tempo = tempo;
+    }
     one.beats = 0;
+    return one;
+}
+// Chop's audition of the slice [start, end) at `parent`'s speed and pitch (Warp, the tempo it was played at, Semi
+// and Fine), as the slice's pad plays it; nothing else of the pad's (it stays a plain one shot).
+inline PadSound slice_heard(const PadSound& parent, uint32_t start, uint32_t end, uint32_t region) {
+    const PadSound full = slice_sound(parent, start, end, region);
+    PadSound one;
+    one.sample = full.sample; one.start = start; one.end = end;
+    one.pitch = full.pitch; one.fine = full.fine;
+    one.warp = full.warp; one.own_tempo = full.own_tempo;
     return one;
 }
 
@@ -255,20 +281,20 @@ struct SampleRef {
     // program (.xpm, the MPC 3's .xty), a Logic EXS24 instrument (.exs), one
     // pad of an MPC drum program or project, "<file>#<pad>", an .sf2's preset
     // "<file>.sf2#<preset>" or a DecentSampler preset (.dspreset; roadmap P3).
+    // The pad's or preset's '#' comes after the file's extension: a '#' in a
+    // file's own name ("Strings C#.sfz", "Lead F#.dspreset") is part of it.
     bool instrument() const {
+        // Whether the three letters before `end` are the extension `want` (lower case).
+        auto kind = [](const char* begin, const char* end, const char* want) {
+            if (end - begin < 4 || end[-4] != '.') return false;
+            for (int k = 0; k < 3; ++k) if (char(end[k - 3] | 32) != want[k]) return false;
+            return true;
+        };
         const char* end = path + std::strlen(path);
-        const char* mark = std::strrchr(path, '#');
-        const bool pad = mark && mark + 1 < end;
-        if (pad) end = mark;
-        if (!pad && dspreset()) return true;
-        if (end - path < 4 || end[-4] != '.') return false;
-        const char kind[3] = {char(end[-3] | 32), char(end[-2] | 32), char(end[-1] | 32)};
-        const bool xpm = kind[0] == 'x' && kind[1] == 'p' && kind[2] == 'm';
-        const bool xty = kind[0] == 'x' && kind[1] == 't' && kind[2] == 'y';
-        const bool sf2 = kind[0] == 's' && kind[1] == 'f' && kind[2] == '2';
-        if (pad) return xpm || xty || sf2 || (kind[0] == 'x' && kind[1] == 'p' && kind[2] == 'j'); // sf2: "<file>.sf2#<preset>"
-        const bool exs = kind[0] == 'e' && kind[1] == 'x' && kind[2] == 's';
-        return (kind[0] == 's' && kind[1] == 'f' && kind[2] == 'z') || xpm || xty || exs;
+        if (const char* mark = std::strrchr(path, '#'); mark && mark + 1 < end)
+            if (kind(path, mark, "xpm") || kind(path, mark, "xty") || kind(path, mark, "xpj") || kind(path, mark, "sf2")) return true;
+        if (dspreset()) return true;
+        return kind(path, end, "sfz") || kind(path, end, "xpm") || kind(path, end, "xty") || kind(path, end, "exs");
     }
     // A DecentSampler preset (roadmap P3).
     bool dspreset() const {
@@ -283,15 +309,18 @@ struct SampleRef {
 // A note of a pad, with the semitones it plays at from the pad's root over the key.
 constexpr int pad_note(int key, int semitones) { return semitones ? key | (int(uint8_t(int8_t(semitones))) << 8) : key; }
 // Roadmap P3: the same with 16 Levels' cutoff (0..100) above them, as the sampler's note_on takes it from a pattern
-// (a cutoff + 1 in bits 16-23; -1 none). Note offs need only the key and semitones.
-constexpr int pad_note(int key, int semitones, int cutoff) { return pad_note(key, semitones) | (cutoff >= 0 ? (cutoff + 1) << 16 : 0); }
-// Issue 24: and above those a slice of the pad's sample's chop it plays (a slice + 1 in bits 24-30; -1 none, the pad's
-// own region), as the sampler takes a slice hit (Event::slice). The shell's held notes carry it the same way.
+// (a cutoff + 1 in bits 16-22; -1 none). Note offs need only the key and semitones.
+constexpr int pad_note(int key, int semitones, int cutoff) {
+    return pad_note(key, semitones) | (cutoff >= 0 ? (cutoff > 100 ? 101 : cutoff + 1) << 16 : 0);
+}
+// Issue 24: and above those a slice of the pad's sample's chop it plays (a slice + 1 in bits 23-30, so all 128 of a
+// chop's slices; -1 none, the pad's own region), as the sampler takes a slice hit (Event::slice). The shell's held
+// notes carry it the same way. Bit 31 stays clear: a negative note has no slice.
 constexpr int pad_note(int key, int semitones, int cutoff, int slice) {
-    return pad_note(key, semitones, cutoff) | (slice >= 0 && slice < 127 ? (slice + 1) << 24 : 0);
+    return pad_note(key, semitones, cutoff) | (slice >= 0 && slice < 255 ? (slice + 1) << 23 : 0);
 }
 // -1: none (a negative note is a pad's key and semitones kept in 16 bits, sign and all: no slice).
-constexpr int note_slice(int note) { return note < 0 ? -1 : ((note >> 24) & 0x7f) - 1; }
+constexpr int note_slice(int note) { return note < 0 ? -1 : ((note >> 23) & 0xff) - 1; }
 
 // The pad's label as the boards print it: A01 .. D16.
 inline void pad_label(unsigned pad, char out[4]) {

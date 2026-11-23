@@ -69,8 +69,8 @@ inline void close_pad_gap(Track& t, std::array<Pattern, pattern_count>& patterns
         for (auto& e : p.events) if (int to = key_to(e.key); to >= 0) e.key = uint8_t(to);
         std::stable_sort(p.events.begin(), p.events.end(), [](const Event& a, const Event& b) { return a.tick != b.tick ? a.tick < b.tick : a.key < b.key; });
         p.motion.erase(std::remove_if(p.motion.begin(), p.motion.end(),
-                                      [&](const MotionPoint& m) { return pad_param_of(m.param) >= 0 && gap_closed(m.pad, gap) < 0; }), p.motion.end());
-        for (auto& m : p.motion) if (pad_param_of(m.param) >= 0) m.pad = uint8_t(gap_closed(m.pad, gap));
+                                      [&](const MotionPoint& m) { return is_pad_lane(m.param) && gap_closed(m.pad, gap) < 0; }), p.motion.end());
+        for (auto& m : p.motion) if (is_pad_lane(m.param)) m.pad = uint8_t(gap_closed(m.pad, gap));
         std::stable_sort(p.motion.begin(), p.motion.end(), [](const MotionPoint& a, const MotionPoint& b) { return a.tick != b.tick ? a.tick < b.tick : a.param != b.param ? a.param < b.param : a.pad < b.pad; });
         p.lanes.erase(std::remove_if(p.lanes.begin(), p.lanes.end(), [&](const LaneLength& l) { return key_to(l.key) == -1; }), p.lanes.end());
         for (auto& l : p.lanes) if (int to = key_to(l.key); to >= 0) l.key = uint8_t(to);

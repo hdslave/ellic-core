@@ -404,9 +404,9 @@ private:
     // frame, kept for the track's job to make at that frame (play_calls()).
     struct EngineCall {
         enum class Op : uint8_t { NoteOn, NoteOff, Slide, Param, Wheel, Pressure, Mod, PlayPad, Audition, MovePad, RestorePad,
-                                  RestorePads, PadFxParam, Bend, Control };
+                                  RestorePads, PadFxParam, Bend, Control, PadMute };
         Op op = Op::NoteOn;
-        bool flag = false;  // Slide: glide
+        bool flag = false;  // Slide: glide; PadMute: fade (Mute Audio)
         uint16_t frame = 0; // into the block
         int32_t a = 0, b = 0, c = 0, d = 0;
         float x = 1;        // NoteOn, Slide: the accent's gain; Wheel, Pressure, Bend: the value
@@ -444,6 +444,9 @@ private:
         uint32_t start = 0;                // the tick its pattern started on
         int clip = -1;                     // in the song: the clip playing
         bool silent = false;               // in the song: no clip here
+        // Off (sequence links): stopped by its scene or SEQ + STOP until a launch, through Play; off_queued: from the
+        // next bar (Command::Pattern with a value below 0).
+        bool off = false, off_queued = false;
         std::array<PendingOff, 32> offs {};
         // A note with Slide or Tie, held into the next note of its pattern, which takes it over (key: as the
         // engine plays it; midi: as it went out). Its off, a sixteenth past that note, lets it go if none comes.
@@ -457,6 +460,9 @@ private:
         std::array<int16_t, bus_count> mix_sends {};
         bool mix_moved = false, master_moved = false;
         bool moved = false;                       // motion changed a value since Play
+        // Issue 32: a kit's pad mutes as set (Mute + pad; a mute lane only borrows them), and whether a lane moved one.
+        std::array<uint64_t, (sampler_pads + 63) / 64> pad_mutes {};
+        bool pad_mutes_moved = false;
         float wheel = 0;                          // the mod wheel as the fader left it, 0..1
         bool wheel_moved = false;                 // and motion moved it since (parity phase 8)
         float bend = 0;                           // a PLUGIN track's pitch bend as the fader left it, -1..1
@@ -598,6 +604,7 @@ private:
     // Roadmap P5: track t's follow action planned from where its pattern started (dice rolled now), and brought.
     void plan_follow(unsigned t);
     void follow(unsigned t);
+    void stop_track(unsigned t); // a follow action's STOP, or off: what it holds lets go, and it is silent
     FollowDice dice;
     uint16_t scene_tempo = 0; // a scene's tempo waiting for the bar its patterns launch on (0 none)
     // Roadmap P5: the song's tempo lane where the song plays now (0: none, or not the song), worked out each tick.
@@ -607,6 +614,7 @@ private:
     void play_motion(unsigned track, Slot& slot, const Pattern& pattern, uint32_t at);
     void move_lane(unsigned track, Slot& slot, unsigned param, unsigned pad, int value); // a Motion lane to `value`
     void restore_lane(unsigned track, Slot& slot, unsigned param, unsigned pad);        // and back to the track's own
+    void pad_mute_call(Slot& slot, unsigned pad, bool on); // issue 32: a lane's mute on a kit pad, on its frame
     void restore(Slot& slot);
     // Roadmap P4: a mix lane of track `t` to `value` (its level, pan or a send; the master's chain or a return), and
     // back to the track's own (the master's as set).
@@ -669,7 +677,12 @@ private:
     void (*hand_waker)(void*) = nullptr;
     void* hand_waker_context = nullptr;
     bool out_wanted(unsigned t, int key) const;                              // this note of this track goes out
-    bool heard(unsigned t) const;                                            // not muted, nor silenced by another's solo
+    bool heard(unsigned t) const;                                            // not muted (Audio), nor silenced by another's solo
+    // Issue 27, Settings' Mute Notes: a muted track or kit pad starts no new notes and what it plays rings on. Not on
+    // an AUDIO track or a frozen one: what they play is audio, which a mute silences either way.
+    bool note_mutes = false;
+    bool mutes_notes(const Slot& s) const { return note_mutes && s.kind != EngineKind::Audio && !s.freeze; }
+    bool note_muted(unsigned t) const { const auto& s = slots[t % track_count]; return s.mute && mutes_notes(s); }
     bool is_midi(unsigned t) const { return slots[t % track_count].kind == EngineKind::Midi; }
     void midi_silenced();                                                    // MIDI tracks muted or soloed out: their notes end
     void midi_note(unsigned t, int key, int velocity, uint64_t at, int64_t length); // and its off after `length` frames (-1 none)
@@ -917,7 +930,7 @@ private:
     bool plugin_on_two_buses() const;
     DelayPool pool;
     std::array<std::array<Effect, max_slots>, chain_count> fx;
-    // Resting chains (melodee-hdslave; optimization.md HOST-1). A chain that has heard silence and given silence for
+    // Resting chains. A chain that has heard silence and given silence for
     // rest_after frames, every effect in it left by each of those blocks as Effect::rest() leaves it, is no longer
     // run: its effects only rest(). Silence is anything under Effect::rest_floor (-571 dB). It is run again from the first block that brings it sound, or in which
     // one of its effects, the tempo or the rate has changed. rest_after is twice the longest delay line and a

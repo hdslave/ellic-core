@@ -14,6 +14,7 @@
 // Keys), become a Keygroup track of their own, the pad's notes going with them.
 #include "melodee/shell/mpc3_export.h"
 #include "melodee/model/scales.h"
+#include "melodee/model/scene_links.h"
 #include "melodee/engine/dsp.h"
 #include "melodee/engine/engine_info.h"
 #include "melodee/engine/keygroup.h"
@@ -993,15 +994,20 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
         return true;
     };
 
-    // Patterns as sequences: all 128, the highest first, as MPC 3 saves them.
+    // Sequences: all 128, the highest first, as MPC 3 saves them. Each writes the pattern it keeps for a track, nothing
+    // where it keeps the track off, and pattern n where it keeps nothing for the track (model/scene_links.h).
+    static const Pattern silent {};
+    auto kept_of = [&](const Written& w, unsigned n) { return export_pattern(project, w.index, n); };
     std::vector<juce::var> numbered(pattern_count);
     for (int p = int(pattern_count) - 1; p >= 0; --p) {
         uint32_t longest = 0;
         bool any = false;
         for (const auto& w : written) {
-            const auto& pattern = patterns.at[w.index][size_t(p)];
+            const int kept = kept_of(w, unsigned(p));
+            if (kept < 0) continue;
+            const auto& pattern = patterns.at[w.index][size_t(kept)];
             longest = std::max(longest, pattern.length);
-            any = any || !pattern.events.empty() || has_audio(w, unsigned(p));
+            any = any || !pattern.events.empty() || has_audio(w, unsigned(kept));
         }
         report.sequences += any;
         const int pulses = int(std::max<uint32_t>(longest, 1) * mpc_ticks_per_tick);
@@ -1009,10 +1015,14 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
         std::snprintf(title, sizeof(title), "Sequence %02d", p + 1);
         const unsigned tempo = project.seq_tempo && project.pattern_tempo[size_t(p)] ? project.pattern_tempo[size_t(p)] : project.tempo;
         numbered[size_t(p)] = make_sequence(p, title, tempo, pulses,
-            [&](const Written& w) -> const Pattern& { return patterns.at[w.index][size_t(p)]; },
+            [&](const Written& w) -> const Pattern& {
+                const int kept = kept_of(w, unsigned(p));
+                return kept < 0 ? silent : patterns.at[w.index][size_t(kept)];
+            },
             [&](const Written& w) {
                 std::vector<Placement> out;
-                if (loops_of(w, unsigned(p), 0, pulses, out)) ++report.regions;
+                const int kept = kept_of(w, unsigned(p));
+                if (kept >= 0 && loops_of(w, unsigned(kept), 0, pulses, out)) ++report.regions;
                 return out;
             });
     }

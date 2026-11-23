@@ -396,12 +396,14 @@ void EngineHost::load_track(unsigned t, const Track& track) {
     for (unsigned pad = 0; pad < sampler_pads; ++pad) slot.sampler.set_pad(pad, track.pads[pad]);
     slot.sampler.set_trims(track.zone_trims);
     slot.sampler.set_pad_mutes(track.pad_mutes);
+    slot.pad_mutes = track.pad_mutes; slot.pad_mutes_moved = false; // issue 32
     if (slot.engine) for (unsigned p = 0; p < info.param_count; ++p) slot.engine->set_param(int(p), track.params[p]);
     apply({Command::Type::Level, uint8_t(t), 0, 0, track.mix.level});
     apply({Command::Type::Pan, uint8_t(t), 0, 0, track.mix.pan});
     for (unsigned b = 0; b < bus_count; ++b) { slot.sends[b] = track.mix.sends[b] / 100.0f; slot.mix_sends[b] = track.mix.sends[b]; }
     slot.mute = track.mix.mute; slot.solo = track.mix.solo;
     slot.pattern = track.pattern;
+    slot.off = track.off; slot.off_queued = false; // sequence links: silent from the next Play
     patterns_now[t].store(slot.pattern, std::memory_order_relaxed);
     for (unsigned k = 0; k < max_slots; ++k) {
         const auto& s = track.fx.slots[k];
@@ -597,10 +599,16 @@ void EngineHost::apply(const Command& c) {
         slot.sampler.set_trim(c.index, c.position, c.micros, int(c.pattern) - 128, c.value);
         break;
     case Type::KeyedRoot: slot.sampler.set_keyed_root(c.value); break;
-    case Type::PadMute:
-        if (c.index == 0xffff) for (unsigned pad = 0; pad < sampler_pads; ++pad) slot.sampler.set_pad_mute(pad, c.value != 0);
-        else slot.sampler.set_pad_mute(c.index, c.value != 0);
+    case Type::PadMute: { // Mute Notes (issue 27): what the pad plays rings on
+        bool fade = !mutes_notes(slot);
+        for (unsigned pad = 0; pad < sampler_pads; ++pad) {
+            if (c.index != 0xffff && pad != c.index) continue;
+            slot.sampler.set_pad_mute(pad, c.value != 0, fade);
+            uint64_t bit = uint64_t(1) << (pad % 64);
+            slot.pad_mutes[pad / 64] = c.value ? slot.pad_mutes[pad / 64] | bit : slot.pad_mutes[pad / 64] & ~bit; // as set (issue 32)
+        }
         break;
+    }
     case Type::TrackLoad:
         if (c.track_pack) {
             const auto& pack = *c.track_pack;
@@ -806,11 +814,12 @@ void EngineHost::apply(const Command& c) {
         break;
     case Type::PadNote:
         if (slot.freeze && slot.freeze->deep) break; // freeze plan F2d
+        if (note_muted(c.track)) break; // Mute Notes (issue 27): no new note, MIDI out's neither
         if (slot.freeze) wake(slot);
         if (slot.engine == &slot.sampler) {
             EngineCall call;
             call.op = EngineCall::Op::PlayPad; call.b = c.value; call.c = int(c.pattern) - 64; call.d = int(c.position) - 1;
-            call.a = int(c.index & 0xffff) | int(std::min<uint32_t>(c.micros, 127)) << 16; // the pad, a slice + 1 above it (issue 24)
+            call.a = int(c.index & 0xffff) | int(std::min<uint32_t>(c.micros, 255)) << 16; // the pad, a slice + 1 above it (issue 24)
             if (!keep_call(slot, call)) make_call(c.track % track_count, slot, call);
         }
         if (!hand_early) midi_note(c.track % track_count, int(sampler_first_note + c.index), c.value, frame_now + block_at, -1); // 16 Levels: the pad's note
@@ -871,7 +880,8 @@ void EngineHost::apply(const Command& c) {
         if (slot.freeze) wake(slot);
         if (slot.engine == &slot.sampler) {
             EngineCall call;
-            call.op = EngineCall::Op::Audition; call.a = c.pad.sample; call.b = int32_t(c.pad.start); call.c = int32_t(c.pad.end); call.d = c.value;
+            call.op = EngineCall::Op::Audition; call.a = c.pad.sample; call.b = int32_t(c.pad.start); call.c = int32_t(c.pad.end);
+            call.d = (c.value & 0xff) | int(c.index & 0xff) << 8; // velocity; the kit pad + 1 whose speed it takes (0: none)
             if (!keep_call(slot, call)) make_call(c.track % track_count, slot, call);
         }
         break;
@@ -926,7 +936,7 @@ void EngineHost::apply(const Command& c) {
         slot.sends[c.index % bus_count] = std::clamp<int>(c.value, 0, 100) / 100.0f;
         if (mods_on) mod_note(c.track % track_count, motion_send(c.index), 0, slot.mix_sends[c.index % bus_count], true);
         break;
-    case Type::Mute: slot.mute = c.value != 0; midi_silenced(); break;
+    case Type::Mute: slot.mute = c.value != 0; midi_silenced(); break; // Mute Notes: heard on, its notes ring (issue 27)
     case Type::Solo: slot.solo = c.value != 0; midi_silenced(); break;
     case Type::PatternData:
         if (c.data) {
@@ -944,8 +954,16 @@ void EngineHost::apply(const Command& c) {
         }
         break;
     case Type::Pattern:
+        if (c.value < 0) { // off (sequence links): the track stops on the next bar (stopped: from the next Play)
+            if (song_mode) break;
+            slot.queued = 255;
+            if (running) slot.off_queued = true;
+            else slot.off = true;
+            break;
+        }
+        slot.off_queued = false;
         if (running && !song_mode) slot.queued = uint8_t(c.value % pattern_count);
-        else if (!song_mode) { slot.pattern = uint8_t(c.value % pattern_count); slot.queued = 255; lead = slot.pattern; follow_tempo(); }
+        else if (!song_mode) { slot.pattern = uint8_t(c.value % pattern_count); slot.queued = 255; slot.off = false; lead = slot.pattern; follow_tempo(); }
         patterns_now[c.track % track_count].store(slot.pattern, std::memory_order_relaxed);
         if (!running && slot.kind == EngineKind::Midi) midi_program(c.track % track_count, frame_now, false); // roadmap P4: its own program
         break;
@@ -961,7 +979,7 @@ void EngineHost::apply(const Command& c) {
         unsigned t = c.track % track_count;
         if (!running || song_mode || slot.pattern != c.pattern % pattern_count || slot.silent) break;
         const auto& other = slots[c.index % track_count];
-        if (c.index < track_count && c.index != t && other.pattern == slot.pattern && !other.silent) slot.start = other.start;
+        if (c.index < track_count && c.index != t && !other.silent) slot.start = other.start; // the track it fits: from its top
         else slot.start = tick_now - (tick_now - slot.start) % std::max<uint32_t>(patterns[t][slot.pattern]->length, 1);
         fit_kept(t);    // pad-fx C: its punches as it counts now
         plan_follow(t); // roadmap P5: counted from its top again
@@ -1001,11 +1019,16 @@ void EngineHost::apply(const Command& c) {
         tick_count.store(tick_now, std::memory_order_relaxed); // not the last run's count while the count-in plays
         loop_restart = true;
         for (auto& s : slots) {
-            s.start = 0; s.clip = -1; s.silent = song_mode;
-            if (s.queued != 255) { s.pattern = s.queued; s.queued = 255; }
+            if (s.off_queued) { s.off = true; s.off_queued = false; }
+            if (s.queued != 255) { s.pattern = s.queued; s.queued = 255; s.off = false; } // a launch ends off
+            s.start = 0; s.clip = -1; s.silent = song_mode || s.off; // off (sequence links): until a launch
         }
         in_song.store(song_mode, std::memory_order_relaxed);
-        stopped_now.store(0, std::memory_order_relaxed);
+        {
+            uint32_t off = 0;
+            for (unsigned t = 0; t < track_count; ++t) if (!song_mode && slots[t].off) off |= 1u << t;
+            stopped_now.store(off, std::memory_order_relaxed);
+        }
         for (unsigned t = 0; t < track_count; ++t) plan_follow(t); // roadmap P5: from each pattern's top (not in the song)
         follow_lane(); // roadmap P5: the song's tempo where it starts, its count-in too
         if (render_out.cued()) { // a render starts with the first frame played
@@ -1035,7 +1058,8 @@ void EngineHost::apply(const Command& c) {
         for (unsigned t = 0; t < track_count; ++t) {
             positions_now[t].store(-1, std::memory_order_relaxed);
             for (auto& skip : slots[t].skips) skip.key = -1;
-            if (slots[t].queued != 255) { slots[t].pattern = slots[t].queued; slots[t].queued = 255; }
+            if (slots[t].queued != 255) { slots[t].pattern = slots[t].queued; slots[t].queued = 255; slots[t].off = false; } // a launch ends off
+            if (slots[t].off_queued) { slots[t].off = true; slots[t].off_queued = false; } // off waiting for its bar
             slots[t].silent = false; slots[t].clip = -1;
             slots[t].follow_do = 0; // roadmap P5
             patterns_now[t].store(slots[t].pattern, std::memory_order_relaxed);
@@ -1086,6 +1110,15 @@ void EngineHost::apply(const Command& c) {
     }
     case Type::Swing: swing = uint8_t(std::clamp<int>(c.value, 50, 75)); break;
     case Type::Fill: fill = c.value != 0; fill_now.store(fill, std::memory_order_relaxed); break;
+    case Type::MuteMode: // issue 27: back to Audio, what muted tracks and kit pads still play goes now
+        if (note_mutes == (c.value != 0)) break;
+        note_mutes = c.value != 0;
+        if (note_mutes) break;
+        for (auto& s : slots)
+            for (unsigned pad = 0; pad < sampler_pads; ++pad)
+                if (s.sampler.pad_muted(pad)) s.sampler.set_pad_mute(pad, true);
+        midi_silenced();
+        break;
     case Type::TrackSpeed: speeds_now[c.track % track_count].store(uint8_t(std::clamp<int>(c.value, 0, int(speed_count) - 1)), std::memory_order_relaxed); break;
     case Type::AudioRegions: // freeze plan F3
         if (c.track >= track_count) retire_audio(c.audio);
@@ -1246,17 +1279,19 @@ void EngineHost::make_call(unsigned t, Slot& slot, const EngineCall& c) {
     case Op::Pressure: e->set_pressure(c.a, c.x); break;
     case Op::Control: e->control(c.a, c.b); break;
     case Op::Mod: e->set_mod(unsigned(c.a), ModRoute {uint8_t(c.b), uint8_t(c.c), int8_t(c.d)}); break;
-    case Op::PlayPad: if (e == &slot.sampler) slot.sampler.play_pad(unsigned(c.a & 0xffff), c.b, c.c, c.d, ((c.a >> 16) & 0x7f) - 1); break;
-    case Op::Audition: if (e == &slot.sampler) slot.sampler.audition(uint16_t(c.a), uint32_t(c.b), uint32_t(c.c), c.d); break;
+    case Op::PlayPad: if (e == &slot.sampler) slot.sampler.play_pad(unsigned(c.a & 0xffff), c.b, c.c, c.d, ((c.a >> 16) & 0xff) - 1); break;
+    case Op::Audition: if (e == &slot.sampler) slot.sampler.audition(uint16_t(c.a), uint32_t(c.b), uint32_t(c.c), c.d & 0xff, ((c.d >> 8) & 0xff) - 1); break;
     case Op::MovePad: slot.sampler.move_pad(unsigned(c.a), PadParam(c.b), c.c); break;
     case Op::RestorePad: slot.sampler.restore_pad(unsigned(c.a), PadParam(c.b)); break;
     case Op::RestorePads: slot.sampler.restore_pads(); break;
+    case Op::PadMute: slot.sampler.set_pad_mute(unsigned(c.a), c.b != 0, c.flag); break;
     case Op::PadFxParam: (*pad_fx)[t % track_count][unsigned(c.a) % sampler_pads][unsigned(c.b) % pad_slots].set_param(unsigned(c.c), c.d); break;
     }
 }
 
 // accent < 0: none set around it (a note by hand); else the sequencer's, back to 1 after.
 void EngineHost::engine_note_on(Slot& slot, int key, int velocity, float accent) {
+    if (slot.mute && mutes_notes(slot)) return; // Mute Notes (issue 27): a muted track starts nothing new
     EngineCall call;
     call.op = EngineCall::Op::NoteOn; call.a = key; call.b = velocity; call.flag = accent >= 0; call.x = accent;
     if (!keep_call(slot, call)) make_call(unsigned(&slot - slots.data()), slot, call);
@@ -1713,6 +1748,13 @@ void EngineHost::restore(Slot& slot) {
         call.op = EngineCall::Op::RestorePads;
         if (!keep_call(slot, call)) slot.sampler.restore_pads();
     }
+    if (slot.pad_mutes_moved) { // issue 32: the kit's pad mutes back as set
+        for (unsigned pad = 0; pad < sampler_pads; ++pad) {
+            bool own = (slot.pad_mutes[pad / 64] >> (pad % 64)) & 1;
+            if (slot.sampler.pad_muted(pad) != own) pad_mute_call(slot, pad, own);
+        }
+        slot.pad_mutes_moved = false;
+    }
     for (auto& l : slot.locks) l.param = -1; // locks end with everything they moved
     slot.locks_on = 0;
     if (mods_on) mod_back(unsigned(&slot - slots.data())); // roadmap P4: modulators swing around the values as set again
@@ -1809,6 +1851,10 @@ void EngineHost::move_lane(unsigned t, Slot& slot, unsigned param, unsigned pad,
         if (slot.engine) { engine_bend(slot, std::clamp(value / 64.0f, -1.0f, 1.0f)); slot.bend_moved = true; }
         return;
     }
+    if (param == motion_pad_mute) { // issue 32: a kit pad's mute
+        if (slot.kind == EngineKind::Sampler || slot.kind == EngineKind::Keygroup) { pad_mute_call(slot, pad % sampler_pads, value != 0); slot.pad_mutes_moved = true; }
+        return;
+    }
     if (param >= motion_pad_base) { // a kit pad's own value (a keygroup's sound's)
         if (slot.kind == EngineKind::Sampler || slot.kind == EngineKind::Keygroup) {
             EngineCall call;
@@ -1833,6 +1879,10 @@ void EngineHost::restore_lane(unsigned t, Slot& slot, unsigned param, unsigned p
     if (is_mix_lane(param)) { restore_mix(slot, param); return; } // roadmap P4
     if (param == motion_wheel) { engine_wheel(slot, slot.wheel); return; }
     if (param == motion_bend) { engine_bend(slot, slot.bend); return; }
+    if (param == motion_pad_mute) { // issue 32: the pad's mute as set
+        if (slot.kind == EngineKind::Sampler || slot.kind == EngineKind::Keygroup) pad_mute_call(slot, pad % sampler_pads, (slot.pad_mutes[pad % sampler_pads / 64] >> (pad % 64)) & 1);
+        return;
+    }
     if (param >= motion_pad_base) {
         if (slot.kind == EngineKind::Sampler || slot.kind == EngineKind::Keygroup) {
             EngineCall call;
@@ -1849,6 +1899,12 @@ void EngineHost::restore_lane(unsigned t, Slot& slot, unsigned param, unsigned p
     if (!slot.engine || param >= max_params) return;
     engine_param(slot, int(param), slot.base[param]);
     if (slot.kind == EngineKind::Midi) midi_param(t, int(param), slot.base[param], seq_frame());
+}
+
+void EngineHost::pad_mute_call(Slot& slot, unsigned pad, bool on) {
+    EngineCall call;
+    call.op = EngineCall::Op::PadMute; call.a = int32_t(pad); call.b = on; call.flag = !mutes_notes(slot);
+    if (!keep_call(slot, call)) slot.sampler.set_pad_mute(pad, on, call.flag);
 }
 
 // Swing stretches the first sixteenth of every eighth and shortens the second.
@@ -1873,6 +1929,7 @@ void EngineHost::bar_start() {
     if (!song_mode) {
         for (unsigned t = 0; t < track_count; ++t) {
             auto& slot = slots[t];
+            if (slot.off_queued) { slot.off_queued = false; slot.off = true; stop_track(t); continue; } // off (sequence links)
             if (slot.queued == 255) continue;
             // A MIDI track that read this launch ahead (play_ahead()) sent these already, ahead of the notes it sent.
             const bool sent = slot.kind == EngineKind::Midi && slot.ahead_bar == tick_now && slot.ahead_queued == slot.queued;
@@ -1882,6 +1939,7 @@ void EngineHost::bar_start() {
             if (slot.kind == EngineKind::Midi && !sent) midi_program(t, early_frame(t), false); // roadmap P4: a pattern's own program, ahead of its notes
             patterns_now[t].store(slot.pattern, std::memory_order_relaxed);
             lead = slot.pattern;
+            slot.off = false; // a launch ends off (sequence links)
             if (slot.silent) { slot.silent = false; stopped_now.fetch_and(~(1u << t), std::memory_order_relaxed); } // after a STOP (roadmap P5)
             plan_follow(t);
         }
@@ -1900,6 +1958,19 @@ void EngineHost::bar_start() {
         return;
     }
     clips_at_bar(false);
+}
+
+// A follow action's STOP, or off (sequence links): what the track holds lets go, and its pattern is silent until a
+// launch or Play (off: a launch).
+void EngineHost::stop_track(unsigned t) {
+    auto& slot = slots[t % track_count];
+    for (auto& off : slot.offs) if (off.key >= 0) { engine_note_off(slot, off.key); off.key = -1; }
+    slot.held = {};
+    if (slot.kind == EngineKind::Midi) midi_all_off(t % track_count, frame_now + block_at);
+    slot.silent = true;
+    slot.follow_do = 0;
+    positions_now[t % track_count].store(-1, std::memory_order_relaxed);
+    stopped_now.fetch_or(1u << (t % track_count), std::memory_order_relaxed);
 }
 
 // Roadmap P5: what follows the pattern track t plays, from where it started (patterns, not the song; not a chained
@@ -1929,15 +2000,7 @@ void EngineHost::follow(unsigned t) {
     for (unsigned p = 0; p < pattern_count; ++p) if (!patterns[t][p]->empty()) filled.set(p);
     int to = follow_target(action, slot.pattern, filled, dice);
     follows_now[t].store(follows_now[t].load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
-    if (to < 0) { // STOP: what it holds lets go
-        for (auto& off : slot.offs) if (off.key >= 0) { engine_note_off(slot, off.key); off.key = -1; }
-        slot.held = {};
-        if (slot.kind == EngineKind::Midi) midi_all_off(t, frame_now + block_at);
-        slot.silent = true;
-        positions_now[t].store(-1, std::memory_order_relaxed);
-        stopped_now.fetch_or(1u << t, std::memory_order_relaxed);
-        return;
-    }
+    if (to < 0) { stop_track(t); return; } // STOP
     if (slot.kind == EngineKind::Midi && unsigned(to) != slot.pattern) midi_all_off(t, early_frame(t)); // as a launch
     slot.pattern = uint8_t(to); slot.start = tick_now;
     drop_kept(t); // pad-fx C: the old pattern's punches end here
@@ -2185,6 +2248,7 @@ void EngineHost::arp_note(Slot& slot, int key, int velocity, int from, int32_t l
 bool EngineHost::out_wanted(unsigned t, int key) const {
     t %= track_count;
     if (key < 0 || key > 127) return false;
+    if (note_muted(t)) return false; // Mute Notes (issue 27): no new note goes out; the offs owed still do
     if (is_midi(t)) return heard(t); // a MIDI track: always, unless muted (docs/MIDI_TRACKS.md)
     if (!out_channel[t] || !out_mode[t]) return false;
     if (out_mode[t] == 1) return true;
@@ -2198,7 +2262,7 @@ bool EngineHost::heard(unsigned t) const {
     bool solo = false;
     for (const auto& s : slots) solo |= s.soloing();
     const auto& slot = slots[t % track_count];
-    return !slot.mute && !(solo && !slot.solo);
+    return !(slot.mute && !mutes_notes(slot)) && !(solo && !slot.solo);
 }
 
 void EngineHost::midi_silenced() {
@@ -2598,7 +2662,7 @@ void EngineHost::play_event(unsigned t, Slot& slot, const Pattern& pattern, size
         slot.keys_weighed[e.key / 64 % 4] |= bit;
         word = go ? word | bit : word & ~bit;
     }
-    if (!go) return;
+    if (!go || note_muted(t)) return; // Mute Notes (issue 27): weighed as ever, not played
     // Held for its length, a touch short; with Slide or Tie, until the next note starts (and past
     // it, so that note finds it held and takes it over: no new attack; a slide glides there).
     // A ratchet: its hits spread over its length, each held as long as a hit of that length would be;
@@ -2798,7 +2862,7 @@ void EngineHost::play_ahead(unsigned t, Slot& slot, bool seq) {
     slot.ahead_bar = slot.ahead_bar != UINT32_MAX && slot.ahead_bar <= tick_now ? UINT32_MAX : slot.ahead_bar;
     const uint32_t next_bar = (tick_now / bar + 1) * bar;
     uint32_t last = tick_now + lead;
-    if (song_mode || slot.chained) last = std::min(last, next_bar - 1);
+    if (song_mode || slot.chained || slot.off_queued) last = std::min(last, next_bar - 1); // off: nothing past its bar
     if (slot.follow_do && slot.follow_at > tick_now) last = std::min(last, slot.follow_at - 1);
     int64_t to = 0; // frames from this tick to `tk`
     for (uint32_t tk = tick_now; tk <= last; to += int64_t(std::lround(tick_samples(tk))), ++tk) {
@@ -3150,7 +3214,7 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
             // left and right were cleared at the block's start
         } else if (slot.engine->stereo()) { // its own stereo picture; the track's pan balances it
             // A gain that does not move in this block (all but the 10 ms after a change) is the same number in
-            // every frame: taken once, the products are the same to the bit (melodee-hdslave; optimization.md HOST-4).
+            // every frame: taken once, the products are the same to the bit.
             if (slot.mix_l.flat() && slot.mix_r.flat()) {
                 const float gl = slot.mix_l.at(0), gr = slot.mix_r.at(0);
                 for (unsigned f = 0; f < frames; ++f) { slot.left[f] *= gl; slot.right[f] *= gr; }
@@ -3241,7 +3305,7 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
             bool keying = keyed && t == key && pad_keyed < 0;
             // Monitored, the tapped track is heard through the input (gain, Rec Input FX) instead: once, as it records.
             bool through_input = tap && monitor_on.load(std::memory_order_relaxed);
-            bool heard = !slot.mute && !(solo && !slot.solo) && !through_input;
+            bool heard = !(slot.mute && !mutes_notes(slot)) && !(solo && !slot.solo) && !through_input; // Mute Notes: on (issue 27)
             bool knobbed = knob_heard && ((knob_tracks >> t) & 1);
             // Mute and solo, Knob FX's pick and the sends ease across the block too, so none of them clicks.
             slot.audible.aim(heard ? 1.0f : 0.0f, frames, snap_mix);
@@ -3267,7 +3331,7 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
                 const float steady_a = slot.audible.at(0), steady_k = slot.knob_share.at(0);
                 // A track that plays nothing, exactly: what it would add to the master, Knob FX, the buses and its
                 // stem is +0 in every frame, which leaves each of those sums (begun at +0) as it is to the bit. Its
-                // level stays 0 and its stem as it was filled above (melodee-hdslave; optimization.md HOST-1).
+                // level stays 0 and its stem as it was filled above.
                 const bool nothing = chain_rests && zero_block(slot.left, slot.right, frames);
                 for (unsigned f = nothing ? frames : 0; f < frames; ++f) {
                     float a = steady ? steady_a : slot.audible.at(f), k = steady ? steady_k : slot.knob_share.at(f);

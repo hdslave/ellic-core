@@ -392,7 +392,7 @@ void SamplerEngine::refresh(Voice& v) {
     if (v.slice >= 0) { // a slice hit (issue 24): the pad's sound now over its slice as the chop has it now
         const Slices* chop = chops && own.used() && own.sample < sample_slots ? (*chops)[own.sample] : nullptr;
         if (!chop || unsigned(v.slice) >= chop->count) return; // its slice gone: it plays on as it was
-        layered = slice_sound(own, chop->start[size_t(v.slice)], chop->stop[size_t(v.slice)]);
+        layered = slice_sound(own, chop->start[size_t(v.slice)], chop->stop[size_t(v.slice)], region_frames(own, model_frames(own.sample)));
         sound = &layered;
     }
     if (!sound->used() || sound->sample != v.slot) return;
@@ -641,7 +641,8 @@ void SamplerEngine::hit(int pad, int velocity, int semitones, int cutoff, int sl
     if (chop && chop->count) {
         if (unsigned(slice) >= chop->count) return;
         Voice& v = free_voice();
-        start(v, slice_sound(sound, chop->start[size_t(slice)], chop->stop[size_t(slice)]), pad, velocity, semitones, cutoff, -1);
+        start(v, slice_sound(sound, chop->start[size_t(slice)], chop->stop[size_t(slice)], region_frames(sound, model_frames(sound.sample))),
+              pad, velocity, semitones, cutoff, -1);
         if (v.pad >= 0) v.slice = int8_t(slice);
         return;
     }
@@ -677,21 +678,21 @@ void SamplerEngine::note_on(int key, int velocity) {
         for (unsigned n = 0; n < pedal_count; ++n) if ((pedal_offs[n] & 0xffff) != (key & 0xffff)) pedal_offs[kept++] = pedal_offs[n];
         pedal_count = kept;
     }
-    const int cutoff = (key >> 16) & 0xff;
+    const int cutoff = (key >> 16) & 0x7f; // bits 16-22: a slice + 1 starts at bit 23 (model/sampler.h)
     hit((key & 0xff) - int(sampler_first_note), velocity, int8_t(key >> 8), cutoff ? std::min(cutoff - 1, 100) : -1, note_slice(key));
 }
 
 void SamplerEngine::play_pad(unsigned pad, int velocity, int semitones, int cutoff, int slice) { hit(int(pad), velocity, semitones, cutoff, slice); }
 
-void SamplerEngine::set_pad_mute(unsigned pad, bool on) {
+void SamplerEngine::set_pad_mute(unsigned pad, bool on, bool fade) {
     if (pad >= sampler_pads) return;
     uint64_t bit = uint64_t(1) << (pad % 64);
     muted[pad / 64] = on ? muted[pad / 64] | bit : muted[pad / 64] & ~bit;
-    if (on) for (auto& v : voices) if (v.pad == int(pad)) v.choked = true; // fades out over a few milliseconds
+    if (on && fade) for (auto& v : voices) if (v.pad == int(pad)) v.choked = true; // fades out over a few milliseconds
 }
 
-void SamplerEngine::set_pad_mutes(const std::array<uint64_t, (sampler_pads + 63) / 64>& bits) {
-    for (unsigned pad = 0; pad < sampler_pads; ++pad) set_pad_mute(pad, (bits[pad / 64] >> (pad % 64)) & 1);
+void SamplerEngine::set_pad_mutes(const std::array<uint64_t, (sampler_pads + 63) / 64>& bits, bool fade) {
+    for (unsigned pad = 0; pad < sampler_pads; ++pad) set_pad_mute(pad, (bits[pad / 64] >> (pad % 64)) & 1, fade);
 }
 
 void SamplerEngine::set_bend(float amount) {
@@ -781,12 +782,24 @@ void SamplerEngine::release_zones(int pad, int semitones) {
     }
 }
 
-void SamplerEngine::audition(uint16_t sample, uint32_t from, uint32_t to, int velocity) {
+uint32_t SamplerEngine::model_frames(uint16_t slot) const {
+    if (!samples || slot >= samples->size()) return 0;
+    const SampleData* data = (*samples)[slot];
+    return data && !data->multi ? data->model_frames() : 0;
+}
+
+void SamplerEngine::audition(uint16_t sample, uint32_t from, uint32_t to, int velocity, int pad) {
     PadSound sound;
+    const bool as_pad = pad >= 0 && pad < int(sampler_pads) && pads[size_t(pad)].used() && pads[size_t(pad)].sample == sample;
+    if (as_pad) sound = slice_heard(pads[size_t(pad)], from, to, region_frames(pads[size_t(pad)], model_frames(sample)));
     sound.sample = sample; sound.start = from; sound.end = to;
     for (auto& v : voices) if (v.pad == int(sampler_pads)) v.choked = true; // one audition at a time
     if (sample == no_sample) return; // only that: the audition stops
-    start(free_voice(), sound, int(sampler_pads), velocity);
+    Voice& v = free_voice();
+    start(v, sound, int(sampler_pads), velocity);
+    // At the pad's speed with its pitch kept (Warp by Beats or Tones): stretched, as the pad's voice is. An audition
+    // as the file is never stretches (the kit's Tune under PITCH Stretch moves it as tape does, as before).
+    if (as_pad && v.pad >= 0 && !v.stretch && std::fabs(v.step - v.advance) > 1e-6) begin_stretch(v, false);
 }
 
 void SamplerEngine::sample_gone(uint16_t slot) {
@@ -983,8 +996,8 @@ namespace {
 // The frames of a voice that plays forwards, unfiltered, its envelope holding its sustain, for as long as it surely
 // stays clear of `limit` (the last place it may read from with its neighbour above it): most of what a kit plays.
 // Nothing changes there from frame to frame but the place, so the tests of the loops below and the envelope's step
-// are taken once for the run; each frame's sums are theirs, in the same order, so it plays the same to the bit
-// (melodee-hdslave; optimization.md SMP-9). `a` is what env.next() * gain * fade gives while the envelope holds.
+// are taken once for the run; each frame's sums are theirs, in the same order, so it plays the same to the bit.
+// `a` is what env.next() * gain * fade gives while the envelope holds.
 // Returns the frames played from `f` (0: too near `limit`, or too slow to count frames safely).
 inline unsigned held_run(double& position, double step, double limit, float a, float pan_l, float pan_r,
                          const float* l, const float* r, float* to_l, float* to_r, unsigned f, unsigned frames) {
