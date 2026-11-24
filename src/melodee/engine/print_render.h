@@ -16,9 +16,12 @@
 // passes (Loop). What is kept is moved back by the track's own latency (a
 // plug-in's, a Limiter's look-ahead; at Pre FX its engine's alone), so its
 // first frame is the pattern's first tick. A Ring print's sequencer stops on the frame the pass ends, so
-// only the tail sounds after it. Frames are the device's; the shell converts
+// only the tail sounds after it. Ring listens across quiet gaps up to the tapped plug-ins' declared tail
+// (ten seconds maximum after the pass), and keeps the usual 0.2 s of trailing quiet. Frames are the device's; the shell converts
 // them to 44.1 kHz.
 namespace melodee {
+
+inline constexpr double print_ring_limit_seconds = 10; // maximum time rendered after the pass
 
 struct PrintAudio {
     std::vector<float> left, right; // device frames

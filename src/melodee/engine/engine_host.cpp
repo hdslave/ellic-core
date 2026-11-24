@@ -1480,6 +1480,21 @@ void EngineHost::run_chain(unsigned chain, float* left, float* right, unsigned f
     }
 }
 
+double EngineHost::print_tail_seconds(unsigned track, bool post) const {
+    const auto& slot = slots[track % track_count];
+    const auto* instrument = slot.engine == &slot.plugin ? slot.plugin.attached() : nullptr;
+    double seconds = instrument ? std::max(0.0, instrument->tail_seconds()) : 0.0;
+    if (post) {
+        for (const auto& effect : fx[track % track_count]) {
+            if (effect.kind() == EffectKind::None) break;
+            if (effect.kind() != EffectKind::Plugin || effect.bypassed()) continue;
+            if (const auto* runner = runner_of(unsigned(effect.param(0))))
+                seconds += std::max(0.0, runner->tail_seconds());
+        }
+    }
+    return seconds;
+}
+
 // Roadmap P4: the frames chain `chain` holds its sound back: each plug-in's latency (its rate converter's in it) and
 // each effect's (a Limiter looking ahead), bypassed ones left out (they pass the sound straight through).
 unsigned EngineHost::chain_latency(unsigned chain) const {

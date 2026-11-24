@@ -218,6 +218,8 @@ public:
     const Bounce& bounce() const { return render_out; }
     // A print host: track `track` taken each block as the Track input source does, after its chain (`post`) or as its
     // engine left it; print_left() / print_right() hold the block just rendered.
+    // Offline render thread only. Includes the instrument and, at Post FX, the active serial inserts.
+    double print_tail_seconds(unsigned track, bool post) const;
     void set_print_tap(unsigned track, bool post) {
         source_track.store(track % track_count, std::memory_order_relaxed);
         source_post.store(post, std::memory_order_relaxed);

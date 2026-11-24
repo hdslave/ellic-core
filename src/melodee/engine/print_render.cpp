@@ -9,7 +9,6 @@ namespace melodee {
 namespace {
 constexpr float ring_silence = 0.000316f; // -70 dB: a Ring print's tail is over once it stays below this
 constexpr float ring_quiet_seconds = 0.2f; // for this long
-constexpr float ring_most_seconds = 10;    // or after this long, as a mixdown's tail (engine/bounce.h)
 
 void drain(EngineHost& host) {
     const ProjectPack* pack = nullptr;
@@ -37,7 +36,7 @@ PrintAudio render_print(EngineHost& host, unsigned track, uint32_t ticks, PrintT
     // Kept: the frames [from, to) of what the host plays, `to` moving on while a Ring print's tail sounds.
     uint64_t from = 0, to = 0, quiet = 0, played = 0;
     bool planned = false, done = false, stopped = false;
-    const uint64_t quiet_frames = uint64_t(ring_quiet_seconds * rate), most_frames = uint64_t(ring_most_seconds * rate);
+    const uint64_t quiet_frames = uint64_t(ring_quiet_seconds * rate), most_frames = uint64_t(print_ring_limit_seconds * rate);
     while (true) {
         if (keep_going && !keep_going()) { a.error = "stopped"; break; }
         // Ring: the block split where the pass ends, so the sequencer stops there and only the tail sounds after it.
@@ -61,6 +60,12 @@ PrintAudio render_print(EngineHost& host, unsigned track, uint32_t ticks, PrintT
             const float* sr = host.print_send_right(b);
             heard_l[b].insert(heard_l[b].end(), sl, sl + n); heard_r[b].insert(heard_r[b].end(), sr, sr + n);
         }
+        // A plug-in may be silent between repeats. Listen through its declared tail up to Ring's usual limit.
+        uint64_t quiet_needed = quiet_frames;
+        if (tail == PrintTail::Ring && played + n > to) {
+            double seconds = std::min<double>(print_ring_limit_seconds, host.print_tail_seconds(track, tap == PrintTap::PostFx));
+            quiet_needed = std::max(quiet_frames, uint64_t(std::ceil(seconds * rate)));
+        }
         for (unsigned f = 0; f < n && !done; ++f) {
             uint64_t at = played + f;
             if (at < from) continue;
@@ -69,7 +74,8 @@ PrintAudio render_print(EngineHost& host, unsigned track, uint32_t ticks, PrintT
             if (at >= to) { // Ring: the tail, until it has been quiet a while
                 bool loud = std::fabs(l[f]) >= ring_silence || std::fabs(r[f]) >= ring_silence;
                 quiet = loud ? 0 : quiet + 1;
-                done = quiet >= quiet_frames || at + 1 - to >= most_frames;
+                const uint64_t elapsed = at + 1 - to;
+                done = quiet >= quiet_needed || elapsed >= most_frames;
             }
         }
         played += n;
@@ -77,6 +83,10 @@ PrintAudio render_print(EngineHost& host, unsigned track, uint32_t ticks, PrintT
         if (planned && tail == PrintTail::Ring && !stopped && played >= a.pass) { host.send({Command::Type::Stop}); stopped = true; }
         if (dsp::sample_rate() != rate) { a.error = "the sample rate changed"; break; }
         if (done) break;
+    }
+    if (quiet > quiet_frames) { // discard the extra silence rendered while listening for a later repeat
+        a.left.resize(a.left.size() - size_t(quiet - quiet_frames));
+        a.right.resize(a.left.size());
     }
     a.rendered = played;
     host.send({Command::Type::Stop});

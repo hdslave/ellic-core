@@ -7206,16 +7206,24 @@ void levels_cutoff_kept() {
 // frames after it came; an effect gives back what it was given that many frames later.
 struct LatePlugin final : PluginRunner {
     bool instrument = true;
+    unsigned repeat_after = 0; // a delayed note independent of the processing latency
+    unsigned second_repeat = 0; // one further repeat this many frames after the first
+    double tail = 0;
+    double tail_seconds() const override { return tail; }
     unsigned late = 0;
     int countdown = -1;
     std::array<float, 8192> line_l {}, line_r {};
     unsigned at = 0;
-    void midi(uint8_t status, uint8_t, uint8_t data2) override { if ((status & 0xf0) == 0x90 && data2) countdown = int(late); }
+    void midi(uint8_t status, uint8_t, uint8_t data2) override { if ((status & 0xf0) == 0x90 && data2) countdown = int(late + repeat_after); }
     void silence() override {}
     void render(float* left, float* right, unsigned frames) override {
         for (unsigned f = 0; f < frames; ++f) {
             if (instrument) {
-                if (countdown == 0) { left[f] += 0.5f; right[f] += 0.5f; }
+                if (countdown == 0) {
+                    left[f] += 0.5f; right[f] += 0.5f;
+                    countdown = int(second_repeat);
+                    second_repeat = 0;
+                }
                 if (countdown >= 0) --countdown;
             } else {
                 line_l[at & 8191] = left[f]; line_r[at & 8191] = right[f];
@@ -8059,6 +8067,36 @@ void prints_f2a() {
         auto made = render_print(*host, 0, played_pattern(b->at[0][0], speed_normal).length, PrintTap::PostFx, PrintTail::Cut);
         CHECK(made.error.empty() && made.latency == 300 && std::fabs(made.left[0] - 0.5f) < 1e-4f);
         for (unsigned f = 1; f < 2000; ++f) CHECK(made.left[f] == 0.0f);
+    }
+    // A repeat after a silent gap longer than the quiet detector survives Ring. Tail declarations from
+    // serial inserts add at Post FX, while bypassed inserts and inserts after the Pre FX tap have no say.
+    {
+        auto p = std::make_unique<Project>();
+        auto b = std::make_unique<PatternBank>();
+        synth(p->tracks[0], 0);
+        auto& fx = p->tracks[0].fx.slots;
+        fx[0] = {plugin_effect_kind, false, {1}};
+        fx[1] = {plugin_effect_kind, true, {2}};
+        b->at[0][0].length = sixteenth_ticks;
+        put(b->at[0][0], 0, 60, 100);
+        LatePlugin voice, insert, bypass;
+        voice.repeat_after = unsigned(0.42 * rate);
+        voice.second_repeat = unsigned(0.41 * rate);
+        const auto last_repeat = voice.repeat_after + voice.second_repeat;
+        voice.tail = 0.4;
+        insert.instrument = bypass.instrument = false;
+        insert.tail = 0.15; bypass.tail = 8;
+        auto host = std::make_unique<EngineHost>(EngineHost::Lean {0});
+        host->load(*p, *b);
+        CHECK(host->offer_plugin(0, &voice) && host->offer_plugin(1, &insert) && host->offer_plugin(2, &bypass));
+        const auto made = render_print(*host, 0, sixteenth_ticks, PrintTap::PostFx, PrintTail::Ring);
+        CHECK(made.error.empty() && made.pass + uint64_t(0.2 * rate) < voice.repeat_after);
+        CHECK(made.left.size() > voice.repeat_after && std::fabs(made.left[voice.repeat_after]) > 0.1f);
+        CHECK(made.left.size() > last_repeat && std::fabs(made.left[last_repeat]) > 0.1f);
+        CHECK(made.left.size() == last_repeat + 1 + uint64_t(0.2f * rate)); // the quiet end has its normal length
+        CHECK(host->print_tail_seconds(0, false) == voice.tail && host->print_tail_seconds(0, true) == voice.tail + insert.tail);
+        const auto listened_to = last_repeat + 1 + uint64_t(std::ceil((voice.tail + insert.tail) * rate));
+        CHECK(made.rendered >= listened_to && made.rendered < listened_to + EngineHost::block);
     }
     std::puts("prints ok");
 }

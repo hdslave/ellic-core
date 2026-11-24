@@ -23,6 +23,8 @@ public:
     // the notes it is sent (an instrument): the latency the plug-in reports, at the device's rate, and its rate
     // converter's. The engine host delays the other paths to match.
     virtual unsigned latency() const { return 0; }
+    // Last tail duration reported by the plug-in, in seconds. Read on the render thread without calling the plug-in.
+    virtual double tail_seconds() const { return 0; }
     // A side-chain key (melodee-hdslave): an instrument with a second, non-main audio output (a drum machine's "SC
     // Key", the kick alone) offers it here. has_key(): it has one the engine host can hear. key(), right after a
     // render(): adds what that port played in it, the same `frames`, into left/right (a mono port on both sides);
