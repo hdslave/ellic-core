@@ -31,7 +31,7 @@ struct Strip {
     uint8_t comp_amount = 0;             // where it starts, dB below full scale; 0: it passes the sound as it is
     uint8_t comp_ratio = 40;             // tenths
     uint8_t comp_speed = uint8_t(CompSpeed::Medium);
-    uint8_t comp_key = 0;                // what it hears: 0 its own channel, else fx_key_track(t) or fx_key_bus(b) (project.h)
+    uint8_t comp_key = 0;                // what it hears: 0 its own channel, else fx_key_track(t), fx_key_bus(b) or fx_key_sub(s) (project.h)
     uint8_t comp_mix = 100;              // percent of the compressed sound against the dry
     int16_t comp_gain = 0;               // after it, tenths of a dB
 
@@ -73,7 +73,8 @@ inline int strip_get(const Strip& s, StripPart part) {
     }
 }
 
-// `value` into its range first. Key: 0 .. 20, as fx_keys (model/project.h) counts them.
+constexpr int strip_key_most = 28; // the compressor's key: 0 its own channel .. fx_key_count - 1 (model/project.h)
+// `value` into its range first.
 inline void strip_set(Strip& s, StripPart part, int value) {
     auto clamp = [](int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; };
     const unsigned p = unsigned(part);
@@ -86,7 +87,7 @@ inline void strip_set(Strip& s, StripPart part, int value) {
     case StripPart::Amount: s.comp_amount = uint8_t(clamp(value, 0, int(comp_amount_max))); break;
     case StripPart::Ratio: s.comp_ratio = uint8_t(clamp(value, int(comp_ratio_min), int(comp_ratio_max))); break;
     case StripPart::Speed: s.comp_speed = uint8_t(clamp(value, 0, int(CompSpeed::Count) - 1)); break;
-    case StripPart::Key: s.comp_key = uint8_t(clamp(value, 0, 20)); break;
+    case StripPart::Key: s.comp_key = uint8_t(clamp(value, 0, strip_key_most)); break;
     case StripPart::Mix: s.comp_mix = uint8_t(clamp(value, 0, 100)); break;
     case StripPart::Gain: s.comp_gain = int16_t(clamp(value, comp_gain_min, comp_gain_max)); break;
     default: break;

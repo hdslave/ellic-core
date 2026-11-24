@@ -195,7 +195,7 @@ public:
     // keyed effect, 'q' quiet, counting towards its rest.
     std::string chains_map() const {
         std::string map;
-        for (unsigned c = 0; c < chain_count; ++c) if (fx[c][0].kind() != EffectKind::None) map += chain_rest[c].asleep ? 'z' : chain_rest[c].why;
+        for (unsigned c = 0; c < mix_chain_count; ++c) if (fx[c][0].kind() != EffectKind::None) map += chain_rest[c].asleep ? 'z' : chain_rest[c].why;
         return map;
     }
     static inline bool chain_rests = true;
@@ -451,6 +451,8 @@ private:
         Ease mix_l, mix_r, audible, knob_share;
         std::array<Ease, bus_count> sends_now {};
         uint8_t pattern = 0, queued = 255; // queued: launches on the next bar
+        uint8_t out = out_master;          // the mixer: where it plays, the master or a submix (Mix::out)
+        uint8_t out_was = out_master;      // where it played in the last block (a change crosses over in the next)
         uint32_t start = 0;                // the tick its pattern started on
         int clip = -1;                     // in the song: the clip playing
         bool silent = false;               // in the song: no clip here
@@ -935,8 +937,9 @@ private:
     std::atomic<uint64_t> parallel_blocks {0};
     bool plugin_in_two_places() const;
     bool plugin_on_two_buses() const;
+    bool plugin_on_two_chains(unsigned first, unsigned count) const; // one plug-in in two of chains first.. first + count - 1
     DelayPool pool;
-    std::array<std::array<Effect, max_slots>, chain_count> fx;
+    std::array<std::array<Effect, max_slots>, mix_chain_count> fx;
     // Resting chains. A chain that has heard silence and given silence for
     // rest_after frames, every effect in it left by each of those blocks as Effect::rest() leaves it, is no longer
     // run: its effects only rest(). Silence is anything under Effect::rest_floor (-571 dB). It is run again from the first block that brings it sound, or in which
@@ -944,7 +947,7 @@ private:
     // block: by then nothing a line held can still be on its way out. Chains with a plug-in or a keyed effect
     // never rest (a plug-in has its own gate). Each chain's record is its thread's for the block, like its effects.
     struct ChainRest { uint32_t quiet = 0, stamp = 0; double quarter = 0; float rate = 0; bool asleep = false; char why = 'i'; uint8_t wait = 0; };
-    std::array<ChainRest, chain_count> chain_rest {};
+    std::array<ChainRest, mix_chain_count> chain_rest {};
     static constexpr uint32_t rest_after = 2 * DelayPool::half + block;
     static constexpr uint8_t rest_retry = 32; // blocks
     uint32_t chain_stamp(unsigned chain) const { uint32_t sum = 0; for (const auto& e : fx[chain]) sum += e.changes(); return sum; }
@@ -965,10 +968,10 @@ private:
     // where each key is heard: a track whose chain runs before (its output this block), else the block before (a bus
     // keying a track, a track keyed itself keying another, a loop track's chain). A track keyed by another track runs
     // its chain after the others (keyed_tracks). key_prev: each key source's output the block before.
-    std::array<std::array<uint8_t, max_slots>, chain_count> fx_key {};
+    std::array<std::array<uint8_t, max_slots>, mix_chain_count> fx_key {};
     std::array<bool, track_count> keyed_track {};   // this block: its chain waits for the tracks that key it
     uint32_t key_sources = 0;                       // a bit a track (0-15) or bus (16-19) some chain is keyed by
-    std::array<std::array<float, block>, track_count + bus_count> key_prev_l {}, key_prev_r {};
+    std::array<std::array<float, block>, track_count + bus_count + sub_count> key_prev_l {}, key_prev_r {}; // tracks, buses, submixes
     void plan_keys();
     void key_effect(unsigned chain, unsigned slot, Effect& effect);
     // Where `key` (fx_key_*) is heard by chain `chain` this block, as key_effect() has it.
@@ -977,6 +980,28 @@ private:
     // its level and pan. Tracks so far (core step 3).
     std::array<ChannelStrip, strip_channels> strips {};
     bool strip_keyed(unsigned n) const; // its compressor listens to another channel this block
+    // The submixes (core step 4) as the block plays them. A track whose output is a submix (Slot::out) is summed into
+    // its buffers in place of the master; then each submix runs its chain, its strip and its level and pan, and plays
+    // into the master and, as much as each send, the buses. sub_l / sub_r end the block holding what it played,
+    // before its mute (a key's sound, as a track's).
+    struct SubSlot {
+        float gain = 1, pan_left = 0.7071f, pan_right = 0.7071f;
+        int16_t level = 100, pan = 0;
+        bool mute = false, solo = false;
+        std::array<float, bus_count> sends {};
+        Ease mix_l, mix_r, audible;
+        std::array<Ease, bus_count> sends_now {};
+        uint16_t members = 0; // a bit a track with something to play going into it
+        bool fed = false;     // something went into it this block
+        bool live = false;    // run this block: fed, or its chain or strip still sounding
+    };
+    std::array<SubSlot, sub_count> submixes {};
+    float sub_l[sub_count][block] {}, sub_r[sub_count][block] {};
+    void run_submix(unsigned s, unsigned frames);
+    bool sub_soloing(unsigned s) const; // its solo counts: a track with something to play goes into it
+    // Soloed: its own solo, or its submix's (a submix's solo solos the tracks that play into it).
+    bool soloed(const Slot& slot) const { return slot.solo || (slot.out && submixes[(slot.out - 1) % sub_count].solo); }
+    bool solo_on() const; // any solo counts: a track's or a submix's (and the Looper's in render())
     void keep_keys(unsigned frames); // this block's key sources, for the next
     static inline const float silence_block[block] {}; // the key of a track with nothing on it
     // Roadmap P4, delay compensation: each block's plan (plan_compensation(), at its start) of how late each line

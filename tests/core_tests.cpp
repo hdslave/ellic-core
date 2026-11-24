@@ -9128,6 +9128,9 @@ void mixer_strips() {
     CHECK(&plain->strip(3) == &plain->tracks[3].strip && &plain->strip(bus_chain(2)) == &plain->buses[2].strip);
     CHECK(&plain->strip(master_chain) == &plain->master_strip && &plain->strip(strip_input) == &plain->input_strip);
     CHECK(&plain->strip(strip_sub(5)) == &plain->subs[5].strip && strip_channels == strip_sub(sub_count - 1) + 1);
+    // Chain numbers: the submixes' after the Looper's (past chain_count), then the kit pads'.
+    CHECK(&plain->chain(sub_chain(3)) == &plain->subs[3].fx && sub_chain(0) == chain_count && pad_chain(0, 0) == mix_chain_count);
+    CHECK(&plain->chain(pad_chain(2, 5)) == &plain->tracks[2].pad_fx.at[5] && &plain->chain(loop_chain(1)) == &plain->loop_fx[1]);
 
     auto project = std::make_unique<Project>();
     auto& bass = project->tracks[2].strip;
@@ -9144,6 +9147,9 @@ void mixer_strips() {
     music.mix.level = 90; music.mix.pan = -10; music.mix.sends = {20, 0, 0, 5}; music.mix.mute = true;
     std::snprintf(music.name, sizeof(music.name), "Music");
     music.fx.slots[0].kind = uint8_t(EffectKind::Echo);
+    music.fx.slots[1].kind = uint8_t(EffectKind::Compressor); music.fx.slots[1].key = fx_key_sub(4); // keyed by another submix
+    project->tracks[4].fx.slots[0].kind = uint8_t(EffectKind::Gate); project->tracks[4].fx.slots[0].key = fx_key_sub(1);
+    project->tracks[6].strip.comp_amount = 10; project->tracks[6].strip.comp_key = fx_key_sub(7);
     music.strip.comp_amount = 6;
     project->subs[6].strip.trim = -20; // a submix whose strip alone is set
     bytes = save_project(*project, *bank);
@@ -9162,7 +9168,8 @@ void mixer_strips() {
     CHECK(back->buses[0].strip.width == 150 && back->master_strip.eq[7] == 10 && back->input_strip.trim == 60);
     const auto& m = back->subs[1];
     CHECK(!std::strcmp(m.name, "Music") && m.mix.level == 90 && m.mix.pan == -10 && m.mix.mute && !m.mix.solo);
-    CHECK(m.mix.sends[0] == 20 && m.mix.sends[3] == 5 && m.fx.count() == 1 && m.fx.slots[0].kind == uint8_t(EffectKind::Echo));
+    CHECK(m.mix.sends[0] == 20 && m.mix.sends[3] == 5 && m.fx.count() == 2 && m.fx.slots[0].kind == uint8_t(EffectKind::Echo));
+    CHECK(m.fx.slots[1].key == fx_key_sub(4) && back->tracks[4].fx.slots[0].key == fx_key_sub(1) && back->tracks[6].strip.comp_key == fx_key_sub(7));
     CHECK(m.strip.comp_amount == 6 && m.mix.out == out_master && !m.plain());
     CHECK(back->subs[6].plain() && back->subs[6].strip.trim == -20 && back->subs[0].plain() && back->subs[0].strip.flat());
 
@@ -9250,6 +9257,107 @@ void mixer_tracks() {
     play(20);
     CHECK(host->strip_values(0).comp_amount == 30 && play(5) > flat * 0.9f);
     std::puts("mixer tracks ok");
+}
+
+// The mixer, core step 4: submixes. A track sent to one plays through its chain, strip, level and pan into the master
+// (and as much as its sends into the buses); mute and solo (a submix's solo solos its tracks, and counts only with a
+// track in it); a track moved back to the master; a strip keyed by a submix.
+void mixer_submixes() {
+    auto project = std::make_unique<Project>();
+    auto bank = std::make_unique<PatternBank>();
+    tone_kit(*project, 0); tone_kit(*project, 1);
+    project->tracks[0].mix.out = out_sub(2);
+    project->subs[2].mix.level = 64; // level_gain: 0.4096
+    project->subs[5].mix.solo = true; // nothing in it: its solo does not count
+    auto host = std::make_unique<EngineHost>();
+    host->load(*project, *bank);
+    SampleData tone = tone_sample(1000);
+    CHECK(host->offer_sample(0, &tone));
+    std::vector<int32_t> out(256);
+    auto play = [&](unsigned blocks) { // the master's peak over the last blocks
+        float most = 0;
+        for (unsigned n = 0; n < blocks; ++n) {
+            host->render(out.data(), 128, 1);
+            for (auto v : out) most = std::max(most, std::fabs(v / 2147483648.0f));
+        }
+        return most;
+    };
+    auto sub = [&](unsigned n, uint16_t part, int value) { CHECK(host->send({Command::Type::SubMix, uint8_t(n), 0, part, int16_t(value)})); };
+    auto note = [&](unsigned t, bool on) {
+        host->send({on ? Command::Type::NoteOn : Command::Type::NoteOff, uint8_t(t), 0, uint16_t(sampler_first_note), 100});
+    };
+    auto mute = [&](unsigned t, bool on) { host->send({Command::Type::Mute, uint8_t(t), 0, 0, int16_t(on)}); };
+    play(2);
+    // Track 2 alone, straight to the master: the level a track plays at. Both notes are held from here on (the
+    // tone lasts a second); track 2 is muted to hear the submix alone.
+    note(1, true);
+    const float direct = play(10);
+    CHECK(direct > 0.2f && host->strip_meter(strip_sub(2)).left == 0);
+    mute(1, true);
+    // Track 1 through submix 3 at level 64.
+    note(0, true);
+    play(10);
+    const float through = play(10);
+    CHECK(std::fabs(through / direct - 0.4096f) < 0.01f && std::fabs(host->strip_meter(strip_sub(2)).left - through) < 0.01f && host->meter(0) > 0.2f);
+    // A send: bus B (no chain, its return at 70) takes half of it, in phase.
+    sub(2, Command::SubSend0 + 1, 50);
+    play(10);
+    CHECK(std::fabs(play(5) / through - 1.35f) < 0.02f);
+    sub(2, Command::SubSend0 + 1, 0);
+    // Muted: nothing of it, though the track still plays (its own meter).
+    sub(2, Command::SubMute, 1);
+    play(10);
+    CHECK(play(5) < 1e-6f && host->meter(0) > 0.2f);
+    sub(2, Command::SubMute, 0);
+    // Solo: submix 3's solos track 1 in it; track 2, straight to the master, is silenced (heard, the two would
+    // peak at 0.16 at least).
+    mute(1, false);
+    sub(2, Command::SubSolo, 1);
+    play(10);
+    CHECK(std::fabs(play(5) / through - 1) < 0.02f);
+    sub(2, Command::SubSolo, 0);
+    // Track 1's own solo: its submix plays it on, track 2 silenced.
+    host->send({Command::Type::Solo, 0, 0, 0, 1});
+    play(10);
+    CHECK(std::fabs(play(5) / through - 1) < 0.02f);
+    host->send({Command::Type::Solo, 0, 0, 0, 0});
+    play(10);
+    // Track 2's strip keyed by submix 3: ducked while track 1 plays through it.
+    host->send({Command::Type::StripValue, 1, 0, uint16_t(StripPart::Key), fx_key_sub(2)});
+    host->send({Command::Type::StripValue, 1, 0, uint16_t(StripPart::Amount), 40});
+    play(30);
+    CHECK(host->strip_meter(1).reduction > 3);
+    // Track 1 back to the master, crossing over in one block: at its own level again.
+    mute(1, true);
+    host->send({Command::Type::TrackOut, 0, 0, 0, out_master});
+    play(10);
+    CHECK(std::fabs(play(5) / direct - 1) < 0.02f && host->strip_meter(strip_sub(2)).left < through);
+    // Delay compensation: track 1 through a submix whose chain holds a plug-in 200 frames late, track 2 straight to
+    // the master, both from the same tick: each heard alone, both start on the same frame (track 2 waits).
+    auto first_heard = [&](unsigned silent) {
+        auto p = std::make_unique<Project>();
+        auto b = std::make_unique<PatternBank>();
+        tone_kit(*p, 0); tone_kit(*p, 1);
+        p->tracks[0].mix.out = out_sub(4);
+        p->subs[4].fx.slots[0] = {uint8_t(EffectKind::Plugin), false, {0, 0, 0, 0, 0, 0}};
+        p->tracks[silent].mix.mute = true;
+        put(b->at[0][0], 0, uint8_t(sampler_first_note), 100); put(b->at[1][0], 0, uint8_t(sampler_first_note), 100);
+        auto h = std::make_unique<EngineHost>();
+        h->load(*p, *b);
+        LatePlugin slow;
+        slow.instrument = false; slow.late = 200;
+        CHECK(h->offer_sample(0, &tone) && h->offer_plugin(0, &slow));
+        h->render(out.data(), 128, 1); // the plug-in taken in
+        h->send({Command::Type::Play});
+        for (unsigned n = 0; n < 40; ++n) {
+            h->render(out.data(), 128, 1);
+            for (unsigned f = 0; f < 128; ++f) if (out[2 * f] != 0) return int(n * 128 + f);
+        }
+        return -1;
+    };
+    const int via_sub = first_heard(1), direct_first = first_heard(0);
+    CHECK(via_sub > 200 && via_sub == direct_first);
+    std::puts("mixer submixes ok");
 }
 
 void channel_strip_sound() {
@@ -9382,6 +9490,7 @@ int main() {
     mixer_strips();
     channel_strip_sound();
     mixer_tracks();
+    mixer_submixes();
     track_names();
     midi_lookahead();
     pad_sends();

@@ -73,15 +73,21 @@ struct EffectSlot {
     uint8_t kind = 0;
     bool bypass = false;
     std::array<int16_t, 6> params {};
-    uint8_t key = 0; // 0 itself; else fx_key_track(t) or fx_key_bus(b)
+    uint8_t key = 0; // 0 itself; else fx_key_track(t), fx_key_bus(b) or fx_key_sub(s)
     bool used() const { return kind != 0; }
 };
-// What keys a Compressor or Gate (roadmap P4): itself (0), a track (1-16) or a bus (17-20).
+// What keys a Compressor or Gate (roadmap P4) or a mixer strip's compressor: itself (0), a track (1-16), a bus (17-20)
+// or a submix (21-28). fx_keys: the keys a page offers so far (none, the tracks and the buses); fx_key_count: every
+// key a file or the engine takes.
 constexpr uint8_t fx_key_track(unsigned track) { return uint8_t(1 + track % 16); }
 constexpr uint8_t fx_key_bus(unsigned bus) { return uint8_t(17 + bus % 4); }
 constexpr unsigned fx_keys = 21;
+constexpr uint8_t fx_key_sub(unsigned sub) { return uint8_t(fx_keys + sub % sub_count); }
+constexpr unsigned fx_key_count = fx_keys + sub_count;
 constexpr bool fx_key_is_track(unsigned key) { return key >= 1 && key <= 16; }
 constexpr bool fx_key_is_bus(unsigned key) { return key >= 17 && key < fx_keys; }
+constexpr bool fx_key_is_sub(unsigned key) { return key >= fx_keys && key < fx_key_count; }
+static_assert(fx_key_count - 1 == strip_key_most, "model/strip.h strip_set() takes the same keys");
 constexpr bool fx_keyable(uint8_t kind) { return kind == 25 || kind == 26; } // EffectKind::Compressor, Gate (engine/effect_info.h checks)
 // A chain's slots stay packed from the front; `size` of them may be used.
 struct Chain {
@@ -94,7 +100,8 @@ struct Bus {
     uint8_t level = 70; // the return, 0..100
     Strip strip;        // after its chain (model/strip.h)
 };
-// Chains are numbered for commands: tracks 0-15, buses 16-19, master 20, the Looper's L1-L4 21-24.
+// Chains are numbered for commands: tracks 0-15, buses 16-19, master 20, the Looper's L1-L4 21-24, the submixes
+// 25-32 (sub_chain; past chain_count, which counts the chains as they were before the mixer), then each kit pad's.
 constexpr unsigned bus_chain(unsigned bus) { return track_count + bus; }
 constexpr unsigned master_chain = track_count + bus_count;
 // The mixer's strips are numbered for files and commands: tracks 0-15, buses 16-19 and the master 20 as their
@@ -104,8 +111,11 @@ constexpr unsigned strip_sub(unsigned sub) { return strip_input + 1 + sub % sub_
 constexpr unsigned strip_channels = strip_input + 1 + sub_count;
 constexpr unsigned loop_chain(unsigned loop) { return master_chain + 1 + loop; }
 constexpr bool is_loop_chain(unsigned n) { return n > master_chain && n < master_chain + 1 + loop_tracks; }
+constexpr unsigned sub_chain(unsigned sub) { return chain_count + sub % sub_count; }
+constexpr bool is_sub_chain(unsigned n) { return n >= chain_count && n < chain_count + sub_count; }
+constexpr unsigned mix_chain_count = chain_count + sub_count; // every chain but the kit pads'
 // Each sampler pad's own chain follows: pad_chain(track, pad).
-constexpr unsigned pad_chain_base = chain_count;
+constexpr unsigned pad_chain_base = mix_chain_count;
 constexpr unsigned pad_chain(unsigned track, unsigned pad) { return pad_chain_base + track * sampler_pads + pad; }
 // The kit's pad chains, four slots each.
 struct PadChains {
@@ -476,6 +486,7 @@ struct Project {
     const Strip& strip(unsigned n) const { return const_cast<Project*>(this)->strip(n); }
     Chain& chain(unsigned n) {
         if (n >= pad_chain_base) { n -= pad_chain_base; return tracks[(n / sampler_pads) % track_count].pad_fx.at[n % sampler_pads]; }
+        if (is_sub_chain(n)) return subs[n - chain_count].fx;
         if (is_loop_chain(n)) return loop_fx[n - loop_chain(0)];
         return n < track_count ? tracks[n].fx : n < master_chain ? buses[n - track_count].fx : master;
     }
@@ -497,11 +508,8 @@ struct Project {
 inline bool plugin_used_by(const Project& project, unsigned entry) {
     for (const auto& t : project.tracks)
         if (t.engine == EngineKind::Plugin && t.plugin == entry) return true;
-    for (unsigned n = 0; n < chain_count; ++n)
+    for (unsigned n = 0; n < mix_chain_count; ++n)
         for (const auto& s : project.chain(n).slots)
-            if (s.kind == plugin_effect_kind && unsigned(s.params[0]) == entry) return true;
-    for (const auto& sub : project.subs)
-        for (const auto& s : sub.fx.slots)
             if (s.kind == plugin_effect_kind && unsigned(s.params[0]) == entry) return true;
     return false;
 }

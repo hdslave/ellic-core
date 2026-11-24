@@ -557,11 +557,11 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
     }
     { // Compressors and Gates keyed by another track or bus (roadmap P4): chain, slot, key
         unsigned keyed = 0;
-        for (unsigned n = 0; n < chain_count; ++n) for (const auto& s : project.chain(n).slots) keyed += s.used() && s.key;
-        if (keyed) {
+        for (unsigned n = 0; n < mix_chain_count; ++n) for (const auto& s : project.chain(n).slots) keyed += s.used() && s.key;
+        if (keyed) { // the submixes' chains (25-32) and keys (21-28) are past what older builds read, which skip them
             at = w.begin("FXKY");
             w.u16(keyed);
-            for (unsigned n = 0; n < chain_count; ++n)
+            for (unsigned n = 0; n < mix_chain_count; ++n)
                 for (unsigned k = 0; k < max_slots; ++k)
                     if (const auto& s = project.chain(n).slots[k]; s.used() && s.key) { w.u8(n); w.u8(k); w.u8(s.key); }
             w.end(at);
@@ -989,7 +989,7 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
             unsigned keyed = r.u16();
             for (unsigned k = 0; k < keyed && r.ok; ++k) {
                 unsigned n = r.u8(), slot = r.u8(), key = r.u8();
-                if (n < chain_count && slot < max_slots && key < fx_keys) project->chain(n).slots[slot].key = uint8_t(key);
+                if (n < mix_chain_count && slot < max_slots && key < fx_key_count) project->chain(n).slots[slot].key = uint8_t(key);
             }
         } else if (name == "PXFD") { // loop seam crossfades (roadmap P3); without it no pad's seam is faded
             unsigned t = r.u8();
@@ -1288,7 +1288,7 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
             s.comp_ratio = uint8_t(std::clamp(r.u8(), comp_ratio_min, comp_ratio_max));
             unsigned speed = r.u8(), key = r.u8();
             s.comp_speed = uint8_t(speed < unsigned(CompSpeed::Count) ? speed : unsigned(CompSpeed::Medium));
-            s.comp_key = uint8_t(key < fx_keys ? key : 0);
+            s.comp_key = uint8_t(key < fx_key_count ? key : 0);
             s.comp_mix = uint8_t(std::min(100u, r.u8()));
             s.comp_gain = int16_t(std::clamp(r.i16(), comp_gain_min, comp_gain_max));
             if (r.ok && n < strip_channels) project->strip(n) = s;
@@ -1311,6 +1311,7 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
                 auto& to = project->subs[n];
                 std::memcpy(to.name, sub.name, sizeof(to.name));
                 to.mix = sub.mix;
+                for (unsigned k = 0; k < max_slots; ++k) sub.fx.slots[k].key = to.fx.slots[k].key; // FXKY's, if it came first
                 to.fx = sub.fx;
             }
         } else if (name == "LVLE") { // 16 Levels' two ends a type (round 2); without it each type's own

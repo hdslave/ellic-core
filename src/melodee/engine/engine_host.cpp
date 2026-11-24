@@ -164,15 +164,25 @@ void EngineHost::play_parked(int32_t* out, unsigned frames, float* stems) {
 
 // Everything of a project but its patterns (Reload swaps those in by pointer).
 void EngineHost::load_state(const Project& project, bool keep_loops) {
-    for (unsigned n = track_count; n < chain_count; ++n) { // the buses and the master; each track's in load_track()
+    for (unsigned n = track_count; n < mix_chain_count; ++n) { // the buses, master, loops, submixes; each track's in load_track()
         const auto& chain = project.chain(n);
         for (unsigned k = 0; k < max_slots; ++k) {
             const auto& s = chain.slots[k];
             fx[n][k].set_kind(EffectKind(s.kind), pool, false); // worked out once, with its values
             fx[n][k].set_params(s.params);
             fx[n][k].set_bypass(s.bypass);
-            fx_key[n][k] = s.key < fx_keys ? s.key : 0;
+            fx_key[n][k] = s.key < fx_key_count ? s.key : 0;
         }
+    }
+    for (unsigned n = 0; n < sub_count; ++n) { // the mixer's submixes: level, pan, mute, solo, sends and strip
+        const auto& m = project.subs[n].mix;
+        apply({Command::Type::SubMix, uint8_t(n), 0, Command::SubLevel, m.level});
+        apply({Command::Type::SubMix, uint8_t(n), 0, Command::SubPan, m.pan});
+        apply({Command::Type::SubMix, uint8_t(n), 0, Command::SubMute, m.mute});
+        submixes[n].solo = m.solo; // as a track's solo is loaded: no notes let go for it
+        for (unsigned b = 0; b < bus_count; ++b) apply({Command::Type::SubMix, uint8_t(n), 0, uint16_t(Command::SubSend0 + b), m.sends[b]});
+        strips[strip_sub(n)].set(project.subs[n].strip);
+        strips[strip_sub(n)].reset();
     }
     for (unsigned b = 0; b < bus_count; ++b) { returns[b] = project.buses[b].level / 100.0f; returns_base[b] = project.buses[b].level; }
     for (unsigned k = 0; k < max_slots; ++k) master_base[k] = project.master.slots[k].params; // roadmap P4: Motion borrows them
@@ -402,6 +412,8 @@ void EngineHost::load_track(unsigned t, const Track& track) {
     apply({Command::Type::Pan, uint8_t(t), 0, 0, track.mix.pan});
     strips[t].set(track.strip);
     strips[t].reset(); // as loaded, not glided to from the last project's
+    apply({Command::Type::TrackOut, uint8_t(t), 0, 0, track.mix.out});
+    slot.out_was = slot.out; // loaded: no crossing over
     for (unsigned b = 0; b < bus_count; ++b) { slot.sends[b] = track.mix.sends[b] / 100.0f; slot.mix_sends[b] = track.mix.sends[b]; }
     slot.mute = track.mix.mute; slot.solo = track.mix.solo;
     slot.pattern = track.pattern;
@@ -412,7 +424,7 @@ void EngineHost::load_track(unsigned t, const Track& track) {
         fx[t][k].set_kind(EffectKind(s.kind), pool, false); // worked out once, with its values
         fx[t][k].set_params(s.params);
         fx[t][k].set_bypass(s.bypass);
-        fx_key[t][k] = s.key < fx_keys ? s.key : 0;
+        fx_key[t][k] = s.key < fx_key_count ? s.key : 0;
         slot.fx_base[k] = s.params;
     }
     slot.fx_moved = false;
@@ -550,10 +562,10 @@ void EngineHost::apply(const Command& c) {
         if (c.track < modulator_count) { Modulator m = mod_runs[c.track].m; unpack_modulator(c, m); set_modulator(c.track, m, true); }
         break;
     case Type::FxKey: // roadmap P4
-        if (c.track < chain_count && c.index < max_slots) fx_key[c.track][c.index] = uint8_t(c.value >= 0 && c.value < int(fx_keys) ? c.value : 0);
+        if (c.track < mix_chain_count && c.index < max_slots) fx_key[c.track][c.index] = uint8_t(c.value >= 0 && c.value < int(fx_key_count) ? c.value : 0);
         break;
     case Type::FxKind:
-        if (c.track < chain_count && c.index < max_slots) {
+        if (c.track < mix_chain_count && c.index < max_slots) {
             fx_key[c.track][c.index] = 0; // a new kind hears itself until told otherwise
             fx[c.track][c.index].set_kind(EffectKind(c.value), pool);
             if (c.track < track_count) { // the track's own values start at the kind's initial ones
@@ -563,7 +575,7 @@ void EngineHost::apply(const Command& c) {
         }
         break;
     case Type::FxParam:
-        if (c.track < chain_count && c.index < max_slots) {
+        if (c.track < mix_chain_count && c.index < max_slots) {
             fx[c.track][c.index].set_param(c.pattern, c.value);
             if (c.track < track_count && c.pattern < effect_params) slots[c.track].fx_base[c.index][c.pattern] = c.value;
             if (c.track == master_chain && c.pattern < effect_params) master_base[c.index][c.pattern] = c.value; // roadmap P4
@@ -571,7 +583,7 @@ void EngineHost::apply(const Command& c) {
             if (mods_on && c.track == master_chain) mod_note_any(motion_master_fx(c.index, c.pattern), c.value, true);
         }
         break;
-    case Type::FxBypass: if (c.track < chain_count && c.index < max_slots) fx[c.track][c.index].set_bypass(c.value != 0); break;
+    case Type::FxBypass: if (c.track < mix_chain_count && c.index < max_slots) fx[c.track][c.index].set_bypass(c.value != 0); break;
     case Type::PadFxKind: case Type::PadFxParam: case Type::PadFxBypass: {
         unsigned slot = c.index & 0xff, param = c.index >> 8;
         if (c.track >= track_count || c.pattern >= sampler_pads || slot >= pad_slots) break;
@@ -930,6 +942,23 @@ void EngineHost::apply(const Command& c) {
     }
     case Type::Level: slot.mix_level = c.value; set_level(slot, c.value); if (mods_on) mod_note(c.track % track_count, motion_level, 0, c.value, true); break; // roadmap P4: kept, Motion borrows it
     case Type::Pan: slot.mix_pan = c.value; set_pan(slot, c.value); if (mods_on) mod_note(c.track % track_count, motion_pan, 0, c.value, true); break;
+    case Type::SubMix: { // the mixer: one value of a submix
+        if (c.track >= sub_count) break;
+        auto& sub = submixes[c.track];
+        if (c.index == Command::SubLevel) { sub.level = int16_t(std::clamp<int>(c.value, 0, 127)); sub.gain = level_gain(sub.level); }
+        else if (c.index == Command::SubPan) {
+            sub.pan = int16_t(std::clamp<int>(c.value, -50, 50));
+            float angle = (sub.pan + 50) / 100.0f * dsp::pi / 2;
+            sub.pan_left = std::cos(angle); sub.pan_right = std::sin(angle);
+        } else if (c.index == Command::SubMute) sub.mute = c.value != 0;
+        else if (c.index == Command::SubSolo) { sub.solo = c.value != 0; midi_silenced(); }
+        else if (c.index >= Command::SubSend0 && c.index < Command::SubSend0 + bus_count)
+            sub.sends[c.index - Command::SubSend0] = std::clamp<int>(c.value, 0, 100) / 100.0f;
+        break;
+    }
+    case Type::TrackOut: // the mixer: where a track plays; the next block crosses over from where it played (render())
+        if (c.track < track_count) slot.out = c.value > 0 && c.value <= int(sub_count) ? uint8_t(c.value) : out_master;
+        break;
     case Type::StripValue: // the mixer: one value of a channel's strip, glided to
         if (c.track < strip_channels && c.index < unsigned(StripPart::Count)) {
             Strip v = strips[c.track].values();
@@ -1483,7 +1512,7 @@ void EngineHost::run_chain(unsigned chain, float* left, float* right, unsigned f
 // each effect's (a Limiter looking ahead), bypassed ones left out (they pass the sound straight through).
 unsigned EngineHost::chain_latency(unsigned chain) const {
     unsigned sum = 0;
-    for (const auto& effect : fx[chain % chain_count]) {
+    for (const auto& effect : fx[chain % mix_chain_count]) {
         if (effect.kind() == EffectKind::None) break;
         if (effect.kind() == EffectKind::Plugin) {
             const auto* runner = runner_of(unsigned(effect.param(0)));
@@ -1621,12 +1650,12 @@ void EngineHost::run_modulators(unsigned frames) {
 void EngineHost::plan_keys() {
     keyed_track.fill(false);
     key_sources = 0;
-    for (unsigned n = 0; n < chain_count; ++n)
+    for (unsigned n = 0; n < mix_chain_count; ++n)
         for (unsigned k = 0; k < max_slots; ++k) {
             if (fx[n][k].kind() == EffectKind::None) break;
             unsigned key = fx_key[n][k];
             if (!key || !fx_keyable(uint8_t(fx[n][k].kind()))) continue;
-            key_sources |= 1u << (key - 1); // tracks 0-15, buses 16-19
+            key_sources |= 1u << (key - 1); // tracks 0-15, buses 16-19, submixes 20-27
             if (n < track_count && fx_key_is_track(key) && key - 1 != n) keyed_track[n] = true;
         }
     for (unsigned n = 0; n < track_count; ++n) { // a track's strip whose compressor another channel keys
@@ -1635,18 +1664,21 @@ void EngineHost::plan_keys() {
         key_sources |= 1u << (key - 1);
         if (fx_key_is_track(key)) keyed_track[n] = true;
     }
+    for (unsigned s = 0; s < sub_count; ++s) // a submix's strip: after every track, so a track's key is heard at once
+        if (strip_keyed(strip_sub(s))) key_sources |= 1u << (strips[strip_sub(s)].values().comp_key - 1);
 }
 
 bool EngineHost::strip_keyed(unsigned n) const {
     const Strip& v = strips[n % strip_channels].values();
-    return v.comp_on && v.comp_amount && v.comp_key && v.comp_key < fx_keys && !(n < track_count && v.comp_key == fx_key_track(n));
+    const bool itself = (n < track_count && v.comp_key == fx_key_track(n)) || (n >= strip_sub(0) && v.comp_key == fx_key_sub(n - strip_sub(0)));
+    return v.comp_on && v.comp_amount && v.comp_key && v.comp_key < fx_key_count && !itself;
 }
 
 // The key effect `slot` of `chain` hears now: a track this block when its chain has run (every track before a bus's or
 // the master's chain; one that does not wait before a waiting track's), else that source the block before.
 void EngineHost::key_effect(unsigned chain, unsigned slot, Effect& effect) {
     unsigned key = fx_key[chain][slot];
-    if (!fx_keyable(uint8_t(effect.kind())) || !key || key >= fx_keys) return;
+    if (!fx_keyable(uint8_t(effect.kind())) || !key || key >= fx_key_count) return;
     const float* l = nullptr;
     const float* r = nullptr;
     key_buffers(chain, key, l, r);
@@ -1657,9 +1689,12 @@ void EngineHost::key_buffers(unsigned chain, unsigned key, const float*& l, cons
     unsigned source = key - 1;
     if (fx_key_is_track(key)) {
         unsigned t = source;
-        bool now = slots[t].engine && ((chain >= track_count && chain <= master_chain) || (chain < track_count && keyed_track[chain] && !keyed_track[t] && t != chain));
+        bool now = slots[t].engine && ((chain >= track_count && chain <= master_chain) || is_sub_chain(chain)
+                                       || (chain < track_count && keyed_track[chain] && !keyed_track[t] && t != chain));
         if (now) { l = slots[t].left; r = slots[t].right; return; }
         if (!slots[t].engine) { l = r = silence_block; return; }
+    } else if (fx_key_is_sub(key)) { // the buses' and the master's chains run after the submixes
+        if (chain >= track_count && chain <= master_chain) { l = sub_l[key - fx_keys]; r = sub_r[key - fx_keys]; return; }
     } else if (chain == master_chain) {
         unsigned b = source - track_count;
         l = bus_l[b]; r = bus_r[b];
@@ -1670,10 +1705,11 @@ void EngineHost::key_buffers(unsigned chain, unsigned key, const float*& l, cons
 
 // What each key source played this block (a track after its chain, a bus after its chain), for keys a block late.
 void EngineHost::keep_keys(unsigned frames) {
-    for (unsigned s = 0; s < track_count + bus_count; ++s) {
+    for (unsigned s = 0; s < track_count + bus_count + sub_count; ++s) {
         if (!((key_sources >> s) & 1)) continue;
-        const float* l = s < track_count ? slots[s].left : bus_l[s - track_count];
-        const float* r = s < track_count ? slots[s].right : bus_r[s - track_count];
+        const unsigned u = s - track_count - bus_count; // a submix's
+        const float* l = s < track_count ? slots[s].left : s < track_count + bus_count ? bus_l[s - track_count] : sub_l[u];
+        const float* r = s < track_count ? slots[s].right : s < track_count + bus_count ? bus_r[s - track_count] : sub_r[u];
         bool silent = s < track_count && !slots[s].engine;
         for (unsigned f = 0; f < frames; ++f) { key_prev_l[s][f] = silent ? 0.0f : l[f]; key_prev_r[s][f] = silent ? 0.0f : r[f]; }
     }
@@ -1686,17 +1722,18 @@ void EngineHost::keep_keys(unsigned frames) {
 // allocates: the lines were made at start and only change where they read.
 void EngineHost::plan_compensation() {
     Compensation plan;
-    std::array<unsigned, track_count> own {};
+    std::array<unsigned, track_count> own {}, through {}; // through: its submix's chain after it (the mixer)
     for (unsigned t = 0; t < track_count; ++t) {
         const auto& slot = slots[t];
         if (!slot.engine) continue;
+        if (slot.out) through[t] = chain_latency(sub_chain(slot.out - 1));
         unsigned engine_own = slot.engine == &slot.plugin && slot.plugin.attached() ? slot.plugin.attached()->latency() : 0;
         pdc_engines[t].store(engine_own, std::memory_order_relaxed);
         own[t] = chain_latency(t) + engine_own;
         // Freeze plan F2b: a print starts on its pattern's first tick, its track's latency taken out; at Pre FX the
         // chain after it is still late by its own.
         if (slot.freeze && slot.freeze->clips[slot.pattern % pattern_count]) own[t] = slot.freeze->tap == PrintTap::PostFx ? 0 : chain_latency(t);
-        plan.tracks = std::max(plan.tracks, own[t]);
+        plan.tracks = std::max(plan.tracks, own[t] + through[t]);
     }
     std::array<unsigned, loop_tracks> loop_own {};
     if (loops.on())
@@ -1709,7 +1746,9 @@ void EngineHost::plan_compensation() {
     constexpr unsigned reach = CompensationLines::most - block;
     plan.tracks = std::min(plan.tracks, reach); plan.returns = std::min(plan.returns, reach);
     plan.total = plan.tracks + plan.returns + plan.master;
-    for (unsigned t = 0; t < track_count; ++t) plan.delay[CompensationLines::track0 + t] = plan.tracks - std::min(own[t], plan.tracks);
+    // Every track meets the latest where the master sums them: one going straight there waits for the slowest
+    // submix too (a track's own sends and Knob FX's share leave before its submix, so that much early).
+    for (unsigned t = 0; t < track_count; ++t) plan.delay[CompensationLines::track0 + t] = plan.tracks - std::min(own[t] + through[t], plan.tracks);
     for (unsigned n = 0; n < loop_tracks; ++n) plan.delay[CompensationLines::loop0 + n] = plan.tracks - std::min(loop_own[n], plan.tracks);
     for (unsigned b = 0; b < bus_count; ++b) plan.delay[CompensationLines::bus0 + b] = plan.returns - std::min(bus_own[b], plan.returns);
     plan.delay[CompensationLines::knob] = plan.returns - knob_own;
@@ -2270,10 +2309,20 @@ bool EngineHost::out_wanted(unsigned t, int key) const {
 }
 
 bool EngineHost::heard(unsigned t) const {
-    bool solo = false;
-    for (const auto& s : slots) solo |= s.soloing();
     const auto& slot = slots[t % track_count];
-    return !(slot.mute && !mutes_notes(slot)) && !(solo && !slot.solo);
+    return !(slot.mute && !mutes_notes(slot)) && !(solo_on() && !soloed(slot));
+}
+
+bool EngineHost::sub_soloing(unsigned s) const {
+    if (!submixes[s % sub_count].solo) return false;
+    for (const auto& slot : slots) if (slot.kind != EngineKind::None && slot.out == out_sub(s)) return true;
+    return false;
+}
+
+bool EngineHost::solo_on() const {
+    for (const auto& slot : slots) if (slot.soloing()) return true;
+    for (unsigned s = 0; s < sub_count; ++s) if (sub_soloing(s)) return true;
+    return false;
 }
 
 void EngineHost::midi_silenced() {
@@ -3024,6 +3073,7 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
     if (mods_on) run_modulators(frames); // roadmap P4: before the tracks' buffers are cleared (a follower hears the last block)
     bool solo = false;
     for (auto& strip : loop_strips) solo |= strip.solo && loops.on();
+    for (unsigned n = 0; n < sub_count; ++n) solo |= sub_soloing(n); // the mixer: a submix's solo solos its tracks
     for (auto& slot : slots) {
         solo |= slot.soloing();
         // An empty track (no engine, no print sounding) is read by nothing this block (every reader asks for its
@@ -3145,6 +3195,12 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
     // into the master; the master through its chain, then main volume.
     for (unsigned b = 0; b < bus_count; ++b) { std::fill(bus_l[b], bus_l[b] + frames, 0.0f); std::fill(bus_r[b], bus_r[b] + frames, 0.0f); }
     std::fill(master_l, master_l + frames, 0.0f); std::fill(master_r, master_r + frames, 0.0f);
+    for (unsigned n = 0; n < sub_count; ++n) { // the mixer's submixes: what plays into each, from the tracks below
+        std::fill(sub_l[n], sub_l[n] + frames, 0.0f); std::fill(sub_r[n], sub_r[n] + frames, 0.0f);
+        submixes[n].fed = false; submixes[n].members = 0;
+    }
+    for (unsigned t = 0; t < track_count; ++t)
+        if (slots[t].out && slots[t].kind != EngineKind::None) submixes[(slots[t].out - 1) % sub_count].members |= uint16_t(1u << t);
     std::fill(knob_l, knob_l + frames, 0.0f); std::fill(knob_r, knob_r + frames, 0.0f);
     if (pdc.on) { std::fill(knob_pad_sum_l, knob_pad_sum_l + frames, 0.0f); std::fill(knob_pad_sum_r, knob_pad_sum_r + frames, 0.0f); }
     if (pdc.on) for (unsigned b = 0; b < bus_count; ++b) { std::fill(pad_send_sum_l[b], pad_send_sum_l[b] + frames, 0.0f); std::fill(pad_send_sum_r[b], pad_send_sum_r[b] + frames, 0.0f); }
@@ -3283,7 +3339,7 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
             bool keying = keyed && t == key && pad_keyed < 0;
             // Monitored, the tapped track is heard through the input (gain, Rec Input FX) instead: once, as it records.
             bool through_input = tap && monitor_on.load(std::memory_order_relaxed);
-            bool heard = !(slot.mute && !mutes_notes(slot)) && !(solo && !slot.solo) && !through_input; // Mute Notes: on (issue 27)
+            bool heard = !(slot.mute && !mutes_notes(slot)) && !(solo && !soloed(slot)) && !through_input; // Mute Notes: on (issue 27)
             bool knobbed = knob_heard && ((knob_tracks >> t) & 1);
             // Mute and solo, Knob FX's pick and the sends ease across the block too, so none of them clicks.
             slot.audible.aim(heard ? 1.0f : 0.0f, frames, snap_mix);
@@ -3301,8 +3357,18 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
                     knob_fed = true;
                 }
                 // Into Knob FX as much as it is picked, the rest to the master (or aside, the Sidechain's key).
-                float* rest_l = keying ? aside_l : master_l;
-                float* rest_r = keying ? aside_r : master_r;
+                // A track the mixer sends to a submix goes there (the Sidechain's key track too, ducked with it).
+                // Sent elsewhere since the last block: this block crosses over, the new place fading in.
+                auto place = [&](unsigned out, float*& to_l, float*& to_r) {
+                    const unsigned into = out ? (out - 1u) % sub_count : sub_count;
+                    to_l = into < sub_count ? sub_l[into] : keying ? aside_l : master_l;
+                    to_r = into < sub_count ? sub_r[into] : keying ? aside_r : master_r;
+                    if (into < sub_count) submixes[into].fed = true;
+                };
+                float* rest_l; float* rest_r; float* was_l; float* was_r;
+                place(slot.out, rest_l, rest_r);
+                place(slot.out_was, was_l, was_r);
+                const bool crossing = rest_l != was_l;
                 knob_fed |= !slot.knob_share.silent();
                 float unpan = 1.0f / std::max(slot.pan_left + slot.pan_right, 1.0f); // a centred mono track's stem sums to itself
                 const bool steady = slot.audible.flat() && slot.knob_share.flat(); // as above: the same sums, the gains read once
@@ -3315,7 +3381,12 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
                     float a = steady ? steady_a : slot.audible.at(f), k = steady ? steady_k : slot.knob_share.at(f);
                     float l = slot.left[f] * a, r = slot.right[f] * a;
                     knob_l[f] += l * k; knob_r[f] += r * k;
-                    rest_l[f] += l - l * k; rest_r[f] += r - r * k;
+                    if (crossing) {
+                        const float w = float(f + 1) / float(frames), dl = l - l * k, dr = r - r * k;
+                        rest_l[f] += dl * w; rest_r[f] += dr * w; was_l[f] += dl - dl * w; was_r[f] += dr - dr * w;
+                    } else {
+                        rest_l[f] += l - l * k; rest_r[f] += r - r * k;
+                    }
                     level_l = std::max(level_l, std::fabs(l)); level_r = std::max(level_r, std::fabs(r));
                     if (stem) stem[f] = (l + r) * unpan;
                 }
@@ -3359,6 +3430,7 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
                 else { std::fill(tap_send_l[b], tap_send_l[b] + frames, 0.0f); std::fill(tap_send_r[b], tap_send_r[b] + frames, 0.0f); }
             }
         }
+        slot.out_was = slot.out; // crossed over (or nothing to cross)
         level = std::max(level_l, level_r);
         const float fall = dsp::fall_per_block(0.97f, frames); // a short fall, as fast at any rate
         float shown = meters[t].load(std::memory_order_relaxed) * fall;
@@ -3369,6 +3441,53 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
         reductions[t].store(std::max(reduced, reductions[t].load(std::memory_order_relaxed) * fall), std::memory_order_relaxed);
     }
     mix_loops(frames, solo);
+    { // The mixer's submixes (core step 4): each that plays or still sounds through its chain, strip, level and pan
+        // (on the workers when two or more), then into the master and, as much as its sends, the buses.
+        std::array<uint8_t, sub_count> live {};
+        unsigned live_count = 0;
+        for (unsigned n = 0; n < sub_count; ++n) {
+            const unsigned c = sub_chain(n);
+            auto& sub = submixes[n];
+            sub.live = sub.fed || (fx[c][0].kind() != EffectKind::None && !chain_rest[c].asleep) || !strips[strip_sub(n)].idle();
+            if (sub.live) live[live_count++] = uint8_t(n);
+        }
+        auto sub_job = [&](unsigned i) { run_submix(live[i], frames); };
+        if (parallel && !plugin_on_two_chains(sub_chain(0), sub_count))
+            workers.run(live_count, sub_job, second_jobs + (knob_ringing || knob_fed) >= 2); // the buses' run next
+        else for (unsigned i = 0; i < live_count; ++i) sub_job(i);
+        const float fall = dsp::fall_per_block(0.97f, frames);
+        for (unsigned n = 0; n < sub_count; ++n) {
+            auto& sub = submixes[n];
+            const unsigned strip_n = strip_sub(n);
+            float level_l = 0, level_r = 0;
+            if (sub.live) {
+                // Heard: not muted, and with a solo on, its own or one of its tracks' (they play through it).
+                bool own_solo = sub.solo;
+                for (unsigned t = 0; t < track_count; ++t) own_solo |= ((sub.members >> t) & 1) && slots[t].solo;
+                sub.audible.aim(!sub.mute && !(solo && !own_solo) ? 1.0f : 0.0f, frames, snap_mix);
+                for (unsigned b = 0; b < bus_count; ++b) sub.sends_now[b].aim(sub.sends[b], frames, snap_mix);
+                if (!sub.audible.silent()) {
+                    for (unsigned f = 0; f < frames; ++f) {
+                        const float a = sub.audible.at(f), l = sub_l[n][f] * a, r = sub_r[n][f] * a;
+                        master_l[f] += l; master_r[f] += r;
+                        level_l = std::max(level_l, std::fabs(l)); level_r = std::max(level_r, std::fabs(r));
+                    }
+                    for (unsigned b = 0; b < bus_count; ++b) {
+                        const auto& send = sub.sends_now[b];
+                        if (send.silent()) continue;
+                        for (unsigned f = 0; f < frames; ++f) {
+                            const float g = sub.audible.at(f) * send.at(f);
+                            bus_l[b][f] += sub_l[n][f] * g; bus_r[b][f] += sub_r[n][f] * g;
+                        }
+                    }
+                }
+            }
+            peak_l[strip_n].store(std::max(level_l, peak_l[strip_n].load(std::memory_order_relaxed) * fall), std::memory_order_relaxed);
+            peak_r[strip_n].store(std::max(level_r, peak_r[strip_n].load(std::memory_order_relaxed) * fall), std::memory_order_relaxed);
+            const float reduced = sub.live ? strips[strip_n].reduction_db() : 0.0f;
+            reductions[strip_n].store(std::max(reduced, reductions[strip_n].load(std::memory_order_relaxed) * fall), std::memory_order_relaxed);
+        }
+    }
     if (pdc.on) { // roadmap P4: kits' pads into Knob FX as late as the latest track; the direct mix as late as the latest return
         compensate(CompensationLines::knob_pads, knob_pad_sum_l, knob_pad_sum_r, frames);
         for (unsigned f = 0; f < frames; ++f) { knob_l[f] += knob_pad_sum_l[f]; knob_r[f] += knob_pad_sum_r[f]; }
@@ -3666,11 +3785,13 @@ bool EngineHost::plugin_in_two_places() const {
     return false;
 }
 
-bool EngineHost::plugin_on_two_buses() const {
-    std::array<const PluginRunner*, bus_count * max_slots> seen {};
+bool EngineHost::plugin_on_two_buses() const { return plugin_on_two_chains(bus_chain(0), bus_count); }
+
+bool EngineHost::plugin_on_two_chains(unsigned first, unsigned count_of) const {
+    std::array<const PluginRunner*, sub_count * max_slots> seen {};
     unsigned count = 0;
-    for (unsigned b = 0; b < bus_count; ++b)
-        for (const auto& effect : fx[bus_chain(b)]) {
+    for (unsigned b = first; b < first + count_of; ++b)
+        for (const auto& effect : fx[b]) {
             if (effect.kind() == EffectKind::None) break;
             if (effect.kind() != EffectKind::Plugin) continue;
             const PluginRunner* r = runner_of(unsigned(effect.param(0)));
@@ -3679,6 +3800,26 @@ bool EngineHost::plugin_on_two_buses() const {
             seen[count++] = r;
         }
     return false;
+}
+
+// A submix this block (render()): its chain, its strip, then its level and pan, in place in sub_l / sub_r.
+void EngineHost::run_submix(unsigned s, unsigned frames) {
+    auto& sub = submixes[s];
+    float* l = sub_l[s];
+    float* r = sub_r[s];
+    run_chain(sub_chain(s), l, r, frames);
+    const float* kl = nullptr;
+    const float* kr = nullptr;
+    if (strip_keyed(strip_sub(s))) key_buffers(sub_chain(s), strips[strip_sub(s)].values().comp_key, kl, kr);
+    strips[strip_sub(s)].process(l, r, frames, kl, kr);
+    sub.mix_l.aim(sub.gain * sub.pan_left * pan_balance, frames, snap_mix);
+    sub.mix_r.aim(sub.gain * sub.pan_right * pan_balance, frames, snap_mix);
+    if (sub.mix_l.flat() && sub.mix_r.flat()) {
+        const float gl = sub.mix_l.at(0), gr = sub.mix_r.at(0);
+        for (unsigned f = 0; f < frames; ++f) { l[f] *= gl; r[f] *= gr; }
+    } else {
+        for (unsigned f = 0; f < frames; ++f) { l[f] *= sub.mix_l.at(f); r[f] *= sub.mix_r.at(f); }
+    }
 }
 
 // The watched track's voices after this block, stamped with the frame they stand at (the block's end).
