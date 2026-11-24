@@ -862,7 +862,8 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
     // SMPL names its slot in a byte and holds the first legacy_sample_slots, as it always has; the slots past them
     // go in SMPX, the slot in two. A build that holds 64 samples a project skips SMPX and loads the pads that name
     // those slots empty (its read_pad() takes a slot past its own as none).
-    for (unsigned n = 0; n < sample_slots; ++n) {
+    const size_t sample_span = project.samples.span();
+    for (unsigned n = 0; n < sample_span; ++n) {
         const auto& s = project.samples[n];
         if (!s.used()) continue;
         if (n < legacy_sample_slots) { at = w.begin("SMPL"); w.u8(n); }
