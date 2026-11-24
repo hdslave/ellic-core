@@ -425,11 +425,11 @@ void StreamPager::begin(Work& w, const Message& m) {
 }
 
 // One more chunk ahead of the voice if it wants one, and what it has left behind let go.
-bool StreamPager::step(Slot& slot, Work& w) {
-    if (!w.part || w.dead) return false;
+bool StreamPager::step(Slot& slot, Work& w, unsigned print_readers) {
+    if (!w.part || (w.dead && !print_readers)) return false;
     const uint32_t frames = w.part->total, chunks = chunk_count(frames);
     const uint32_t at = slot.at.load(std::memory_order_relaxed);
-    const uint32_t ahead = uint32_t(stream_chunk * std::max(1.0f, w.speed) * 2);
+    uint32_t ahead = uint32_t(stream_chunk * std::max(1.0f, w.speed) * 2);
     auto publish = [&](uint32_t limit) { slot.ready.store(uint64_t(w.serial) << 32 | limit, std::memory_order_release); };
     // A voice that went on while its reads were late (SamplerEngine::pass()) is past everything pinned for it: what
     // lies between is let go unread, and the reading goes on from where the voice is.
@@ -439,13 +439,31 @@ bool StreamPager::step(Slot& slot, Work& w) {
         w.lo = w.hi = w.reverse ? here + 1 : here;
     }
     if (!w.reverse) {
+        bool released = false;
+        if (print_readers) {
+            // Prints read straight ahead. Retire consumed chunks before requesting more, even under pressure.
+            // Share a voice's normal read-ahead across all sounding prints. Already published pages remain safe.
+            while (w.lo < here && w.lo < w.hi) { unpin_chunk(*w.part, w.lo++); released = true; }
+            if (windows_tight) {
+                // A whole spare chunk per tail can exhaust the budget while another voice needs its current
+                // chunk. Share one spare chunk, with 10 ms per reader for the 1 ms pager poll and audio blocks.
+                ahead = std::max(stream_chunk / print_readers, ahead / 100);
+            } else ahead = std::max(stream_chunk, ahead / print_readers);
+        }
         uint32_t want = std::min<uint64_t>(chunks, (uint64_t(at) + ahead) / stream_chunk + 1);
         if (w.hi < want) {
-            if (!pin_chunk(*w.part, w.hi)) { w.dead = true; slot.dead.store(true, std::memory_order_relaxed); return false; }
+            if (!pin_chunk(*w.part, w.hi)) {
+                w.dead = true;
+                if (print_readers) windows_tight = true; // keep the published prefix; retry as other reads retire
+                else slot.dead.store(true, std::memory_order_relaxed);
+                return released;
+            }
+            w.dead = false;
             ++w.hi;
             publish(std::min<uint64_t>(uint64_t(w.hi) * stream_chunk, frames));
             return true;
         }
+        if (print_readers) { w.dead = false; return released; }
         uint32_t chunk = at / stream_chunk, keep = chunk ? chunk - 1 : 0; // a chunk behind stays, for a stretch's taps
         while (w.lo < keep && w.lo < w.hi) unpin_chunk(*w.part, w.lo++);
     } else {
@@ -483,15 +501,21 @@ int StreamPager::Windows::open(uint32_t frame, uint32_t safe) {
         auto& slot = r.slot;
         if (slot.used) continue;
         slot.used = true;
-        slot.head = head_of(frame, safe, false, part.total);
-        if (++slot.serial == 0) ++slot.serial;
-        slot.at.store(frame, std::memory_order_relaxed);
-        r.request.store(slot.serial, std::memory_order_release);
         active.fetch_add(1, std::memory_order_release);
-        owner.kick();
+        restart(int(i), frame, safe);
         return int(i);
     }
     return -1;
+}
+
+void StreamPager::Windows::restart(int stream, uint32_t frame, uint32_t safe) {
+    auto& r = readers[size_t(stream)];
+    auto& slot = r.slot;
+    slot.head = head_of(frame, safe, false, part.total);
+    if (++slot.serial == 0) ++slot.serial;
+    slot.at.store(frame, std::memory_order_relaxed);
+    r.request.store(slot.serial, std::memory_order_release);
+    owner.kick();
 }
 
 void StreamPager::Windows::close(int stream) {
@@ -502,7 +526,7 @@ void StreamPager::Windows::close(int stream) {
     owner.kick();
 }
 
-bool StreamPager::Windows::pump(bool& following) {
+bool StreamPager::Windows::pump(unsigned sounding, bool& following) {
     if (!working && !active.load(std::memory_order_acquire)) return false;
     working = false;
     bool did = false;
@@ -520,9 +544,9 @@ bool StreamPager::Windows::pump(bool& following) {
             open.frame = r.slot.at.load(std::memory_order_relaxed);
             owner.begin(w, open);
         }
-        did |= owner.step(r.slot, w);
-        if (w.dead) r.failed.store(serial, std::memory_order_release);
-        else following = true;
+        did |= owner.step(r.slot, w, sounding);
+        r.failed.store(w.dead ? serial : 0, std::memory_order_release);
+        following = true;
     }
     return did;
 }
@@ -541,7 +565,10 @@ bool StreamPager::pump() {
     windows_following = false;
     if (has_windows.load(std::memory_order_acquire)) {
         std::lock_guard<std::mutex> guard(windows_mutex);
-        for (auto* group : windows) did |= group->pump(windows_following);
+        unsigned sounding = 0;
+        for (auto* group : windows) sounding += group->active.load(std::memory_order_acquire);
+        if (!sounding) windows_tight = false;
+        for (auto* group : windows) did |= group->pump(std::max(1u, sounding), windows_following);
     }
     flush_done.store(asked, std::memory_order_release);
     return did;

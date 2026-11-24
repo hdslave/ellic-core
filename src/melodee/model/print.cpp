@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #include "melodee/model/print.h"
+#include "melodee/engine/effect_info.h"
 #include "melodee/model/project_file.h"
 #include <algorithm>
 #include <cstring>
@@ -101,7 +102,14 @@ uint64_t print_hash(const Project& project, const PatternBank& bank, const std::
     for (unsigned k = 0; k < 4; ++k) bytes.push_back(uint8_t(rate >> (8 * k)));
     // Renderer revision: older offline hosts loaded the project twice before the first note.
     // Loop, Ring and Cut can all contain audio from that initial state.
-    bytes.push_back(6);
+    bool limiter_revision = false;
+    if (tap == PrintTap::PostFx) {
+        for (const auto& track : project.tracks)
+            for (const auto& slot : track.fx.slots)
+                limiter_revision |= track.used() && slot.kind == uint8_t(EffectKind::Limiter) && slot.params[2] == 0;
+    }
+    // An initially disabled lookahead can turn on mid-print. Rebuild those Post FX files once.
+    bytes.push_back(limiter_revision ? 7 : 6);
     uint64_t h = 0xcbf29ce484222325ull;
     for (uint8_t b : bytes) { h ^= b; h *= 0x100000001b3ull; }
     return h;

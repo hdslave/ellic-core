@@ -11,8 +11,8 @@
 
 // Freeze plan F2b: a frozen track plays its prints (model/print.h) instead of
 // its engine and chain. A print's file is mapped from the card and read as
-// memory, as a streamed instrument's zones are: the stream pager pins about a
-// second ahead of each voice (engine/stream_pager.h), the first second of each
+// memory, as a streamed instrument's zones are: the pager shares read-ahead
+// across all sounding print voices (engine/stream_pager.h). The first second of each
 // print and a chunk at each of its bar lines stay pinned for as long as it is
 // frozen, so a launch, a loop's wrap or a Locate to a bar line plays at once.
 // The audio thread never reads a frame the pager has not pinned: past it, a
@@ -57,7 +57,7 @@ struct PrintClip {
     PrintTailVoice* spare = nullptr;
     std::unique_ptr<StreamPager::Windows> windows; // declared after part: unregister before unmapping
     uint32_t tail_from() const;
-    void prepare_tails(uint32_t shortest_pass, StreamPager* pager = nullptr);
+    void prepare_playback(uint32_t shortest_pass, StreamPager* pager = nullptr);
     const float* data() const { return part.left; }
     // Floats safe to read from frame `frame` on without the pager's word (0: none held there).
     uint32_t safe_from(uint32_t frame) const;

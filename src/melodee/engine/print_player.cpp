@@ -34,22 +34,23 @@ void PrintClip::hold_whole(std::vector<float> interleaved, uint32_t at_rate, uin
     part.frames.store(part.total);
     rate = at_rate; pass = pass_frames; tail = how;
     resident = true;
-    prepare_tails(pass);
+    prepare_playback(pass);
 }
 
 uint32_t PrintClip::tail_from() const { return pass > PrintPlayer::slack ? pass - PrintPlayer::slack : 0; }
 
-void PrintClip::prepare_tails(uint32_t shortest_pass, StreamPager* pager) {
+void PrintClip::prepare_playback(uint32_t shortest_pass, StreamPager* pager) {
     windows.reset();
     spare = nullptr;
     tail_voices.clear();
-    if (tail != PrintTail::Ring || !pass || !shortest_pass || frames <= tail_from()) return;
-    const uint32_t length = frames - tail_from();
-    // Leave one streaming voice for a fade at a launch. Tick rounding can shorten a pass by a frame.
-    if (length <= uint64_t(PrintPlayer::voice_count - 2) * std::max(1u, shortest_pass - 1)) return;
-    const uint32_t interval = pass > 1 ? pass - 1 : 1;
-    tail_voices.resize(size_t(length / interval) + 2);
-    for (auto& tail_voice : tail_voices) { tail_voice.next = spare; spare = &tail_voice; }
+    if (tail == PrintTail::Ring && pass && shortest_pass && frames > tail_from()) {
+        const uint32_t length = frames - tail_from();
+        // Leave one voice for a fade at a launch. Tick rounding can shorten a pass by a frame.
+        if (length > uint64_t(PrintPlayer::voice_count - 2) * std::max(1u, shortest_pass - 1)) {
+            tail_voices.resize(size_t(length / std::max(1u, pass - 1)) + 2);
+            for (auto& tail_voice : tail_voices) { tail_voice.next = spare; spare = &tail_voice; }
+        }
+    }
     if (pager) {
         const float speed = ahead_speed(float(rate)) * stride / 2;
         windows = std::make_unique<StreamPager::Windows>(*pager, part, tail_voices.size() + PrintPlayer::voice_count, speed);
@@ -114,7 +115,7 @@ void PrintPlayer::begin(PrintClip* clip, uint32_t frame, bool fade_in, float rat
     if (clip->resident) return;
     const uint32_t safe = clip->safe_from(frame);
     m.seeking = safe == 0;
-    // The look-ahead counts floats: a wider print (pad sends beside it) reads as much further ahead, still a second.
+    // The pager counts interleaved floats, including the bus channels.
     const uint32_t start = clip->stride * frame;
     if (clip->windows) m.stream = clip->windows->open(start, safe);
     else if (pager) m.stream = pager->open(clip->part, start, false, ahead_speed(rate) * clip->stride / 2, safe);
@@ -195,7 +196,8 @@ void PrintPlayer::render(float* left, float* right, unsigned frames, float* cons
     fed = 0;
     auto render_voice = [&](Voice& v) {
         const PrintClip& c = *v.clip;
-        if (!c.resident && (c.windows ? c.windows->dead(v.stream) : pager->dead(v.stream))) { // the card went away
+        if (!c.resident && !c.windows && pager->dead(v.stream)) {
+            ++underruns;
             close(v);
             return;
         }
@@ -209,9 +211,10 @@ void PrintPlayer::render(float* left, float* right, unsigned frames, float* cons
                     v.at = 0;
                     if (!c.resident) {
                         uint32_t safe = c.safe_from(0);
-                        pager->restart(v.stream, 0, safe);
+                        if (c.windows) c.windows->restart(v.stream, 0, safe);
+                        else pager->restart(v.stream, 0, safe);
                         v.seeking = safe == 0;
-                        limit = pager->limit(v.stream);
+                        limit = c.windows ? c.windows->limit(v.stream) : pager->limit(v.stream);
                     }
                 } else {
                     close(v);
@@ -250,7 +253,10 @@ void PrintPlayer::render(float* left, float* right, unsigned frames, float* cons
                     pair += 2;
                 }
             }
-            if (ready < run) (v.seeking ? waited : late) = true;
+            if (ready < run) {
+                if (v.seeking && !(c.windows && c.windows->blocked(v.stream))) waited = true;
+                else late = true;
+            }
             v.at += run;
             f += run;
             if (v.step < 0 && v.gain <= 0) { close(v); break; }

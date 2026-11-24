@@ -4889,12 +4889,14 @@ void stream_pager() {
         CHECK(tails.open(0, 0) == voice && tails.limit(voice) == 0);
         pin_fails = true;
         while (pager.pump()) {}
-        CHECK(tails.dead(voice));
-        tails.close(voice);
+        CHECK(tails.blocked(voice) && tails.limit(voice) == 0);
         pin_fails = false;
-        CHECK(tails.open(c, 0) == voice && !tails.dead(voice));
         while (pager.pump()) {}
-        CHECK(tails.limit(voice) == 4 * c && part.pins[6] == 0);
+        CHECK(!tails.blocked(voice) && tails.limit(voice) >= 2 * c); // same voice recovers
+        tails.close(voice);
+        CHECK(tails.open(c, 0) == voice && !tails.blocked(voice));
+        while (pager.pump()) {}
+        CHECK(tails.limit(voice) >= 3 * c && part.pins[6] == 0);
         tails.close(voice); // destruction settles outstanding reads before the mapping goes
     }
     for (auto pins : part.pins) CHECK(pins == 0);
@@ -8483,6 +8485,7 @@ void freeze_f2b() {
         CHECK(pager.hold(clip.part, 0, 2 * stream_chunk));
         clip.held.push_back({0, 2 * stream_chunk});
         CHECK(clip.safe_from(0) == 2 * stream_chunk && clip.safe_from(stream_chunk) == 0);
+        clip.prepare_playback(clip.pass, &pager);
         PrintPlayer player;
         player.set_pager(&pager);
         std::vector<float> l(128), r(128);
@@ -8508,6 +8511,19 @@ void freeze_f2b() {
         std::fill(l.begin(), l.end(), 0.0f);
         player.render(l.data(), r.data(), 128);
         CHECK(l[127] > 0.2f && player.underruns == late); // the pager has it now
+        player.cut_all();
+        while (pager.pump()) {}
+        // A failed read at a jump is visible. The same cursor resumes at the transport position.
+        player.follow(&clip, 9, 4.5 * stream_chunk, 1e9, rate);
+        pin_fails = true;
+        while (pager.pump()) {}
+        player.render(l.data(), r.data(), 128);
+        CHECK(player.playing() && player.underruns == late + 1);
+        pin_fails = false;
+        while (pager.pump()) {}
+        std::fill(l.begin(), l.end(), 0.0f);
+        player.render(l.data(), r.data(), 128);
+        CHECK(l[127] > 0.2f && player.underruns == late + 1);
         player.cut_all();
         while (pager.pump()) {}
         pin_log = nullptr;
