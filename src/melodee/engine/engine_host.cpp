@@ -116,6 +116,7 @@ void EngineHost::reload(ProjectPack& pack, bool keep_loops) {
         slot.print.cut_all();
         retire_freeze(slot.freeze); retire_freeze(slot.freeze_leaving); retire_freeze(freeze_next[t]);
         slot.freeze = slot.freeze_leaving = freeze_next[t] = nullptr;
+        freeze_clock_now[t].store(0, std::memory_order_relaxed);
         freeze_serial_now[t].store(0, std::memory_order_relaxed);
         slot.print_on = false; slot.hand.reset(); wake(slot);
         slot.audio.player.cut_all(); // freeze plan F3: another project's regions; the shell sends its own
@@ -646,6 +647,8 @@ void EngineHost::apply(const Command& c) {
                 target.print.cut_all();
                 retire_freeze(target.freeze); retire_freeze(target.freeze_leaving); retire_freeze(freeze_next[t]);
                 target.freeze = target.freeze_leaving = freeze_next[t] = nullptr;
+                thaw_at_loop &= ~(1u << t);
+                freeze_clock_now[t].store(0, std::memory_order_relaxed);
                 freeze_serial_now[t].store(0, std::memory_order_relaxed);
                 target.print_on = false; target.hand.reset(); wake(target);
                 target.audio.player.cut_all(); // freeze plan F3: the shell sends an audio track's regions again
@@ -1211,6 +1214,7 @@ void EngineHost::apply(const Command& c) {
         retire_freeze(freeze_next[c.track]); // a later one wins over one still waiting for its bar
         freeze_next[c.track] = nullptr;
         if (c.freeze && running && c.value) freeze_next[c.track] = c.freeze;
+        else if (!c.freeze && running && c.value && slots[c.track].freeze) thaw_at_loop |= 1u << c.track;
         else set_freeze(c.track, c.freeze);
         break;
     }
@@ -1229,8 +1233,8 @@ void EngineHost::retire_freeze(FreezePack* pack) {
 // The track's prints from now: the voices of the last ones fade out (their pack freed once they have), the engine
 // stays awake until it has been quiet a while (its notes ring on), and the print takes over at the next tick.
 void EngineHost::set_freeze(unsigned t, FreezePack* pack) {
-    auto& slot = slots[t % track_count];
-    if (slot.freeze == pack) return;
+    auto& slot = slots[t];
+    if (slot.freeze == pack) { thaw_at_loop &= ~(1u << t); return; }
     if (pack && pack->deep && !deep_freeze_fits(t, *pack)) {
         pack->clock_rejected = true;
         retire_freeze(pack);
@@ -1245,12 +1249,18 @@ void EngineHost::set_freeze(unsigned t, FreezePack* pack) {
     if (pack) slot.print_post = pack->tap == PrintTap::PostFx;
     slot.print_on = false;
     wake(slot);
-    freeze_serial_now[t % track_count].store(pack ? pack->serial : 0, std::memory_order_relaxed);
+    thaw_at_loop &= ~(1u << t);
+    freeze_clock_now[t].store(0, std::memory_order_relaxed);
+    freeze_serial_now[t].store(pack ? pack->serial : 0, std::memory_order_relaxed);
 }
 
 void EngineHost::freeze_at_bar() {
     for (unsigned t = 0; t < track_count; ++t)
         if (freeze_next[t]) { set_freeze(t, freeze_next[t]); freeze_next[t] = nullptr; }
+    if (!running) {
+        for (unsigned pending = thaw_at_loop; pending; pending &= pending - 1)
+            set_freeze(unsigned(__builtin_ctz(pending)), nullptr);
+    }
 }
 
 double EngineHost::pattern_frames(uint32_t ticks) const {
@@ -1286,15 +1296,25 @@ bool EngineHost::print_fits(const PrintClip& clip, uint32_t length, unsigned bpm
            std::fabs(double(clip.pass) - pattern_frames(length, bpm)) <= 64;
 }
 
-// On a tick of a frozen track's pattern: its print plays it, where the pattern is, unless it has none, or none that
-// fits it now (another rate, or a pass of another length: the tempo moved since it was printed): then it plays live.
-void EngineHost::print_tick(unsigned, Slot& slot, uint32_t at, uint32_t length) {
+// A regular freeze goes live when its print no longer fits. Deep Freeze keeps the original PCM playing while its
+// plug-ins reload. Starting a different print in that interval uses its recorded position within the pattern.
+void EngineHost::print_tick(unsigned t, Slot& slot, uint32_t at, uint32_t length) {
     const float rate = dsp::sample_rate();
     PrintClip* clip = slot.freeze->clips[slot.pattern % pattern_count];
-    if (clip && !print_fits(*clip, length, tempo)) clip = nullptr;
+    bool native = false;
+    double start = pattern_frames(at);
+    if (clip && !print_fits(*clip, length, tempo)) {
+        if (slot.freeze->deep) {
+            if (!freeze_clock_now[t].load(std::memory_order_relaxed))
+                freeze_clock_now[t].store(slot.freeze->serial, std::memory_order_relaxed);
+            native = clip->rate == uint32_t(std::lround(rate));
+        }
+        if (native) start *= double(clip->pass) / pattern_frames(length);
+        else clip = nullptr;
+    }
     slot.print_on = clip != nullptr;
     if (!clip && !slot.freeze->deep) wake(slot); // freeze plan F2d: a deep freeze stays asleep (its plug-ins are gone)
-    slot.print.follow(clip, at, pattern_frames(at), tick_samples(tick_now), rate);
+    slot.print.follow(clip, at, start, tick_samples(tick_now), rate, native);
 }
 
 // --- Freeze plan F3: audio tracks' regions (engine/audio_player.h) ---
@@ -2979,6 +2999,7 @@ void EngineHost::tick() {
         auto& slot = slots[t];
         bool sound = slot.engine != nullptr, midi = out_channel[t] && out_mode[t]; // an empty track may still play MIDI out
         if ((!sound && !midi) || slot.silent) {
+            if (thaw_at_loop & (1u << t)) set_freeze(t, nullptr);
             drop_kept(t); // pad-fx C: its pattern's punches stop with it
             if (slot.print_on || slot.print.playing()) { slot.print.release(dsp::sample_rate()); slot.print_on = false; } // a STOP, no clip
             if (slot.audio.player.playing()) slot.audio.player.release(dsp::sample_rate()); // freeze plan F3
@@ -2992,6 +3013,7 @@ void EngineHost::tick() {
         uint32_t pass = elapsed / length; // trig conditions count the pattern's passes from where it began
         uint32_t from = 0, span = 0;
         if (edit_loop(t, length, from, span)) { at = from + elapsed % span; pass = elapsed / span; end = from + span; } // its bars over and over
+        if (at == from && (thaw_at_loop & (1u << t))) set_freeze(t, nullptr);
         Speed sp = speed_of(speeds_now[t].load(std::memory_order_relaxed)); // published as written (its pattern plays scaled)
         positions_now[t].store(int(uint64_t(at) * sp.num / sp.den), std::memory_order_relaxed);
         if (!pattern.punches.empty()) play_pattern_punches(t, pattern, at, end); // pad-fx C: punches kept with it

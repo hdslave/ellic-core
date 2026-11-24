@@ -8544,6 +8544,36 @@ void freeze_f2b() {
         while (pager.pump()) {}
         pin_log = nullptr;
     }
+    { // Clock thaw keeps the original PCM, including a Ring print's tail, across loop boundaries.
+        constexpr unsigned at_rate = 48000, pass = 521, block = 128;
+        for (auto tail : {PrintTail::Cut, PrintTail::Ring, PrintTail::Loop}) {
+            const unsigned frames = tail == PrintTail::Ring ? 809 : pass;
+            std::vector<float> pcm(2 * frames);
+            for (unsigned f = 0; f < frames; ++f) {
+                pcm[2 * f] = float(f + 1) / 1024;
+                pcm[2 * f + 1] = -pcm[2 * f];
+            }
+            PrintClip clip;
+            clip.hold_whole(pcm, at_rate, pass, tail);
+            PrintPlayer player;
+            player.follow(&clip, 0, 0, block, at_rate);
+            for (unsigned n = 0; n < 24; ++n) {
+                if (n) player.follow(&clip, n % 3, 19, 64, at_rate, true);
+                float l[block] {}, r[block] {};
+                player.render(l, r, block);
+                for (unsigned f = 0; f < block; ++f) {
+                    const unsigned absolute = n * block + f;
+                    float want_l = 0, want_r = 0;
+                    for (unsigned at = absolute % pass; at < frames && at <= absolute; at += pass) {
+                        want_l += pcm[2 * at];
+                        want_r += pcm[2 * at + 1];
+                    }
+                    CHECK(l[f] == want_l && r[f] == want_r);
+                }
+            }
+            CHECK(player.waits == 0 && player.underruns == 0);
+        }
+    }
     std::puts("freeze ok");
 }
 

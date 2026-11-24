@@ -100,8 +100,9 @@ public:
 
     // On each tick of the track's pattern: `clip` the print of the pattern playing (nullptr: none, it plays live),
     // `at` the tick in the pattern, `start` the frames from the pattern's top to that tick as a print counts them
-    // (unrounded), `tick` this tick's length in frames.
-    void follow(PrintClip* clip, uint32_t at, double start, double tick, float rate);
+    // (unrounded), `tick` this tick's length in frames. During a clock thaw, `native` keeps the print running
+    // at its recorded speed until the live track can take over.
+    void follow(PrintClip* clip, uint32_t at, double start, double tick, float rate, bool native = false);
     void release(float rate);  // the pattern stopped or changed: a Ring print's tail rings on at its pass's end, else a fade
     void fade_all(float rate); // unfrozen: every voice fades out, marked as leaving
     void cut_all();            // every voice closed at once
@@ -124,6 +125,7 @@ private:
     double carry = 0;     // the next tick's place less `expect`, as render() counts ticks (-1..0]
     StreamPager* pager = nullptr;
     unsigned fed = 0;
+    bool native_playback = false;
     void begin(PrintClip* clip, uint32_t frame, bool fade_in, float rate);
     void close(Voice& v);
     void retire_main(bool ring, float rate); // the main voice to another, ringing on or fading

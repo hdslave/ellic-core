@@ -400,6 +400,8 @@ public:
     int audio_take_pattern() const { return audio_pattern.load(std::memory_order_relaxed); } // -1: not begun
     uint32_t frozen_tracks() const { return frozen_now.load(std::memory_order_relaxed); }
     uint32_t active_freeze_serial(unsigned track) const { return freeze_serial_now[track].load(std::memory_order_relaxed); }
+    // The active Deep Freeze serial that first encountered a different clock, or zero.
+    uint32_t freeze_clock_changed(unsigned track) const { return freeze_clock_now[track].load(std::memory_order_relaxed); }
     uint32_t printing_tracks() const { return printing_now.load(std::memory_order_relaxed); }
     uint32_t sleeping_tracks() const { return sleeping_now.load(std::memory_order_relaxed); }
     uint32_t print_underruns() const { return print_under.load(std::memory_order_relaxed); }
@@ -623,6 +625,7 @@ private:
     void print_tick(unsigned t, Slot& slot, uint32_t at, uint32_t length);
     std::unique_ptr<std::array<float, 2 * block * track_count>> print_frames;
     std::array<FreezePack*, track_count> freeze_next {}; // waiting for the next bar
+    uint32_t thaw_at_loop = 0; // clock thaws ready to go live at their next pattern pass
     static constexpr float sleep_floor = 3.16e-5f; // -90 dB: a frozen track's engine below it a second sleeps
     float pan_centre = 0.7071f;                    // set_pan()'s sides at the centre, as a print was made at
     static constexpr float pan_balance = 1.4142f;  // a track's pan on the engine's picture: unity at the centre
@@ -638,6 +641,7 @@ private:
     std::atomic<int> audio_pattern {-1}; // the pattern it is recording (from its first frame)
     std::array<FreezePack*, 16> freeze_limbo {};
     std::array<std::atomic<uint32_t>, track_count> freeze_serial_now {};
+    std::array<std::atomic<uint32_t>, track_count> freeze_clock_now {};
     std::atomic<uint32_t> frozen_now {0}, printing_now {0}, sleeping_now {0}, print_under {0}, print_waited {0};
     // Roadmap P5: track t's follow action planned from where its pattern started (dice rolled now), and brought.
     void plan_follow(unsigned t);

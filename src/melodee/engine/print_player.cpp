@@ -76,6 +76,7 @@ void PrintPlayer::close(Voice& v) {
 }
 
 void PrintPlayer::cut_all() {
+    native_playback = false;
     for (auto& v : voices) close(v);
     while (ringing) {
         auto* clip = ringing->voice.clip;
@@ -152,6 +153,7 @@ void PrintPlayer::retire_main(bool ring, float rate) {
 }
 
 void PrintPlayer::release(float rate) {
+    native_playback = false;
     auto& m = voices[0];
     if (!m.clip) return;
     const PrintClip& c = *m.clip;
@@ -162,10 +164,11 @@ void PrintPlayer::release(float rate) {
     retire_main(ring, rate);
 }
 
-void PrintPlayer::follow(PrintClip* clip, uint32_t at, double start, double tick, float rate) {
+void PrintPlayer::follow(PrintClip* clip, uint32_t at, double start, double tick, float rate, bool native) {
     auto& m = voices[0];
     if (!clip) { release(rate); return; }
-    if (m.clip != clip) { // a launch, a follow action, a song clip, Play, or the freeze itself
+    if (native && m.clip == clip) { native_playback = true; return; }
+    if (m.clip != clip || native_playback) { // a new clip, or a return to the sequencer's clock
         release(rate);
         const uint64_t frame = at ? uint64_t(std::max(0.0, std::ceil(start - 1e-6))) : 0;
         begin(clip, uint32_t(std::min<uint64_t>(frame, UINT32_MAX)), at != 0, rate);
@@ -187,6 +190,8 @@ void PrintPlayer::follow(PrintClip* clip, uint32_t at, double start, double tick
         retire_main(false, rate);
         begin(clip, uint32_t(std::min<uint64_t>(expect, UINT32_MAX)), true, rate);
     }
+    native_playback = native;
+    if (native) return;
     carry += tick; // as render() places the next tick: the frames up to it, rounded up
     double run = std::ceil(carry);
     expect += uint64_t(std::max(0.0, run));
@@ -195,7 +200,7 @@ void PrintPlayer::follow(PrintClip* clip, uint32_t at, double start, double tick
 
 void PrintPlayer::render(float* left, float* right, unsigned frames, float* const* send_l, float* const* send_r) {
     fed = 0;
-    auto render_voice = [&](Voice& v) {
+    auto render_voice = [&](Voice& v, unsigned from_frame, unsigned end_frame) {
         const PrintClip& c = *v.clip;
         if (!c.resident && !c.windows && pager->dead(v.stream)) {
             ++underruns;
@@ -205,10 +210,10 @@ void PrintPlayer::render(float* left, float* right, unsigned frames, float* cons
         uint32_t limit = c.source->part.total;
         if (!c.resident) limit = c.windows ? c.windows->limit(v.stream) : pager->limit(v.stream);
         bool late = false, waited = false;
-        unsigned f = 0;
-        while (f < frames) {
+        unsigned f = from_frame;
+        while (f < end_frame) {
             if (v.at >= c.frames) {
-                if (&v == &voices[0] && c.tail == PrintTail::Loop && !v.leaving) { // a Loop print wraps on itself
+                if (&v == &voices[0] && !v.leaving && (c.tail == PrintTail::Loop || native_playback)) {
                     v.at = 0;
                     if (!c.resident) {
                         uint32_t safe = c.safe_from(0);
@@ -222,7 +227,7 @@ void PrintPlayer::render(float* left, float* right, unsigned frames, float* cons
                     break;
                 }
             }
-            const unsigned run = unsigned(std::min<uint64_t>(frames - f, c.frames - v.at));
+            const unsigned run = unsigned(std::min<uint64_t>(end_frame - f, c.frames - v.at));
             const unsigned s = c.stride;
             const uint64_t from = uint64_t(v.at) * s;
             const unsigned ready = limit > from ? unsigned(std::min<uint64_t>(run, (limit - from) / s)) : 0;
@@ -270,14 +275,35 @@ void PrintPlayer::render(float* left, float* right, unsigned frames, float* cons
             else pager->place(v.stream, at);
         }
     };
-    for (auto& v : voices) if (v.clip) render_voice(v);
-    for (auto** link = &ringing; *link;) {
-        auto& v = (*link)->voice;
-        auto* clip = v.clip;
-        render_voice(v);
-        if (v.clip) link = &(*link)->next;
-        else recycle(*link, *clip);
+    auto render_all = [&](unsigned from, unsigned end) {
+        for (auto& v : voices) if (v.clip) render_voice(v, from, end);
+        for (auto** link = &ringing; *link;) {
+            auto& v = (*link)->voice;
+            auto* clip = v.clip;
+            render_voice(v, from, end);
+            if (v.clip) link = &(*link)->next;
+            else recycle(*link, *clip);
+        }
+    };
+    auto& main = voices[0];
+    auto* clip = main.clip;
+    if (!native_playback || !clip || main.leaving || clip->tail != PrintTail::Ring || !clip->pass || clip->pass > clip->frames) {
+        render_all(0, frames);
+        return;
     }
+    // Ring starts each native pass on its own sample boundary while its earlier tails continue at the same speed.
+    unsigned from = 0;
+    while (from < frames && main.clip) {
+        if (main.at >= clip->pass) {
+            retire_main(true, float(clip->rate));
+            begin(clip, 0, false, float(clip->rate));
+            if (!main.clip) break;
+        }
+        const unsigned end = from + std::min(frames - from, clip->pass - main.at);
+        render_all(from, end);
+        from = end;
+    }
+    if (from < frames) render_all(from, frames);
 }
 
 } // namespace melodee
