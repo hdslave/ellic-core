@@ -605,6 +605,16 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
             if (tr.pads[n].used() && tr.pads[n].sending()) { w.u8(n); for (auto send : tr.pads[n].sends) w.u8(send); }
         w.end(at);
     }
+    for (unsigned t = 0; t < track_count; ++t) { // kit pads sent to a submix: pad, submix 1-8
+        const auto& tr = project.tracks[t];
+        unsigned used = 0;
+        for (const auto& pad : tr.pads) used += pad.used() && pad.out;
+        if (!used) continue;
+        at = w.begin("PSUB");
+        w.u8(t); w.u8(used);
+        for (unsigned n = 0; n < sampler_pads; ++n) if (tr.pads[n].used() && tr.pads[n].out) { w.u8(n); w.u8(tr.pads[n].out); }
+        w.end(at);
+    }
     for (unsigned t = 0; t < track_count; ++t) { // kit pads with a cloud, or cloud values of their own
         const auto& tr = project.tracks[t];
         unsigned used = 0;
@@ -1029,6 +1039,14 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
                 std::array<uint8_t, 4> sends {};
                 for (auto& send : sends) send = uint8_t(std::min(r.u8(), 100u));
                 if (r.ok) project->tracks[t].pads[n % sampler_pads].sends = sends;
+            }
+        } else if (name == "PSUB") { // kit pads sent to a submix; without it each plays in its kit
+            unsigned t = r.u8();
+            if (t >= track_count) continue;
+            unsigned used = r.u8();
+            for (unsigned k = 0; k < used && r.ok; ++k) {
+                unsigned n = r.u8(), out = r.u8();
+                if (r.ok && out <= 8) project->tracks[t].pads[n % sampler_pads].out = uint8_t(out);
             }
         } else if (name == "PCLD") { // kit pads' clouds; without it a pad plays as a cloud only from an older file's kit-wide Cloud
             unsigned t = r.u8();
@@ -1756,6 +1774,14 @@ std::vector<uint8_t> save_bank(const BankFile& bank) {
             if (bank.pads[k].used() && bank.pads[k].sending()) { w.u8(k); for (auto send : bank.pads[k].sends) w.u8(send); }
         w.end(at);
     }
+    unsigned routed = 0; // the pads sent to a submix, as PSUB: pad, submix
+    for (const auto& pad : bank.pads) routed += pad.used() && pad.out;
+    if (routed) {
+        at = w.begin("BSUB");
+        w.u8(routed);
+        for (unsigned k = 0; k < bank_pads; ++k) if (bank.pads[k].used() && bank.pads[k].out) { w.u8(k); w.u8(bank.pads[k].out); }
+        w.end(at);
+    }
     unsigned clouded = 0; // the pads' clouds, as PCLD
     for (const auto& pad : bank.pads) clouded += pad.used() && !pad.plain_cloud();
     if (clouded) {
@@ -1816,6 +1842,12 @@ bool load_bank(const std::vector<uint8_t>& data, BankFile& out) {
                 unsigned n = r.u8();
                 uint32_t colour = r.u32() & 0xFFFFFF;
                 if (r.ok) bank.pads[n % bank_pads].colour = colour;
+            }
+        } else if (name == "BSUB") {
+            unsigned routed = r.u8();
+            for (unsigned k = 0; k < routed && r.ok; ++k) {
+                unsigned n = r.u8(), out = r.u8();
+                if (r.ok && n < bank_pads && out <= 8) bank.pads[n].out = uint8_t(out);
             }
         } else if (name == "BSND") {
             unsigned sending = r.u8();

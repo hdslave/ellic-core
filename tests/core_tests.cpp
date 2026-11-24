@@ -8542,6 +8542,64 @@ void pad_sends_freeze() {
     CHECK(most > 0.05f && diff < 1e-3f);
 }
 
+// Pads sent to submixes (MPC 3's pad output): pad 3 into submix 3 leaves the kit's stem and plays in the submix's, at
+// the kit's level; soloing submix 3 keeps the kit heard; USB out's submix rows carry it; PSUB keeps it.
+void pad_outputs() {
+    auto project = std::make_unique<Project>();
+    auto bank = std::make_unique<PatternBank>();
+    tone_kit(*project, 0);
+    project->tracks[0].pads[2].out = 3;
+    auto saved = save_project(*project, *bank);
+    auto loaded = std::make_unique<Project>();
+    auto loaded_bank = std::make_unique<PatternBank>();
+    CHECK(load_project(saved, *loaded, *loaded_bank).empty() && loaded->tracks[0].pads[2].out == 3 && loaded->tracks[0].pads[0].out == 0);
+    CHECK(mixer_left_out(*project) == 1 && mixer_left_out(*project, true) == 0); // Live leaves it out, MPC 3 carries it
+    EngineHost host;
+    host.load(*project, *bank);
+    auto tone = tone_sample();
+    CHECK(host.offer_sample(0, &tone));
+    host.send({Command::Type::Level, 0, 0, 0, 80});
+    std::vector<float> rows(size_t(StemRing::stem_count) * 2 * EngineHost::block, 9.0f);
+    host.set_live_stems(rows.data());
+    std::vector<int32_t> out(256);
+    std::vector<float> usb(size_t(track_count) * EngineHost::block, 9.0f);
+    auto play = [&](unsigned blocks) { for (unsigned n = 0; n < blocks; ++n) host.render(out.data(), 128, 1, nullptr, usb.data()); };
+    auto peak = [&](unsigned stem) {
+        float most = 0;
+        for (unsigned side = 0; side < 2; ++side)
+            for (unsigned f = 0; f < EngineHost::block; ++f) most = std::max(most, std::fabs(rows[size_t(stem * 2 + side) * EngineHost::block + f]));
+        return most;
+    };
+    auto usb_peak = [&](unsigned row) {
+        float most = 0;
+        for (unsigned f = 0; f < EngineHost::block; ++f) most = std::max(most, std::fabs(usb[size_t(row) * EngineHost::block + f]));
+        return most;
+    };
+    const unsigned sub3 = track_count + bus_count + 2;
+    host.send({Command::Type::NoteOn, 0, 0, uint16_t(sampler_first_note + 2), 100});
+    play(30);
+    CHECK(peak(0) == 0.0f && peak(sub3) > 0.02f && peak(sub3 - 1) == 0.0f); // the kit's stem has none of it, submix 3 all
+    const float routed = peak(sub3);
+    host.send({Command::Type::NoteOn, 0, 0, uint16_t(sampler_first_note), 100});
+    play(30);
+    CHECK(peak(0) > 0.02f && std::fabs(peak(sub3) - routed) < 1e-4f); // pad 1 in the kit, pad 3 still in submix 3 only
+    // USB out: tracks' rows (the kit mono in row 0), then the submixes' pairs (submix 3 in rows 4 and 5).
+    CHECK(usb_peak(0) > 0.02f && usb_peak(4) == 0.0f);
+    host.set_usb_submixes(true);
+    play(4);
+    CHECK(usb_peak(4) > 0.02f && usb_peak(5) > 0.02f && usb_peak(0) == 0.0f && usb_peak(2) == 0.0f);
+    host.set_usb_submixes(false);
+    // The kit's level reaches it: at 40 it is quieter.
+    host.send({Command::Type::Level, 0, 0, 0, 40});
+    play(30);
+    CHECK(peak(sub3) < routed * 0.8f && peak(sub3) > 0.0f);
+    // Submix 3 soloed: the kit (whose pad is in it) is still heard; its stem too.
+    host.send({Command::Type::SubMix, 2, 0, Command::SubSolo, 1});
+    play(30);
+    CHECK(peak(sub3) > 0.0f && peak(0) > 0.0f);
+    host.set_live_stems(nullptr);
+}
+
 // StemWriter: each file whole and in order across chunks, a pad stem's silence first, a silent file's peak 0.
 void stem_writer() {
     const auto dir = std::filesystem::temp_directory_path() / "melodee-stem-writer";
@@ -9778,6 +9836,7 @@ int main() {
     midi_lookahead();
     pad_sends();
     pad_stems();
+    pad_outputs();
     stem_writer();
     pad_cloud();
     pad_sends_freeze();

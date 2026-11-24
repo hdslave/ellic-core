@@ -1402,10 +1402,13 @@ void EngineHost::render_engine(unsigned t, Slot& slot, unsigned at, unsigned fra
         slot.sampler.set_knob_out(knob_heard ? slot.knob_pad_l + at : nullptr, knob_heard ? slot.knob_pad_r + at : nullptr);
         for (unsigned b = 0; b < bus_count; ++b) slot.sampler.set_send_out(b, slot.pad_sends->l[b] + at, slot.pad_sends->r[b] + at);
         slot.sampler.set_stem_out(pad_stem_ring ? pad_stem_ring->pad_rows(t) : nullptr, pad_stem_rows.get(), block, at);
+        for (unsigned n = 0; n < sub_count; ++n) slot.sampler.set_sub_out(n, slot.pad_subs->l[n] + at, slot.pad_subs->r[n] + at);
     }
     if (slot.engine->stereo()) slot.engine->render_stereo(slot.left + at, slot.right + at, frames);
     else slot.engine->render(slot.buffer + at, frames);
-    if (slot.engine == &slot.sampler) { slot.knob_pad_fed |= slot.sampler.knob_fed(); slot.send_pad_fed |= slot.sampler.sends_fed(); }
+    if (slot.engine == &slot.sampler) {
+        slot.knob_pad_fed |= slot.sampler.knob_fed(); slot.send_pad_fed |= slot.sampler.sends_fed(); slot.sub_pad_fed |= slot.sampler.subs_fed();
+    }
 }
 
 // A track's engine over the whole block (its job): in runs from one kept call to the next, each call made on its frame.
@@ -1765,6 +1768,8 @@ void EngineHost::plan_compensation() {
         // chain after it is still late by its own.
         if (slot.freeze && slot.freeze->clips[slot.pattern % pattern_count]) own[t] = slot.freeze->tap == PrintTap::PostFx ? 0 : chain_latency(t);
         plan.tracks = std::max(plan.tracks, own[t] + through[t]);
+        if (slot.engine == &slot.sampler) // its pads sent to a submix: that submix's chain late
+            for (unsigned n = 0; n < sub_count; ++n) if ((slot.sampler.routes() >> n) & 1) plan.tracks = std::max(plan.tracks, chain_latency(sub_chain(n)));
     }
     std::array<unsigned, loop_tracks> loop_own {};
     if (loops.on())
@@ -1786,6 +1791,8 @@ void EngineHost::plan_compensation() {
     plan.delay[CompensationLines::direct] = plan.delay[CompensationLines::aside] = plan.delay[CompensationLines::key] = plan.returns;
     plan.delay[CompensationLines::knob_pads] = plan.delay[CompensationLines::key_pad] = plan.tracks;
     for (unsigned b = 0; b < bus_count; ++b) plan.delay[CompensationLines::pad_sends0 + b] = plan.tracks; // they leave before the chain
+    // Kits' pads sent to a submix leave before their chain too: as late as the tracks that go into that submix.
+    for (unsigned n = 0; n < sub_count; ++n) plan.delay[CompensationLines::pad_subs0 + n] = plan.tracks - std::min(chain_latency(sub_chain(n)), plan.tracks);
     // On while anything is late, and for one block after it all came back to none (the lines ease back).
     bool late = plan.tracks || plan.returns;
     plan.on = late || (pdc.on && (pdc.tracks || pdc.returns));
@@ -2364,7 +2371,8 @@ bool EngineHost::heard(unsigned t) const {
 
 bool EngineHost::sub_soloing(unsigned s) const {
     if (!submixes[s % sub_count].solo) return false;
-    for (const auto& slot : slots) if (slot.kind != EngineKind::None && slot.out == out_sub(s)) return true;
+    for (const auto& slot : slots)
+        if (slot.kind != EngineKind::None && (slot.out == out_sub(s) || ((slot.pad_routes >> (s % sub_count)) & 1))) return true;
     return false;
 }
 
@@ -3147,6 +3155,10 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
         for (unsigned b = 0; b < bus_count; ++b) // pad sends: only what the last block wrote needs clearing
             if ((slot.send_pad_fed >> b) & 1) { std::fill(slot.pad_sends->l[b], slot.pad_sends->l[b] + block, 0.0f); std::fill(slot.pad_sends->r[b], slot.pad_sends->r[b] + block, 0.0f); }
         slot.send_pad_fed = 0;
+        for (unsigned n = 0; n < sub_count; ++n) // pads sent to submixes: as the sends
+            if ((slot.sub_pad_fed >> n) & 1) { std::fill(slot.pad_subs->l[n], slot.pad_subs->l[n] + block, 0.0f); std::fill(slot.pad_subs->r[n], slot.pad_subs->r[n] + block, 0.0f); }
+        slot.sub_pad_fed = 0;
+        slot.pad_routes = slot.engine == &slot.sampler ? slot.sampler.routes() : 0;
         slot.print_fed = false; // freeze plan F2b: this block's print, from the first run a voice sounds in
         if (knob_heard && slot.engine == &slot.sampler) { // Knob FX on kit pads: they play apart, into the slot's knob_pad_l / knob_pad_r
             std::fill(slot.knob_pad_l, slot.knob_pad_l + frames, 0.0f); std::fill(slot.knob_pad_r, slot.knob_pad_r + frames, 0.0f);
@@ -3213,6 +3225,7 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
                 for (unsigned b = 0; b < bus_count; ++b) slot.sampler.set_send_out(b, slot.pad_sends->l[b] + done, slot.pad_sends->r[b] + done);
                 const unsigned t = unsigned(&slot - slots.data());
                 slot.sampler.set_stem_out(pad_stem_ring ? pad_stem_ring->pad_rows(t) : nullptr, pad_stem_rows.get(), block, done);
+                for (unsigned n = 0; n < sub_count; ++n) slot.sampler.set_sub_out(n, slot.pad_subs->l[n] + done, slot.pad_subs->r[n] + done);
             }
         }
         cuts[cut_count++] = uint16_t(done); // a run starts here (at most one a frame)
@@ -3225,7 +3238,9 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
             auto t0 = std::chrono::steady_clock::now();
             if (slot.engine->stereo()) slot.engine->render_stereo(slot.left + done, slot.right + done, n);
             else slot.engine->render(slot.buffer + done, n);
-            if (slot.engine == &slot.sampler) { slot.knob_pad_fed |= slot.sampler.knob_fed(); slot.send_pad_fed |= slot.sampler.sends_fed(); }
+            if (slot.engine == &slot.sampler) {
+                slot.knob_pad_fed |= slot.sampler.knob_fed(); slot.send_pad_fed |= slot.sampler.sends_fed(); slot.sub_pad_fed |= slot.sampler.subs_fed();
+            }
             track_ns[t] += uint32_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
         };
         if (parallel) workers.run(active, engine_job, true); // the old way keeps the workers awake between its runs
@@ -3270,10 +3285,14 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
         submixes[n].fed = false; submixes[n].members = 0;
     }
     for (unsigned t = 0; t < track_count; ++t)
-        if (slots[t].out && slots[t].kind != EngineKind::None) submixes[(slots[t].out - 1) % sub_count].members |= uint16_t(1u << t);
+        if (slots[t].kind != EngineKind::None) {
+            if (slots[t].out) submixes[(slots[t].out - 1) % sub_count].members |= uint16_t(1u << t);
+            for (unsigned n = 0; n < sub_count; ++n) if ((slots[t].pad_routes >> n) & 1) submixes[n].members |= uint16_t(1u << t); // a pad of it
+        }
     std::fill(knob_l, knob_l + frames, 0.0f); std::fill(knob_r, knob_r + frames, 0.0f);
     if (pdc.on) { std::fill(knob_pad_sum_l, knob_pad_sum_l + frames, 0.0f); std::fill(knob_pad_sum_r, knob_pad_sum_r + frames, 0.0f); }
     if (pdc.on) for (unsigned b = 0; b < bus_count; ++b) { std::fill(pad_send_sum_l[b], pad_send_sum_l[b] + frames, 0.0f); std::fill(pad_send_sum_r[b], pad_send_sum_r[b] + frames, 0.0f); }
+    if (pdc.on) for (unsigned n = 0; n < sub_count; ++n) { std::fill(pad_sub_sum_l[n], pad_sub_sum_l[n] + frames, 0.0f); std::fill(pad_sub_sum_r[n], pad_sub_sum_r[n] + frames, 0.0f); }
     bool knob_fed = false;
     // Sidechain: the key track keys the compressor and stays aside while the rest ducks under it.
     bool keyed = comp.keyed();
@@ -3500,6 +3519,18 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
                         to_l[f] += slot.pad_sends->l[b][f] * slot.mix_l.at(f) * a; to_r[f] += slot.pad_sends->r[b][f] * slot.mix_r.at(f) * a;
                     }
                 }
+                // A kit's pads sent to submixes: each after its own chain, at the track's level and pan, muted with it, into
+                // its submix (compensating: held back apart, below); they left before the track's chain and strip.
+                for (unsigned n = 0; n < sub_count; ++n) {
+                    if (!((slot.sub_pad_fed >> n) & 1)) continue;
+                    float* to_l = pdc.on ? pad_sub_sum_l[n] : sub_l[n];
+                    float* to_r = pdc.on ? pad_sub_sum_r[n] : sub_r[n];
+                    for (unsigned f = 0; f < frames; ++f) {
+                        float a = slot.audible.at(f);
+                        to_l[f] += slot.pad_subs->l[n][f] * slot.mix_l.at(f) * a; to_r[f] += slot.pad_subs->r[n][f] * slot.mix_r.at(f) * a;
+                    }
+                    submixes[n].fed = true;
+                }
                 if (pad_keyed == int(t)) // the key pad joins after the ducking, untouched (no send: it left before the chain)
                     for (unsigned f = 0; f < frames; ++f) {
                         float a = slot.audible.at(f), l = key_l[f] * a, r = key_r[f] * a;
@@ -3527,6 +3558,16 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
         reductions[t].store(std::max(reduced, reductions[t].load(std::memory_order_relaxed) * fall), std::memory_order_relaxed);
     }
     mix_loops(frames, solo);
+    if (pdc.on) { // roadmap P4: kits' pads sent to submixes as late as the tracks there, then into their submixes
+        uint8_t routed = 0;
+        for (const auto& slot : slots) routed |= slot.pad_routes;
+        for (unsigned n = 0; n < sub_count; ++n) {
+            if (!((routed >> n) & 1)) continue;
+            compensate(CompensationLines::pad_subs0 + n, pad_sub_sum_l[n], pad_sub_sum_r[n], frames);
+            for (unsigned f = 0; f < frames; ++f) { sub_l[n][f] += pad_sub_sum_l[n][f]; sub_r[n][f] += pad_sub_sum_r[n][f]; }
+            submixes[n].fed = true;
+        }
+    }
     { // The mixer's submixes (core step 4): each that plays or still sounds through its chain, strip, level and pan
         // (on the workers when two or more), then into the master and, as much as its sends, the buses.
         std::array<uint8_t, sub_count> live {};
@@ -3735,6 +3776,14 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
     }
     recall_ring.write(record_l, record_r, frames);
     keep_sources(input, usb, frames);
+    if (stems && usb_submixes.load(std::memory_order_relaxed)) // USB out: the submixes in the stems' rows, a pair each
+        for (unsigned n = 0; n < sub_count && 2 * n + 1 < track_count; ++n) {
+            float* l = stems + size_t(2 * n) * block;
+            float* r = stems + size_t(2 * n + 1) * block;
+            const auto& sub = submixes[n];
+            if (!sub.live) { std::fill(l, l + frames, 0.0f); std::fill(r, r + frames, 0.0f); continue; }
+            for (unsigned f = 0; f < frames; ++f) { const float a = sub.audible.at(f); l[f] = sub_l[n][f] * a; r[f] = sub_r[n][f] * a; }
+        }
     take_stems(frames); // roadmap P4: the stems by the same bounds, before the bounce moves on
     render_out.process(master_l, master_r, frames);
     volume_now.aim(volume, frames, snap_mix); // main volume eased too: the knob's steps are up to dB apart

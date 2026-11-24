@@ -152,6 +152,17 @@ public:
     static constexpr unsigned send_buses = 4;
     void set_send_out(unsigned bus, float* l, float* r) { if (bus < send_buses) { send_l[bus] = l; send_r[bus] = r; } }
     unsigned sends_fed() const { return send_used; } // a bit a bus: the last render put something there
+    // Pads sent to a submix (PadSound::out): a pad's voices, after its own chain and punch (a cloud's grains as they
+    // are), play into submix n's l / r instead of the kit, added to what is there. The host hands this sub-block's
+    // place in its own buffers before each render, as for the sends; nullptr: they play in the kit.
+    static constexpr unsigned sub_outs = 8;
+    void set_sub_out(unsigned n, float* l, float* r) { if (n < sub_outs) { sub_l[n] = l; sub_r[n] = r; } }
+    unsigned subs_fed() const { return sub_used; } // a bit a submix: the last render put something there
+    uint8_t routes() const {                          // a bit a submix a pad with a sound is sent to
+        uint8_t bits = 0;
+        for (const auto& pad : pads) if (pad.out && pad.out <= sub_outs && pad.used()) bits |= uint8_t(1u << (pad.out - 1));
+        return bits;
+    }
     // Knob FX (parity phase 7): the voices of these pads (a bit a pad) play
     // into the host's l / r instead, after their own chain and punch, added to
     // what is there, for the host to put through Knob FX. No bits: none. Like
@@ -403,6 +414,14 @@ private:
     float* send_l[send_buses] {};
     float* send_r[send_buses] {};
     unsigned send_used = 0;
+    float* sub_l[sub_outs] {};
+    float* sub_r[sub_outs] {};
+    unsigned sub_used = 0;
+    int routed(int pad) const { // the submix the pad plays into, or -1: the kit
+        if (pad < 0 || pad >= int(sampler_pads)) return -1;
+        const unsigned out = pads[size_t(pad)].out;
+        return out && out <= sub_outs && sub_l[out - 1] && sub_r[out - 1] ? int(out - 1) : -1;
+    }
     const int16_t* stem_rows = nullptr; // set_stem_out()'s
     float* stem_base = nullptr;
     unsigned stem_stride = 0, stem_at = 0;

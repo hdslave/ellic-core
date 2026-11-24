@@ -249,6 +249,9 @@ public:
     // their effects (a MIDI track's AUDIO LEVEL, level and pan; Monitor's input gain at a centred pan; a loop's level
     // and pan), added up.
     void set_usb_direct(bool on) { usb_direct.store(on, std::memory_order_relaxed); }
+    // USB out: render()'s `stems` rows hold the submixes instead of the tracks: submix n's left in row 2n, its right
+    // in row 2n + 1, as it joins the master (the same as a render's submix stems).
+    void set_usb_submixes(bool on) { usb_submixes.store(on, std::memory_order_relaxed); }
     bool usb_heard() const { return usb_heard_now.load(std::memory_order_relaxed); }
     float usb_gain_left() const { return usb_gain_l.load(std::memory_order_relaxed); }
     float usb_gain_right() const { return usb_gain_r.load(std::memory_order_relaxed); }
@@ -496,6 +499,10 @@ private:
         struct PadSendBuffers { float l[bus_count][block] {}, r[bus_count][block] {}; };
         std::unique_ptr<PadSendBuffers> pad_sends = std::make_unique<PadSendBuffers>(); // a kit's pad sends, each bus apart (heap: 4 kB a track)
         unsigned send_pad_fed = 0;                                                // a bit a bus: something there this block
+        struct PadSubBuffers { float l[sub_count][block] {}, r[sub_count][block] {}; };
+        std::unique_ptr<PadSubBuffers> pad_subs = std::make_unique<PadSubBuffers>(); // a kit's pads sent to submixes, each apart (8 kB)
+        unsigned sub_pad_fed = 0;                                                 // a bit a submix: something there this block
+        uint8_t pad_routes = 0;                                                   // this block: the submixes its pads are sent to
         std::array<PendingHit, 32> hits {}; // ratchets' hits to come, each on its frame (hits_waiting)
         // Trig conditions (model/trig.h): how the last weighed note went, on the track and on each key (a kit's
         // lanes), and whether one has been weighed since Play (none yet: counted as played, for NEI).
@@ -829,6 +836,7 @@ private:
     RecallRing recall_ring; // Audio Recall: the source, always
     Bounce render_out;      // Resample and the song's mixdown
     Bounce audio_in;        // freeze plan F3: an audio track's take, from the input as Sample Record hears it
+    std::atomic<bool> usb_submixes {false}; // set_usb_submixes()
     std::atomic<StemRing*> stem_ring {nullptr}; // roadmap P4: stems beside it (each track as it joins the mix, the returns)
     float* live_stems = nullptr;                // audio thread: set_live_stems()'s rows
     void take_stems(unsigned frames);
@@ -1012,7 +1020,11 @@ private:
     void run_submix(unsigned s, unsigned frames);
     bool sub_soloing(unsigned s) const; // its solo counts: a track with something to play goes into it
     // Soloed: its own solo, or its submix's (a submix's solo solos the tracks that play into it).
-    bool soloed(const Slot& slot) const { return slot.solo || (slot.out && submixes[(slot.out - 1) % sub_count].solo); }
+    bool soloed(const Slot& slot) const {
+        if (slot.solo || (slot.out && submixes[(slot.out - 1) % sub_count].solo)) return true;
+        for (unsigned n = 0; n < sub_count; ++n) if (((slot.pad_routes >> n) & 1) && submixes[n].solo) return true; // a pad in it
+        return false;
+    }
     bool solo_on() const; // any solo counts: a track's or a submix's (and the Looper's in render())
     // Core step 5: each bus's return muted; the input heard by takes after its strip (input_wet) or before, the
     // input after its strip as Monitor hears it (wet_l / wet_r, when it is not recorded wet).
@@ -1040,6 +1052,7 @@ private:
     std::array<std::atomic<unsigned>, bus_count> pdc_buses {};
     unsigned click_wait = 0; // frames the metronome's blip waits, as late as what it counts
     float knob_pad_sum_l[block] {}, knob_pad_sum_r[block] {}; // compensating: kits' pads into Knob FX, held back apart
+    float pad_sub_sum_l[sub_count][block] {}, pad_sub_sum_r[sub_count][block] {}; // compensating: kits' pads sent to submixes, held back apart
     float pad_send_sum_l[bus_count][block] {}, pad_send_sum_r[bus_count][block] {}; // compensating: kits' pad sends, held back apart
     // Knob FX (parity phase 7): one effect the chosen tracks and kit pads go
     // through on their way to the master (`knob_in`, its twin, on the input

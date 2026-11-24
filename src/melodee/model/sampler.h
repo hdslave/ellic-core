@@ -132,6 +132,10 @@ struct PadSound {
         return !cloud && cloud_position == 38 && cloud_size == 50 && cloud_density == 24 && cloud_scan == 50 && cloud_spread == 12;
     }
     bool sending() const { for (auto s : sends) if (s) return true; return false; }
+    // Its output (MPC 3's pad output, kept in PSUB): 0 the kit, n the mixer's submix n (1-8). Sent to a submix it plays
+    // there after its Pad FX, its volume and pan, at the track's level, pan and mute, as its sends are taken, instead
+    // of through the track's chain and strip.
+    uint8_t out = 0;
     uint32_t loop_point() const { return loop_lock ? start : loop_start; }
     bool used() const { return sample != no_sample; }
     bool warped() const { return warp == warp_seq || warp >= warp_min; }

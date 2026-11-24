@@ -785,9 +785,14 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
                 juce::var instrument = field(doc, "drumPad").clone();
                 // Into its program, as MPC 3's own kits' pads (destination 0; the template's pads, from an imported
                 // MPC Sample project, say 1, which MPC 3 reads as Submix 1, past the track's own channel).
-                put(field(field(instrument, "mixable"), "audioRoute"), "destination", whole(0));
+                const auto& route = field(field(instrument, "mixable"), "audioRoute");
+                put(route, "destination", whole(0));
                 if (n < sampler_pads && !plans[n].drum.empty() && fill_layers(instrument, plans[n].drum, false, files, used, report)) {
                     const auto& pad = track.pads[n];
+                    if (pad.out) { // sent to a submix: MPC 3's pad output (destination 1, the submix's index)
+                        put(route, "destination", whole(1));
+                        put(route, "audioRouteSubIndex", whole(int((pad.out - 1u) % sub_count)));
+                    }
                     fill_sound(instrument, pad, track.pad_muted(n), pad.pitch, pad.play == PadPlay::OneShot);
                     put(instrument, "triggerMode", whole(pad.play == PadPlay::OneShot ? 0 : 1));
                     const auto& first = plans[n].drum.front();
@@ -829,6 +834,11 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
     // destination 1, the submix's index; 2 is Out 1/2), and each submix a track plays into gets its level, pan, mute
     // and solo, on its bus track and in the mixer's list, as MPC 3 keeps both.
     std::array<bool, sub_count> sub_used {};
+    for (const auto& w : written) { // a kit's pads sent to submixes (put on their instruments above)
+        const auto& track = project.tracks[w.index];
+        if (w.pad >= 0 || w.audio || track.engine != EngineKind::Sampler) continue;
+        for (const auto& pad : track.pads) if (pad.used() && pad.out) sub_used[(pad.out - 1u) % sub_count] = true;
+    }
     for (const auto& w : written) {
         const auto& track = project.tracks[w.index];
         if (!track.mix.out || track.engine == EngineKind::Midi) continue;

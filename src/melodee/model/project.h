@@ -521,6 +521,9 @@ inline unsigned mixer_left_out(const Project& project, bool routes = false) {
         n += sub.name[0] || sub.mix.sends != m.sends || sub.fx.count() > 0;
     }
     for (const auto& bus : project.buses) n += bus.mute;
+    if (!routes) // a kit's pads sent to submixes (MPC 3 sends them to its own)
+        for (const auto& t : project.tracks)
+            if (t.engine == EngineKind::Sampler) for (const auto& pad : t.pads) n += pad.used() && pad.out;
     return n;
 }
 
