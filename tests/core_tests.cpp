@@ -4879,6 +4879,25 @@ void stream_pager() {
         pager.close(t);
         while (pager.pump()) {}
     }
+    { // A frozen tail cursor reused before the pager runs must never read its previous window.
+        StreamPager::Windows tails(pager, part, 1, 1.0f);
+        int voice = tails.open(6 * c, 0);
+        CHECK(voice >= 0 && tails.open(0, 0) < 0);
+        while (pager.pump()) {}
+        CHECK(tails.limit(voice) == 9 * c);
+        tails.close(voice);
+        CHECK(tails.open(0, 0) == voice && tails.limit(voice) == 0);
+        pin_fails = true;
+        while (pager.pump()) {}
+        CHECK(tails.dead(voice));
+        tails.close(voice);
+        pin_fails = false;
+        CHECK(tails.open(c, 0) == voice && !tails.dead(voice));
+        while (pager.pump()) {}
+        CHECK(tails.limit(voice) == 4 * c && part.pins[6] == 0);
+        tails.close(voice); // destruction settles outstanding reads before the mapping goes
+    }
+    for (auto pins : part.pins) CHECK(pins == 0);
     { // what stays held for the part outlasts every voice
         CHECK(pager.hold(part, 100, c));
         CHECK(part.pins[0] == 1 && part.pins[1] == 1 && part.pins[2] == 0);

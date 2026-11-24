@@ -7,7 +7,9 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <string>
+#include <vector>
 #include <thread>
 
 // What keeps a multisampled voice off the card's time. A zone's frames are
@@ -114,6 +116,38 @@ private:
         float speed = 1;
         uint32_t lo = 0, hi = 0;          // the chunks this stream has pinned: [lo, hi)
     };
+public:
+    // A frozen Ring clip reserves cursors off-thread. Each sounding pass has its own
+    // forward read window on this part. The same pager thread serves them and the kit voices.
+    class Windows {
+    public:
+        Windows(StreamPager& owner, ZonePart& part, size_t count, float speed);
+        ~Windows();
+        int open(uint32_t frame, uint32_t safe); // audio thread; positions are interleaved floats
+        void close(int stream);
+        void place(int stream, uint32_t frame) { readers[size_t(stream)].slot.at.store(frame, std::memory_order_relaxed); }
+        uint32_t limit(int stream) const { return StreamPager::limit_of(readers[size_t(stream)].slot); }
+        bool dead(int stream) const {
+            const auto& r = readers[size_t(stream)];
+            return r.failed.load(std::memory_order_acquire) == r.slot.serial;
+        }
+
+    private:
+        friend class StreamPager;
+        struct Reader {
+            Slot slot; Work work;
+            std::atomic<uint32_t> request {0}, failed {0}; // open generation, or zero once closed
+        };
+        StreamPager& owner;
+        ZonePart& part;
+        float speed;
+        std::vector<Reader> readers;
+        std::atomic<unsigned> active {0};
+        bool working = false; // pager thread: check for the last close even after active goes to zero
+        bool pump(bool& following);
+    };
+
+private:
     struct Message {
         enum Kind : uint8_t { Open, Restart, Close } kind = Open;
         int16_t stream = 0;
@@ -125,12 +159,20 @@ private:
     static uint32_t head_of(uint32_t frame, uint32_t safe, bool reverse, uint32_t total);
     void begin(Work& work, const Message& message);
     void release(Work& work);
-    bool step(unsigned stream);
+    static uint32_t limit_of(const Slot& slot);
+    bool step(Slot& slot, Work& work);
     bool pin_chunk(ZonePart& part, uint32_t chunk);
     void unpin_chunk(ZonePart& part, uint32_t chunk);
     void run();
 
     Pin pin_fn;
+    // Registration, service and removal are off the audio thread. A clip removes its
+    // windows before unmapping its WAV, including when a freeze is cancelled or replaced.
+    std::mutex windows_mutex;
+    std::vector<Windows*> windows;
+    std::atomic<bool> has_windows {false};
+    bool windows_following = false; // pager thread
+
     std::array<Slot, stream_count> slots {};
     std::array<Work, stream_count> work {};
     SpscQueue<4096, Message> messages;   // one producer: the holder of `sending`

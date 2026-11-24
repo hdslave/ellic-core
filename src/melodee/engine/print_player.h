@@ -52,11 +52,12 @@ struct PrintClip {
     struct Held { uint32_t from = 0, to = 0; }; // floats pinned while the clip lives, [from, to)
     std::vector<Held> held;
     std::vector<float> owned; // resident: the frames
-    // Long overlapping tails share one pinned region. Their cursors are allocated before playback.
+    // Extra cursors for overlapping Ring tails. Each sounding pass keeps its existing pager stream.
     std::vector<PrintTailVoice> tail_voices;
     PrintTailVoice* spare = nullptr;
+    std::unique_ptr<StreamPager::Windows> windows; // declared after part: unregister before unmapping
     uint32_t tail_from() const;
-    bool prepare_tails(uint32_t shortest_pass);
+    void prepare_tails(uint32_t shortest_pass, StreamPager* pager = nullptr);
     const float* data() const { return part.left; }
     // Floats safe to read from frame `frame` on without the pager's word (0: none held there).
     uint32_t safe_from(uint32_t frame) const;
@@ -82,7 +83,7 @@ struct FreezePack {
 };
 
 // A track's print voices, on the audio thread: the main voice plays the print of the pattern playing, where the
-// pattern is. Ordinary tails and fades stream; longer overlaps play from their shared pinned tail.
+// pattern is. Overlapping tails and fades stream through the same pager as the main voice.
 class PrintPlayer {
 public:
     static constexpr unsigned voice_count = 4;

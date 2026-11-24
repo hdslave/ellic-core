@@ -2,7 +2,6 @@
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #include "melodee/model/print.h"
 #include "melodee/model/project_file.h"
-#include "melodee/engine/effects.h"
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
@@ -100,35 +99,9 @@ uint64_t print_hash(const Project& project, const PatternBank& bank, const std::
     bytes.push_back(uint8_t(tap));
     bytes.push_back(uint8_t(tail));
     for (unsigned k = 0; k < 4; ++k) bytes.push_back(uint8_t(rate >> (8 * k)));
-    // Earlier print hosts ran a variable number of DSP blocks while their rack opened.
-    if (std::any_of(project.plugins.begin(), project.plugins.end(), [](const PluginRef& ref) { return ref.used(); }))
-        bytes.push_back(5);
-    if (tail == PrintTail::Ring) {
-        auto delay_revision = [](const Chain& chain) {
-            unsigned revision = 0;
-            for (const auto& slot : chain.slots) {
-                auto kind = EffectKind(slot.kind);
-                if (kind == EffectKind::Spring && !slot.bypass) revision = std::max(revision, 4u);
-                else if (delay_sync_param(kind) >= 0 || kind == EffectKind::SampleDelay) revision = std::max(revision, 3u);
-                else if (!slot.bypass && effect_needs_memory(kind)) return 5u;
-            }
-            return revision;
-        };
-        // Only effects before the tap can change this print. Keep older keys for unaffected WAVs.
-        for (const auto& tr : project.tracks) {
-            if (!tr.used()) continue;
-            unsigned revision = tr.engine == EngineKind::Plugin ? 3u : 0u; // its Echo macro
-            if (tap == PrintTap::PostFx) {
-                revision = std::max(revision, delay_revision(tr.fx));
-                for (const auto& fx : tr.fx.slots)
-                    if (fx.kind == plugin_effect_kind) revision = std::max(revision, 2u);
-            }
-            if (tr.engine == EngineKind::Sampler || tr.engine == EngineKind::Keygroup)
-                for (const auto& chain : tr.pad_fx.at) revision = std::max(revision, delay_revision(chain));
-            if (print_sends(tr)) revision = std::max(revision, 2u);
-            if (revision) { bytes.push_back(uint8_t(revision)); break; }
-        }
-    }
+    // Renderer revision: older offline hosts loaded the project twice before the first note.
+    // Loop, Ring and Cut can all contain audio from that initial state.
+    bytes.push_back(6);
     uint64_t h = 0xcbf29ce484222325ull;
     for (uint8_t b : bytes) { h ^= b; h *= 0x100000001b3ull; }
     return h;

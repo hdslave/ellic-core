@@ -341,6 +341,7 @@ unsigned Effect::repeat_gap_frames(double quarter) const {
         }
         return predelay + path + (current == K::Shimmer ? unsigned(std::ceil(window)) + 2 : 1);
     }
+    case K::Limiter: return latency(); // a pad insert delays its send and the input to the track chain
     case K::Looper: return delay + 1; // a recorded loop can play after RECORD is turned off
     case K::Chorus: return unsigned(std::ceil((0.015f + 0.007f * b) * fs())) + 2;
     case K::Flanger: return unsigned(std::ceil((0.003f + 0.0025f * b) * fs())) + 2;

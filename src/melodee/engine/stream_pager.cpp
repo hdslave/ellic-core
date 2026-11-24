@@ -249,6 +249,7 @@ void StreamPager::kick() {
 }
 
 bool StreamPager::following() const {
+    if (windows_following) return true;
     for (const auto& w : work) if (w.part && !w.dead) return true;
     return false;
 }
@@ -323,7 +324,10 @@ uint32_t StreamPager::head_of(uint32_t frame, uint32_t safe, bool reverse, uint3
 }
 
 uint32_t StreamPager::limit(int stream) const {
-    const auto& s = slots[size_t(stream)];
+    return limit_of(slots[size_t(stream)]);
+}
+
+uint32_t StreamPager::limit_of(const Slot& s) {
     uint64_t ready = s.ready.load(std::memory_order_acquire);
     if (uint32_t(ready >> 32) == s.serial) return s.reverse ? std::min(uint32_t(ready), s.head) : std::max(uint32_t(ready), s.head);
     return s.head;
@@ -421,10 +425,8 @@ void StreamPager::begin(Work& w, const Message& m) {
 }
 
 // One more chunk ahead of the voice if it wants one, and what it has left behind let go.
-bool StreamPager::step(unsigned n) {
-    auto& w = work[n];
+bool StreamPager::step(Slot& slot, Work& w) {
     if (!w.part || w.dead) return false;
-    auto& slot = slots[n];
     const uint32_t frames = w.part->total, chunks = chunk_count(frames);
     const uint32_t at = slot.at.load(std::memory_order_relaxed);
     const uint32_t ahead = uint32_t(stream_chunk * std::max(1.0f, w.speed) * 2);
@@ -460,6 +462,71 @@ bool StreamPager::step(unsigned n) {
     return false;
 }
 
+StreamPager::Windows::Windows(StreamPager& p, ZonePart& source, size_t count, float ahead)
+    : owner(p), part(source), speed(ahead), readers(count) {
+    std::lock_guard<std::mutex> guard(owner.windows_mutex);
+    owner.windows.push_back(this);
+    owner.has_windows.store(true, std::memory_order_release);
+}
+
+StreamPager::Windows::~Windows() {
+    std::lock_guard<std::mutex> guard(owner.windows_mutex);
+    for (auto& r : readers) owner.release(r.work);
+    auto& all = owner.windows;
+    all.erase(std::find(all.begin(), all.end(), this));
+    owner.has_windows.store(!all.empty(), std::memory_order_release);
+}
+
+int StreamPager::Windows::open(uint32_t frame, uint32_t safe) {
+    for (size_t i = 0; i < readers.size(); ++i) {
+        auto& r = readers[i];
+        auto& slot = r.slot;
+        if (slot.used) continue;
+        slot.used = true;
+        slot.head = head_of(frame, safe, false, part.total);
+        if (++slot.serial == 0) ++slot.serial;
+        slot.at.store(frame, std::memory_order_relaxed);
+        r.request.store(slot.serial, std::memory_order_release);
+        active.fetch_add(1, std::memory_order_release);
+        owner.kick();
+        return int(i);
+    }
+    return -1;
+}
+
+void StreamPager::Windows::close(int stream) {
+    auto& r = readers[size_t(stream)];
+    r.slot.used = false;
+    r.request.store(0, std::memory_order_release);
+    active.fetch_sub(1, std::memory_order_release);
+    owner.kick();
+}
+
+bool StreamPager::Windows::pump(bool& following) {
+    if (!working && !active.load(std::memory_order_acquire)) return false;
+    working = false;
+    bool did = false;
+    for (auto& r : readers) {
+        const uint32_t serial = r.request.load(std::memory_order_acquire);
+        auto& w = r.work;
+        if (!serial) {
+            if (w.part) { owner.release(w); w.part = nullptr; did = true; }
+            continue;
+        }
+        working = true;
+        if (!w.part || w.serial != serial) {
+            Message open;
+            open.part = &part; open.speed = speed; open.serial = serial;
+            open.frame = r.slot.at.load(std::memory_order_relaxed);
+            owner.begin(w, open);
+        }
+        did |= owner.step(r.slot, w);
+        if (w.dead) r.failed.store(serial, std::memory_order_release);
+        else following = true;
+    }
+    return did;
+}
+
 bool StreamPager::pump() {
     bool did = false;
     uint64_t asked = flush_asked.load(std::memory_order_acquire);
@@ -470,8 +537,13 @@ bool StreamPager::pump() {
         if (m.kind == Message::Close) { release(w); w.part = nullptr; }
         else begin(w, m);
     }
+    for (unsigned n = 0; n < stream_count; ++n) did |= step(slots[n], work[n]);
+    windows_following = false;
+    if (has_windows.load(std::memory_order_acquire)) {
+        std::lock_guard<std::mutex> guard(windows_mutex);
+        for (auto* group : windows) did |= group->pump(windows_following);
+    }
     flush_done.store(asked, std::memory_order_release);
-    for (unsigned n = 0; n < stream_count; ++n) did |= step(n);
     return did;
 }
 
