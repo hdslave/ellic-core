@@ -5,6 +5,7 @@
 // from melodee-sample's tests/melodee.cpp, which keeps the tests of
 // Melodee's screens and its MPC shell.
 #include "melodee/engine/effects.h"
+#include "melodee/engine/channel_strip.h"
 #include "melodee/model/slice_banks.h"
 #include "melodee/model/slice_hits.h"
 #include "melodee/engine/macros.h"
@@ -9168,11 +9169,139 @@ void mixer_strips() {
     for (const auto& s : back->subs) CHECK(s.plain());
 }
 
+// The mixer's strip as it sounds (engine/channel_strip.h, core step 2): flat passes every sample untouched; a band
+// lifts or cuts its octave and leaves the others; trim and the compressor's gain are plain gains; the compressor
+// takes a loud tone down by its ratio over the threshold, hears its key in place of the channel when keyed, and does
+// nothing at mix 0 or off; width 0 is mono; a change glides; the bands sit at their frequencies at 96 kHz too.
+void channel_strip_sound() {
+    const float rate_was = dsp::sample_rate();
+    constexpr unsigned block = 128;
+    // The strip on a sine at `hz` and `amp` (and the key on another at `key_amp`, when given) for `seconds`; the
+    // gain of the last quarter second against the sine's own, in dB.
+    auto run = [&](ChannelStrip& s, float hz, float amp, float seconds = 1.0f, float key_amp = -1) {
+        const float rate = dsp::sample_rate();
+        const unsigned total = unsigned(seconds * rate), from = total - unsigned(rate / 4);
+        std::vector<float> l(block), r(block), kl(block), kr(block);
+        double sum = 0;
+        unsigned counted = 0;
+        for (unsigned at = 0; at < total; at += block) {
+            for (unsigned f = 0; f < block; ++f) {
+                double t = double(at + f) / rate;
+                l[f] = r[f] = float(amp * std::sin(2 * M_PI * hz * t));
+                kl[f] = kr[f] = float(key_amp * std::sin(2 * M_PI * 1000 * t));
+            }
+            s.process(l.data(), r.data(), block, key_amp >= 0 ? kl.data() : nullptr, key_amp >= 0 ? kr.data() : nullptr);
+            for (unsigned f = 0; f < block; ++f) if (at + f >= from && at + f < total) { sum += double(l[f]) * l[f]; ++counted; }
+        }
+        double rms = std::sqrt(sum / std::max(counted, 1u));
+        return float(20 * std::log10(std::max(rms, 1e-9) / (amp / std::sqrt(2.0))));
+    };
+    auto made = [](const Strip& v) { auto s = std::make_unique<ChannelStrip>(); s->set(v); s->reset(); return s; };
+    for (float rate : {44100.0f, 96000.0f}) {
+        dsp::device_rate = rate;
+        // Flat: nothing done, every sample as it was.
+        {
+            ChannelStrip unset;
+            CHECK(unset.idle());
+            auto s = made(Strip {});
+            CHECK(s->idle());
+            std::vector<float> l(block), r(block);
+            for (unsigned f = 0; f < block; ++f) { l[f] = std::sin(f * 0.1f); r[f] = -l[f] * 0.5f; }
+            auto l0 = l, r0 = r;
+            s->process(l.data(), r.data(), block);
+            CHECK(l == l0 && r == r0 && s->reduction_db() == 0);
+        }
+        // A band: its octave lifted or cut, two octaves off nearly untouched, the far end untouched.
+        {
+            Strip v;
+            v.eq[4] = 60; // 1 kHz, +6 dB
+            auto s = made(v);
+            CHECK(std::fabs(run(*s, 1000, 0.25f) - 6) < 0.2f);
+            s = made(v);
+            CHECK(std::fabs(run(*s, 4000, 0.25f)) < 0.6f && std::fabs(run(*s, 63, 0.25f)) < 0.1f);
+            v.eq = {}; v.eq[1] = -120; // 125 Hz, -12 dB
+            s = made(v);
+            CHECK(std::fabs(run(*s, 125, 0.25f) + 12) < 0.3f);
+            // EQ off: the bands glide back to nothing, the strip goes idle, their gains kept.
+            v.eq_on = false;
+            s->set(v);
+            CHECK(std::fabs(run(*s, 125, 0.25f)) < 0.05f && s->idle() && s->values().eq[1] == -120);
+        }
+        // Trim and the compressor's gain (no compression at amount 0): plain gains; off, none.
+        {
+            Strip v;
+            v.trim = 60;
+            auto s = made(v);
+            CHECK(std::fabs(run(*s, 440, 0.1f) - 6) < 0.05f);
+            v = Strip {}; v.comp_gain = 60;
+            s = made(v);
+            CHECK(std::fabs(run(*s, 440, 0.1f) - 6) < 0.05f && s->reduction_db() == 0);
+            v.comp_on = false;
+            s->set(v);
+            CHECK(std::fabs(run(*s, 440, 0.1f)) < 0.05f && s->idle());
+        }
+        // The compressor: -6 dB peaks, threshold -20 dB, 4:1: the peaks come out at -16.5 dB, 10.5 dB down.
+        {
+            Strip v;
+            v.comp_amount = 20; v.comp_ratio = 40;
+            auto s = made(v);
+            float g = run(*s, 1000, 0.5f);
+            CHECK(std::fabs(g + 10.5f) < 1.0f && std::fabs(s->reduction_db() - 10.5f) < 1.0f);
+            s = made(v);
+            CHECK(std::fabs(run(*s, 1000, 0.05f)) < 0.05f); // -26 dB peaks: under the threshold
+            v.comp_mix = 0;
+            s = made(v);
+            CHECK(std::fabs(run(*s, 1000, 0.5f)) < 0.05f && s->reduction_db() == 0);
+            // Keyed: a quiet channel taken down by its loud key; a loud channel with a silent key left alone.
+            v.comp_mix = 100;
+            s = made(v);
+            CHECK(std::fabs(run(*s, 300, 0.05f, 1.0f, 0.5f) + 10.5f) < 1.0f);
+            s = made(v);
+            CHECK(std::fabs(run(*s, 300, 0.5f, 1.0f, 0.0f)) < 0.05f);
+            // Each speed comes to the same reduction on a steady tone.
+            for (unsigned speed = 0; speed < unsigned(CompSpeed::Count); ++speed) {
+                v.comp_speed = uint8_t(speed);
+                s = made(v);
+                CHECK(std::fabs(run(*s, 1000, 0.5f) + 10.5f) < 1.2f);
+            }
+        }
+        // Width: 0 is mono, 100 as it is.
+        {
+            Strip v;
+            v.width = 0;
+            auto s = made(v);
+            std::vector<float> l(block), r(block, 0.0f);
+            for (unsigned f = 0; f < block; ++f) l[f] = std::sin(f * 0.05f);
+            s->process(l.data(), r.data(), block);
+            bool mono = true;
+            for (unsigned f = 0; f < block; ++f) mono &= std::fabs(l[f] - r[f]) < 1e-6f;
+            CHECK(mono && std::fabs(l[40] - std::sin(40 * 0.05f) * 0.5f) < 1e-5f);
+        }
+        // A change glides: +12 dB on 1 kHz set at once has moved under 1 dB after one block, and is all there by 0.5 s.
+        {
+            auto s = made(Strip {});
+            Strip v;
+            v.eq[4] = 120;
+            s->set(v);
+            std::vector<float> l(block), r(block);
+            for (unsigned f = 0; f < block; ++f) l[f] = r[f] = 0.25f * float(std::sin(2 * M_PI * 1000 * f / rate));
+            auto l0 = l;
+            s->process(l.data(), r.data(), block);
+            double in = 0, out = 0;
+            for (unsigned f = 0; f < block; ++f) { in += double(l0[f]) * l0[f]; out += double(l[f]) * l[f]; }
+            CHECK(10 * std::log10(out / in) < 1.0);
+            CHECK(std::fabs(run(*s, 1000, 0.25f, 0.5f) - 12) < 0.3f);
+        }
+    }
+    dsp::device_rate = rate_was;
+}
+
 } // namespace
 
 int main() {
     slice_hit_notes();
     mixer_strips();
+    channel_strip_sound();
     track_names();
     midi_lookahead();
     pad_sends();
