@@ -9202,6 +9202,52 @@ void mixer_strips() {
 // The mixer, core step 3 (melodee-sample docs/MIXER_PLAN.md): a track's strip after its chain and before its level and
 // pan, set from the project or a value at a time (StripValue); each side's meter and the compressor's reduction; a
 // strip keyed by another track.
+// The mixer's EQ picture (melodee-sample docs/MIXER_PLAN.md step 5): the strip picked has its sound after its strip
+// copied into the spectrum ring each block; none picked, nothing is written. The ring wraps and reads oldest first.
+void mixer_spectrum() {
+    {
+        auto ring = std::make_unique<ScopeRing>();
+        std::vector<float> l(ScopeRing::size + 100), r(ScopeRing::size + 100);
+        for (unsigned f = 0; f < l.size(); ++f) { l[f] = float(f); r[f] = float(f) + 2; }
+        ring->put(l.data(), r.data(), unsigned(l.size()));
+        float last[3];
+        ring->latest(last, 3);
+        const float n = float(l.size());
+        CHECK(last[0] == n - 2 && last[1] == n - 1 && last[2] == n && ring->written() == l.size()); // (l + r) / 2: f + 1
+    }
+    auto project = std::make_unique<Project>();
+    auto bank = std::make_unique<PatternBank>();
+    tone_kit(*project, 0);
+    auto host = std::make_unique<EngineHost>();
+    host->load(*project, *bank);
+    SampleData tone = tone_sample(1000);
+    CHECK(host->offer_sample(0, &tone));
+    std::vector<int32_t> out(256);
+    auto play = [&](unsigned blocks) { for (unsigned n = 0; n < blocks; ++n) host->render(out.data(), 128, 1); };
+    host->set_spectrum_tap(0);
+    play(2);
+    host->send({Command::Type::NoteOn, 0, 0, uint16_t(sampler_first_note), 100});
+    play(20);
+    std::vector<float> seen(1024);
+    host->spectrum().latest(seen.data(), 1024);
+    float rms = 0;
+    unsigned crossings = 0;
+    for (unsigned f = 0; f < seen.size(); ++f) {
+        rms += seen[f] * seen[f];
+        if (f && (seen[f - 1] < 0) != (seen[f] < 0)) ++crossings;
+    }
+    rms = std::sqrt(rms / float(seen.size()));
+    const float expected = 2 * 1000.0f * 1024 / float(dsp::sample_rate()); // a 1 kHz tone crosses zero twice a cycle
+    CHECK(rms > 0.1f && std::fabs(float(crossings) - expected) <= 3);
+    host->set_spectrum_tap(-1);
+    const uint32_t before = host->spectrum().written();
+    play(5);
+    CHECK(host->spectrum().written() == before);
+    host->set_spectrum_tap(int(strip_channels)); // out of range: none
+    play(1);
+    CHECK(host->spectrum().written() == before);
+}
+
 void mixer_tracks() {
     auto project = std::make_unique<Project>();
     auto bank = std::make_unique<PatternBank>();
@@ -9638,6 +9684,7 @@ int main() {
     mixer_strips();
     channel_strip_sound();
     mixer_tracks();
+    mixer_spectrum();
     mixer_submixes();
     mixer_buses_input();
     mixer_motion();

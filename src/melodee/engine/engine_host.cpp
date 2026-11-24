@@ -3318,6 +3318,7 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
             const float* kr = nullptr;
             if (strip_keyed(t)) key_buffers(t, strips[t].values().comp_key, kl, kr);
             strips[t].process(slot.left, slot.right, frames, kl, kr);
+            spectrum_put(t, slot.left, slot.right, frames);
         }
         if (punch_target == t) punch.process(slot.left, slot.right, frames);
         run_live(uint8_t(t), slot.left, slot.right, frames);
@@ -3565,6 +3566,7 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
             const float* kr = nullptr;
             if (strip_keyed(bus_chain(b))) key_buffers(bus_chain(b), strips[bus_chain(b)].values().comp_key, kl, kr);
             strips[bus_chain(b)].process(bus_l[b], bus_r[b], frames, kl, kr);
+            spectrum_put(bus_chain(b), bus_l[b], bus_r[b], frames);
         }
         if (pdc.on) compensate(b == bus_count ? unsigned(CompensationLines::knob) : CompensationLines::bus0 + b, // as late as the latest return
                                b == bus_count ? knob_l : bus_l[b], b == bus_count ? knob_r : bus_r[b], frames);
@@ -3652,6 +3654,7 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
     }
     { // the master's strip (the mixer), its compressor held off, before the master's chain
         strips[master_chain].process(master_l, master_r, frames);
+        spectrum_put(master_chain, master_l, master_r, frames);
     }
     run_chain(master_chain, master_l, master_r, frames);
     if (punch_target == 255) punch.process(master_l, master_r, frames);
@@ -3900,6 +3903,7 @@ void EngineHost::strip_on_input(unsigned frames, const float*& heard_l, const fl
         strip.process(l, r, frames, kl, kr);
         heard_l = l; heard_r = r;
     }
+    spectrum_put(strip_input, heard_l, heard_r, frames);
     float level_l = 0, level_r = 0;
     for (unsigned f = 0; f < frames; ++f) { level_l = std::max(level_l, std::fabs(heard_l[f])); level_r = std::max(level_r, std::fabs(heard_r[f])); }
     const float fall = dsp::fall_per_block(0.97f, frames);
@@ -3918,6 +3922,7 @@ void EngineHost::run_submix(unsigned s, unsigned frames) {
     const float* kr = nullptr;
     if (strip_keyed(strip_sub(s))) key_buffers(sub_chain(s), strips[strip_sub(s)].values().comp_key, kl, kr);
     strips[strip_sub(s)].process(l, r, frames, kl, kr);
+    spectrum_put(strip_sub(s), l, r, frames);
     sub.mix_l.aim(sub.gain * sub.pan_left * pan_balance, frames, snap_mix);
     sub.mix_r.aim(sub.gain * sub.pan_right * pan_balance, frames, snap_mix);
     if (sub.mix_l.flat() && sub.mix_r.flat()) {

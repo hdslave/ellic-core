@@ -24,6 +24,7 @@
 #include "melodee/engine/midi_out.h"
 #include "melodee/model/input_config.h"
 #include "melodee/model/project.h"
+#include "melodee/engine/scope_ring.h"
 #include <array>
 #include <string>
 #include <atomic>
@@ -291,6 +292,10 @@ public:
     }
     // What a channel's strip plays now (the values its commands set), by strip number.
     const Strip& strip_values(unsigned n) const { return strips[n % strip_channels].values(); }
+    // The mixer's EQ picture (melodee-sample docs/MIXER_PLAN.md step 5): one channel, by strip number, has its sound
+    // after its strip (before level and pan) copied into spectrum() each block; -1 none, which costs nothing.
+    void set_spectrum_tap(int strip) { spectrum_tap.store(strip >= 0 && strip < int(strip_channels) ? strip : -1, std::memory_order_relaxed); }
+    const ScopeRing& spectrum() const { return scope; }
     // The voices of the track the screen watches (engine/voice_tap.h), as the last block left them; false while a
     // write was under way each time it looked. watch_taps(-1): none taken.
     void watch_taps(int track) { tap_track.store(track, std::memory_order_relaxed); }
@@ -1109,6 +1114,11 @@ private:
     std::atomic<unsigned> bar_now {0};
     std::array<std::atomic<float>, track_count> meters {};
     std::array<std::atomic<float>, strip_channels> peak_l {}, peak_r {}, reductions {}; // strip_meter()
+    std::atomic<int> spectrum_tap {-1}; // set_spectrum_tap()
+    ScopeRing scope;
+    void spectrum_put(unsigned n, const float* l, const float* r, unsigned frames) {
+        if (int(n) == spectrum_tap.load(std::memory_order_relaxed)) scope.put(l, r, frames);
+    }
     std::atomic<int> tap_track {-1};
     TapBoard tap_board;
     std::atomic<float> output_peak {0};
