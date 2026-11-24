@@ -53,6 +53,7 @@ private:
     float makeup_db_ = 0, makeup_target_ = 0;
     float threshold_db_ = 0, slope_ = 0;         // slope: 1 - 1 / ratio
     float attack_ = 0, release_ = 0;            // the envelope's follow a frame (Auto's release moves with the reduction)
+    float auto_release_[13] {};                  // Auto's release for 0 .. 12 dB of reduction
     float env_ = 0;                              // the level heard, linear
     float gain_ = 1;                             // the compressor's gain now, linear
     float reduction_ = 0;
