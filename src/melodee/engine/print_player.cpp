@@ -20,16 +20,17 @@ void PrintClip::set_sends(uint8_t bits) {
 uint32_t PrintClip::safe_from(uint32_t frame) const {
     if (resident) return frame < frames ? stride * (frames - frame) : 0;
     const uint64_t at = uint64_t(frame) * stride;
-    for (const auto& h : held)
+    for (const auto& h : source->held)
         if (at >= h.from && at < h.to) return uint32_t(h.to - at);
     return 0;
 }
 
 void PrintClip::hold_whole(std::vector<float> interleaved, uint32_t at_rate, uint32_t pass_frames, PrintTail how, uint8_t with_sends) {
     set_sends(with_sends);
-    owned = std::move(interleaved);
-    frames = uint32_t(owned.size() / stride);
-    part.left = part.right = owned.data();
+    auto& part = source->part;
+    source->owned = std::move(interleaved);
+    frames = uint32_t(source->owned.size() / stride);
+    part.left = part.right = source->owned.data();
     part.total = stride * frames;
     part.frames.store(part.total);
     rate = at_rate; pass = pass_frames; tail = how;
@@ -53,7 +54,7 @@ void PrintClip::prepare_playback(uint32_t shortest_pass, StreamPager* pager) {
     }
     if (pager) {
         const float speed = ahead_speed(float(rate)) * stride / 2;
-        windows = std::make_unique<StreamPager::Windows>(*pager, part, tail_voices.size() + PrintPlayer::voice_count, speed);
+        windows = std::make_unique<StreamPager::Windows>(*pager, source->part, tail_voices.size() + PrintPlayer::voice_count, speed);
     }
 }
 
@@ -118,7 +119,7 @@ void PrintPlayer::begin(PrintClip* clip, uint32_t frame, bool fade_in, float rat
     // The pager counts interleaved floats, including the bus channels.
     const uint32_t start = clip->stride * frame;
     if (clip->windows) m.stream = clip->windows->open(start, safe);
-    else if (pager) m.stream = pager->open(clip->part, start, false, ahead_speed(rate) * clip->stride / 2, safe);
+    else if (pager) m.stream = pager->open(clip->source->part, start, false, ahead_speed(rate) * clip->stride / 2, safe);
     if (m.stream < 0) {
         ++underruns;
         close(m); // follow() can try again on the next tick
@@ -201,7 +202,7 @@ void PrintPlayer::render(float* left, float* right, unsigned frames, float* cons
             close(v);
             return;
         }
-        uint32_t limit = c.part.total;
+        uint32_t limit = c.source->part.total;
         if (!c.resident) limit = c.windows ? c.windows->limit(v.stream) : pager->limit(v.stream);
         bool late = false, waited = false;
         unsigned f = 0;

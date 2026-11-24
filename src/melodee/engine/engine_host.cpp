@@ -116,6 +116,7 @@ void EngineHost::reload(ProjectPack& pack, bool keep_loops) {
         slot.print.cut_all();
         retire_freeze(slot.freeze); retire_freeze(slot.freeze_leaving); retire_freeze(freeze_next[t]);
         slot.freeze = slot.freeze_leaving = freeze_next[t] = nullptr;
+        freeze_serial_now[t].store(0, std::memory_order_relaxed);
         slot.print_on = false; slot.hand.reset(); wake(slot);
         slot.audio.player.cut_all(); // freeze plan F3: another project's regions; the shell sends its own
         retire_audio(slot.audio_pack); retire_audio(slot.audio_leaving);
@@ -619,6 +620,7 @@ void EngineHost::apply(const Command& c) {
                 target.print.cut_all();
                 retire_freeze(target.freeze); retire_freeze(target.freeze_leaving); retire_freeze(freeze_next[t]);
                 target.freeze = target.freeze_leaving = freeze_next[t] = nullptr;
+                freeze_serial_now[t].store(0, std::memory_order_relaxed);
                 target.print_on = false; target.hand.reset(); wake(target);
                 target.audio.player.cut_all(); // freeze plan F3: the shell sends an audio track's regions again
                 retire_audio(target.audio_pack); retire_audio(target.audio_leaving);
@@ -1175,6 +1177,7 @@ void EngineHost::set_freeze(unsigned t, FreezePack* pack) {
     if (pack) slot.print_post = pack->tap == PrintTap::PostFx;
     slot.print_on = false;
     wake(slot);
+    freeze_serial_now[t % track_count].store(pack ? pack->serial : 0, std::memory_order_relaxed);
 }
 
 void EngineHost::freeze_at_bar() {

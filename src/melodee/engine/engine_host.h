@@ -377,6 +377,7 @@ public:
     int audio_take_track() const { return audio_track.load(std::memory_order_relaxed); }     // -1: none
     int audio_take_pattern() const { return audio_pattern.load(std::memory_order_relaxed); } // -1: not begun
     uint32_t frozen_tracks() const { return frozen_now.load(std::memory_order_relaxed); }
+    uint32_t active_freeze_serial(unsigned track) const { return freeze_serial_now[track].load(std::memory_order_relaxed); }
     uint32_t printing_tracks() const { return printing_now.load(std::memory_order_relaxed); }
     uint32_t sleeping_tracks() const { return sleeping_now.load(std::memory_order_relaxed); }
     uint32_t print_underruns() const { return print_under.load(std::memory_order_relaxed); }
@@ -604,6 +605,7 @@ private:
     std::atomic<int> audio_track {-1};   // the track a take is armed or recording for
     std::atomic<int> audio_pattern {-1}; // the pattern it is recording (from its first frame)
     std::array<FreezePack*, 16> freeze_limbo {};
+    std::array<std::atomic<uint32_t>, track_count> freeze_serial_now {};
     std::atomic<uint32_t> frozen_now {0}, printing_now {0}, sleeping_now {0}, print_under {0}, print_waited {0};
     // Roadmap P5: track t's follow action planned from where its pattern started (dice rolled now), and brought.
     void plan_follow(unsigned t);

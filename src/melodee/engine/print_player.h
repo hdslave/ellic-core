@@ -34,14 +34,22 @@ struct PrintTailVoice {
     PrintTailVoice* next = nullptr;
 };
 
+// A print's samples and permanent pins. Replacement packs can share these while their playback cursors are independent.
+struct PrintSource {
+    ZonePart part; // left == right: stride * frames floats
+    struct Held { uint32_t from = 0, to = 0; }; // floats pinned while the source lives, [from, to)
+    std::vector<Held> held;
+    std::vector<float> owned; // resident: the frames
+};
+
 // One print as the audio thread plays it: its frames interleaved float, read by the pager as one side of `stride`
 // floats a frame: the print's two, then a pair for each bus its kit's pad sends ride along for (PrintRecord::sends).
 // The shell (shell/print_engine.cpp) maps it; tests hold the frames in memory (resident).
 struct PrintClip {
-    PrintClip() = default;
+    explicit PrintClip(std::shared_ptr<PrintSource> audio = std::make_shared<PrintSource>()) : source(std::move(audio)) {}
     PrintClip(const PrintClip&) = delete;
     PrintClip& operator=(const PrintClip&) = delete;
-    ZonePart part;          // left == right: stride * frames floats
+    const std::shared_ptr<PrintSource> source;
     uint32_t frames = 0;    // device frames
     uint8_t stride = 2;     // floats a frame
     uint8_t sends = 0;      // a bit a bus with a pair of its own, in bus order after the print's
@@ -49,16 +57,13 @@ struct PrintClip {
     uint32_t rate = 0;      // the device's rate it was printed at
     PrintTail tail = PrintTail::Loop;
     bool resident = false;  // every frame in memory: read without the pager
-    struct Held { uint32_t from = 0, to = 0; }; // floats pinned while the clip lives, [from, to)
-    std::vector<Held> held;
-    std::vector<float> owned; // resident: the frames
     // Extra cursors for overlapping Ring tails. Each sounding pass keeps its existing pager stream.
     std::vector<PrintTailVoice> tail_voices;
     PrintTailVoice* spare = nullptr;
-    std::unique_ptr<StreamPager::Windows> windows; // declared after part: unregister before unmapping
+    std::unique_ptr<StreamPager::Windows> windows; // declared after source: unregister before unmapping
     uint32_t tail_from() const;
     void prepare_playback(uint32_t shortest_pass, StreamPager* pager = nullptr);
-    const float* data() const { return part.left; }
+    const float* data() const { return source->part.left; }
     // Floats safe to read from frame `frame` on without the pager's word (0: none held there).
     uint32_t safe_from(uint32_t frame) const;
     // Tests: interleaved frames held whole (`with_sends`: the pairs after the first two, as `sends` says).
@@ -78,6 +83,7 @@ struct FreezePack {
     // Freeze plan F2d: a deep freeze. Its plug-ins are let go once the engine sleeps, so nothing wakes it: hands
     // (pads, keys, the arp) play nothing and a pattern without a print stays silent.
     bool deep = false;
+    uint32_t serial = 0; // identifies the shell request once this pack takes effect
     std::array<PrintClip*, pattern_count> clips {};
     std::vector<std::unique_ptr<PrintClip>> owned;
 };
