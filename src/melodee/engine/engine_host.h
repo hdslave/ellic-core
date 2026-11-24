@@ -1056,6 +1056,11 @@ private:
     uint32_t knob_quiet = 0, knob_rung = 0; // frames its tail has been quiet, and has rung, since it was last fed
     float knob_l[block] {}, knob_r[block] {};
     float key_l[block] {}, key_r[block] {}, aside_l[block] {}, aside_r[block] {};
+    // Pad stems (StemRing::pads()): each pad stem's left and right for this block, from the kit's lanes, then at its
+    // track's level, pan and mute; the ring this block writes them to, when it takes pad stems.
+    std::unique_ptr<float[]> pad_stem_rows = std::make_unique<float[]>(size_t(StemRing::pad_most) * 2 * block);
+    StemRing* pad_stem_ring = nullptr;
+    float* pad_stem_row(unsigned n, unsigned side) { return pad_stem_rows.get() + size_t(2 * n + side) * block; }
     float key_pad_l[block] {}, key_pad_r[block] {}; // Sidechain on one kit pad: that pad as the sampler left it // Sidechain: the key heard by the detector, and as it joins the master
     void knob_targets(); // hands each kit its pads (none while Knob FX is not heard)
     void knob_command(const Command& c);

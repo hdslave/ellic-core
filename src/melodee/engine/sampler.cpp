@@ -1719,6 +1719,8 @@ void SamplerEngine::render_stereo(float* left, float* right, unsigned frames) {
             const float* l = g.l;
             const float* r = g.r;
             const double span = double(g.top - g.low);
+            float* stem_l = stem_out(g.pad, 0); // its pad's stem too
+            float* stem_r = stem_out(g.pad, 1);
             for (unsigned f = 0; f < frames && g.age < g.length; ++f, ++g.age) {
                 // Only a region shorter than the grain gets this far: round inside it.
                 if (g.position >= g.top) g.position -= span * std::floor((g.position - g.low) / span);
@@ -1726,7 +1728,9 @@ void SamplerEngine::render_stereo(float* left, float* right, unsigned frames) {
                 float frac = float(g.position - i);
                 unsigned j = i + 1 < g.top ? i + 1 : g.low;
                 float w = std::sin(dsp::pi * float(g.age) / float(g.length)) * g.gain * 0.5f; // a smooth window
-                left[f] += (l[i] + (l[j] - l[i]) * frac) * w * g.left; right[f] += (r[i] + (r[j] - r[i]) * frac) * w * g.right;
+                const float gl = (l[i] + (l[j] - l[i]) * frac) * w * g.left, gr = (r[i] + (r[j] - r[i]) * frac) * w * g.right;
+                left[f] += gl; right[f] += gr;
+                if (stem_l) { stem_l[f] += gl; stem_r[f] += gr; }
                 g.position += g.step;
             }
             if (g.age >= g.length) g.sample = nullptr;
@@ -1739,7 +1743,10 @@ void SamplerEngine::render_stereo(float* left, float* right, unsigned frames) {
     bool sending = false;
     for (unsigned b = 0; b < send_buses; ++b) sending |= send_l[b] && send_r[b];
     send_used = 0;
-    auto on_lane = [&](int pad) { return laned && pad < int(sampler_pads) && (chained(pad) || (sending && sends_heard(pad))); };
+    const bool stemming = stem_rows && laned;
+    auto on_lane = [&](int pad) {
+        return laned && pad < int(sampler_pads) && (chained(pad) || (sending && sends_heard(pad)) || (stemming && stem_rows[pad] >= 0));
+    };
     bool knobbing = (knob_mask[0] || knob_mask[1]) && knob_l && knob_r && frames <= 128;
     if (laned) for (auto& l : *lane) if (l.pad >= 0) { l.fed = false; std::fill(l.l, l.l + frames, 0.0f); std::fill(l.r, l.r + frames, 0.0f); }
     knob_used = false;
@@ -1824,6 +1831,10 @@ void SamplerEngine::render_stereo(float* left, float* right, unsigned frames) {
             for (unsigned f = 0; f < frames; ++f) {
                 into_l[f] += l.l[f]; into_r[f] += l.r[f];
                 loudest = std::max(loudest, std::max(std::fabs(l.l[f]), std::fabs(l.r[f])));
+            }
+            if (float* stem_l = stemming ? stem_out(l.pad, 0) : nullptr) { // its pad stem: the lane as it joins the kit
+                float* stem_r = stem_out(l.pad, 1);
+                for (unsigned f = 0; f < frames; ++f) { stem_l[f] += l.l[f]; stem_r[f] += l.r[f]; }
             }
             // Its sends: into each bus as much as the pad sends there, eased across the block so a turn never clicks.
             auto& now = send_now[size_t(l.pad)];

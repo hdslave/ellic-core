@@ -837,6 +837,11 @@ void EngineHost::apply(const Command& c) {
         render_out.cue();
         bounce_song = c.value == 1;
         bounce_ticks = bounce_song ? 0 : std::max<uint32_t>(c.position, 1);
+        if (bounce_song) { // the song's render: chance, S&H and the kits' random picks start again, the same each render
+            random = 0x2545F491u;
+            mod_seed = 0x9e3779b9u;
+            for (auto& s : slots) s.sampler.reseed();
+        }
         break;
     case Type::PadNote:
         if (slot.freeze && slot.freeze->deep) break; // freeze plan F2d
@@ -1396,6 +1401,7 @@ void EngineHost::render_engine(unsigned t, Slot& slot, unsigned at, unsigned fra
         slot.sampler.set_key_pad(pad_key ? int(comp.key_pad()) : -1, pad_key ? key_pad_l + at : nullptr, pad_key ? key_pad_r + at : nullptr);
         slot.sampler.set_knob_out(knob_heard ? slot.knob_pad_l + at : nullptr, knob_heard ? slot.knob_pad_r + at : nullptr);
         for (unsigned b = 0; b < bus_count; ++b) slot.sampler.set_send_out(b, slot.pad_sends->l[b] + at, slot.pad_sends->r[b] + at);
+        slot.sampler.set_stem_out(pad_stem_ring ? pad_stem_ring->pad_rows(t) : nullptr, pad_stem_rows.get(), block, at);
     }
     if (slot.engine->stereo()) slot.engine->render_stereo(slot.left + at, slot.right + at, frames);
     else slot.engine->render(slot.buffer + at, frames);
@@ -2497,6 +2503,8 @@ void EngineHost::midi_inputs(const int32_t* input, const float* usb, unsigned fr
 // pan and mute, eased as heard, with the kit pad that keys the Sidechain, which joins after the ducking), each bus's
 // return and each submix as it joins the master, the same frames as the mixdown. The same rows, every block, into
 // set_live_stems()'s (the Ableton Move's USB submixes): one computation, so the two never differ.
+static_assert(StemRing::tracks == track_count && StemRing::kit_pads == sampler_pads, "pad stems: a row for each kit pad");
+
 void EngineHost::take_stems(unsigned frames) {
     StemRing* ring = stem_ring.load(std::memory_order_acquire);
     unsigned from = 0, to = 0;
@@ -2506,7 +2514,9 @@ void EngineHost::take_stems(unsigned frames) {
     float* rows = live_stems ? live_stems : &own[0][0];
     auto row = [&](unsigned stem, unsigned side) { return rows + size_t(stem * 2 + side) * block; };
     const uint32_t ring_mask = bouncing ? ring->mask() : 0, wanted = live_stems ? ~0u : ring_mask;
-    std::array<const float*, StemRing::stem_count> left {}, right {};
+    std::array<const float*, StemRing::row_most> left {}, right {};
+    if (bouncing) // pad stems: rows after the stems, as render() left them
+        for (unsigned n = 0; n < ring->pads(); ++n) { left[StemRing::stem_count + n] = pad_stem_row(n, 0); right[StemRing::stem_count + n] = pad_stem_row(n, 1); }
     for (unsigned t = 0; t < track_count; ++t) {
         const auto& slot = slots[t];
         if (!((wanted >> t) & 1)) continue;
@@ -3143,6 +3153,12 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
         }
     }
 
+    // Pad stems: this block's ring, when a render takes them, and their rows cleared.
+    {
+        StemRing* ring = stem_ring.load(std::memory_order_acquire);
+        pad_stem_ring = ring && ring->pads() ? ring : nullptr;
+        if (pad_stem_ring) std::fill(pad_stem_rows.get(), pad_stem_rows.get() + size_t(pad_stem_ring->pads()) * 2 * block, 0.0f);
+    }
     // Sidechain on one kit pad: the sampler plays that pad apart, into key_pad_l / key_pad_r.
     int pad_keyed = -1; // the key track, when its key is one of its pads
     if (comp.keyed() && comp.key_pad() < sampler_pads) {
@@ -3195,6 +3211,8 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
                 slot.sampler.set_key_pad(pad_key ? int(comp.key_pad()) : -1, pad_key ? key_pad_l + done : nullptr, pad_key ? key_pad_r + done : nullptr);
                 slot.sampler.set_knob_out(knob_heard ? slot.knob_pad_l + done : nullptr, knob_heard ? slot.knob_pad_r + done : nullptr);
                 for (unsigned b = 0; b < bus_count; ++b) slot.sampler.set_send_out(b, slot.pad_sends->l[b] + done, slot.pad_sends->r[b] + done);
+                const unsigned t = unsigned(&slot - slots.data());
+                slot.sampler.set_stem_out(pad_stem_ring ? pad_stem_ring->pad_rows(t) : nullptr, pad_stem_rows.get(), block, done);
             }
         }
         cuts[cut_count++] = uint16_t(done); // a run starts here (at most one a frame)
@@ -3399,6 +3417,20 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
             slot.audible.aim(heard ? 1.0f : 0.0f, frames, snap_mix);
             slot.knob_share.aim(knobbed ? 1.0f : 0.0f, frames, snap_mix);
             for (unsigned b = 0; b < bus_count; ++b) slot.sends_now[b].aim(slot.sends[b], frames, snap_mix);
+            if (pad_stem_ring && slot.engine == &slot.sampler) { // pad stems: at the kit's level, pan and mute, as its pad sends
+                const int16_t* rows = pad_stem_ring->pad_rows(t);
+                for (unsigned p = 0; p < sampler_pads; ++p) {
+                    if (rows[p] < 0) continue;
+                    float* l = pad_stem_row(unsigned(rows[p]), 0);
+                    float* r = pad_stem_row(unsigned(rows[p]), 1);
+                    for (unsigned f = 0; f < frames; ++f) {
+                        const float a = slot.audible.at(f);
+                        l[f] *= slot.mix_l.at(f) * a; r[f] *= slot.mix_r.at(f) * a;
+                    }
+                }
+                // They left before the chain: the kit's stem is as late as its chain and its compensation make it.
+                pad_stem_ring->set_pad_delay(t, pdc.on ? pdc.delay[CompensationLines::track0 + t] + pdc_tracks[t].load(std::memory_order_relaxed) : 0);
+            }
             if (!slot.audible.silent()) {
                 // Knob FX: a kit's pads switched on come out apart, after their own chain (not the track's), at the track's level and pan.
                 if (slot.engine == &slot.sampler && slot.knob_pad_fed) {

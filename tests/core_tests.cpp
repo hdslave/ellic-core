@@ -29,6 +29,7 @@
 #include "melodee/engine/exs.h"
 #include "melodee/engine/sf2.h"
 #include "melodee/engine/dspreset.h"
+#include "melodee/shell/stem_writer.h"
 #include "melodee/shell/expansion_install.h"
 #include "melodee/engine/stream_pager.h"
 #include "melodee/shell/sample_cache.h"
@@ -8541,6 +8542,91 @@ void pad_sends_freeze() {
     CHECK(most > 0.05f && diff < 1e-3f);
 }
 
+// StemWriter: each file whole and in order across chunks, a pad stem's silence first, a silent file's peak 0.
+void stem_writer() {
+    const auto dir = std::filesystem::temp_directory_path() / "melodee-stem-writer";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    StemWriter writer;
+    std::vector<std::string> paths {(dir / "a.wav").string(), (dir / "b.wav").string(), (dir / "quiet.wav").string()};
+    CHECK(writer.open(paths, 48000) && writer.files() == 3);
+    writer.add_silence(1, 100);
+    const unsigned total = 133000; // past two chunks, in blocks of 1000
+    CHECK(total > StemWriter::chunk_frames * 2);
+    std::vector<float> block(2 * 1000);
+    std::vector<float> zeros(2 * 1000, 0.0f);
+    for (unsigned at = 0; at < total; at += 1000) {
+        for (unsigned f = 0; f < 1000; ++f) { block[2 * f] = float((at + f) % 997) / 997.0f; block[2 * f + 1] = -block[2 * f]; }
+        CHECK(writer.add(0, block.data(), 1000) && writer.add(1, block.data(), 1000) && writer.add(2, zeros.data(), 1000));
+    }
+    writer.flush();
+    for (unsigned n = 0; n < 500 && !writer.done(); ++n) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    CHECK(writer.done() && writer.queued_bytes() == 0);
+    std::vector<float> loudest;
+    CHECK(writer.close(&loudest) && loudest.size() == 3 && loudest[0] > 0.99f && loudest[2] == 0.0f);
+    SampleData a, b;
+    CHECK(read_wav(paths[0], a).empty() && read_wav(paths[1], b).empty());
+    CHECK(a.frames == total && b.frames == total + 100);
+    bool same = true;
+    for (unsigned f = 0; f < total; f += 331) same = same && a.left[f] == float(f % 997) / 997.0f && a.right[f] == -a.left[f] && b.left[f + 100] == a.left[f];
+    CHECK(same && b.left[99] == 0.0f);
+    std::filesystem::remove_all(dir);
+}
+
+// Pad stems beside the stems: each kit pad apart, after its own chain, at the kit's level and pan; with no chain and a
+// flat strip on the kit they add up to its stem, frame for frame. A pad stem holds only its own pad's hits.
+void pad_stems() {
+    auto project = std::make_unique<Project>();
+    auto bank = std::make_unique<PatternBank>();
+    tone_kit(*project, 0);
+    EngineHost host;
+    host.load(*project, *bank);
+    auto tone = tone_sample();
+    CHECK(host.offer_sample(0, &tone));
+    host.send({Command::Type::Level, 0, 0, 0, 80});
+    auto ring = std::make_unique<StemRing>();
+    ring->arm(1u << 0, 2);
+    ring->set_pad(0, 0, 0); // pad stem 0: pad 1
+    ring->set_pad(1, 0, 2); // pad stem 1: pad 3
+    CHECK(ring->rows() == 3 && ring->row_stem(0) == 0 && ring->row_stem(2) == StemRing::stem_count + 1 && ring->pads() == 2);
+    CHECK(ring->pad_rows(0)[2] == 1 && ring->pad_rows(0)[1] == -1 && ring->pad_rows(1)[0] == -1);
+    host.set_stems(ring.get());
+    Command arm {Command::Type::BounceArm, 0, 0, 0, 0};
+    arm.position = ticks_per_quarter / 2;
+    host.send(arm);
+    host.send({Command::Type::Play, 0});
+    host.send({Command::Type::NoteOn, 0, 0, uint16_t(sampler_first_note), 100});
+    std::vector<int32_t> out(256);
+    for (unsigned n = 0; n < 20; ++n) host.render(out.data(), 128, 1);
+    host.send({Command::Type::NoteOn, 0, 0, uint16_t(sampler_first_note + 2), 60});
+    for (unsigned n = 0; n < 200; ++n) host.render(out.data(), 128, 1);
+    CHECK(host.bounce().state() == Bounce::State::Done && host.bounce().taken() > 20 * 128);
+    constexpr unsigned most = 65536;
+    std::vector<float> got(size_t(ring->rows()) * 2 * most);
+    unsigned frames = ring->pop_rows(got.data(), most);
+    CHECK(frames == host.bounce().taken() && !ring->failed());
+    auto at = [&](unsigned row, unsigned side, unsigned f) { return got[size_t(row) * 2 * most + 2 * f + side]; };
+    float kit = 0, worst = 0, first = 0, early_third = 0, third = 0;
+    for (unsigned f = 0; f < frames; ++f)
+        for (unsigned side = 0; side < 2; ++side) {
+            kit = std::max(kit, std::fabs(at(0, side, f)));
+            worst = std::max(worst, std::fabs(at(1, side, f) + at(2, side, f) - at(0, side, f)));
+            first = std::max(first, std::fabs(at(1, side, f)));
+            (f < 19 * 128 ? early_third : third) = std::max(f < 19 * 128 ? early_third : third, std::fabs(at(2, side, f)));
+        }
+    CHECK(kit > 0.05f && worst < 1e-5f && first > 0.02f && early_third == 0.0f && third > 0.01f);
+    host.set_stems(nullptr);
+    // The old layout still: pop() hands stem_count blocks, a pad stem in none of them.
+    ring->arm(1u << 3);
+    CHECK(ring->rows() == 1 && ring->pads() == 0 && ring->pad_rows(0)[0] == -1);
+    std::array<float, 4> one {0.5f, 0.25f, 0.5f, 0.25f};
+    std::array<const float*, StemRing::row_most> l {}, r {};
+    l[3] = one.data(); r[3] = one.data() + 1;
+    ring->write(l.data(), r.data(), 0, 1);
+    std::vector<float> old(size_t(StemRing::stem_count) * 2 * 4, 9.0f);
+    CHECK(ring->pop(old.data(), 4) == 1 && old[size_t(3) * 2 * 4] == 0.5f && old[size_t(3) * 2 * 4 + 1] == 0.25f && old[0] == 0.0f);
+}
+
 // Pad sends: each kit pad into buses A-D at its own send, after its own chain, eased; none from a pad at 0. In the
 // host they follow the kit's level and mute, and PSND / BSND keep them.
 void pad_sends() {
@@ -9691,6 +9777,8 @@ int main() {
     track_names();
     midi_lookahead();
     pad_sends();
+    pad_stems();
+    stem_writer();
     pad_cloud();
     pad_sends_freeze();
     plugin_macros();
