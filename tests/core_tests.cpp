@@ -8545,6 +8545,27 @@ void pad_sends_freeze() {
 // Pads sent to submixes (MPC 3's pad output): pad 3 into submix 3 leaves the kit's stem and plays in the submix's, at
 // the kit's level; soloing submix 3 keeps the kit heard; USB out's submix rows carry it; PSUB keeps it.
 void pad_outputs() {
+    { // A destination stays in the route mask until its last sounding pad moves or loses its sample.
+        SamplerEngine kit;
+        PadSound pad;
+        pad.out = 3;
+        kit.set_pad(0, pad);
+        CHECK(kit.routes() == 0);
+        pad.sample = 0;
+        kit.set_pad(0, pad);
+        kit.set_pad(1, pad);
+        CHECK(kit.routes() == 4);
+        pad.out = 8;
+        kit.set_pad(1, pad);
+        CHECK(kit.routes() == (4 | 128));
+        kit.move_pad(1, PadParam::Level, 42);
+        kit.restore_pads();
+        CHECK(kit.routes() == (4 | 128));
+        pad.sample = no_sample;
+        kit.set_pad(1, pad);
+        kit.set_pad(0, PadSound {});
+        CHECK(kit.routes() == 0);
+    }
     auto project = std::make_unique<Project>();
     auto bank = std::make_unique<PatternBank>();
     tone_kit(*project, 0);
