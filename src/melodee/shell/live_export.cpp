@@ -458,7 +458,7 @@ std::string export_live_set(const Project& project, const PatternBank& patterns,
                             LiveExport& report, const PrintTable* prints, const std::string& prints_dir, const std::string& audio_dir,
                             const LiveColours* colours) {
     report = LiveExport {};
-    report.mixer = mixer_left_out(project); // strips, submixes and bus mutes: not carried yet (melodee-sample docs/MIXER_PLAN.md, core step 7)
+    report.mixer = mixer_left_out(project); // strips, submixes and bus mutes: not carried
     const fs::path where = fs::path(folder) / (name + " Project");
     std::error_code error;
     fs::create_directories(where, error);
