@@ -185,6 +185,17 @@ void EngineHost::load_state(const Project& project, bool keep_loops) {
         strips[strip_sub(n)].reset();
     }
     for (unsigned b = 0; b < bus_count; ++b) { returns[b] = project.buses[b].level / 100.0f; returns_base[b] = project.buses[b].level; }
+    for (unsigned b = 0; b < bus_count; ++b) { // the mixer: the buses' mutes and strips, the master's and the input's
+        bus_mute[b] = project.buses[b].mute;
+        strips[bus_chain(b)].set(project.buses[b].strip); strips[bus_chain(b)].reset();
+    }
+    {
+        Strip master = project.master_strip;
+        master.comp_amount = 0; // the master's compressor is the Compressor
+        strips[master_chain].set(master); strips[master_chain].reset();
+        strips[strip_input].set(project.input_strip); strips[strip_input].reset();
+        input_wet = project.input_wet;
+    }
     for (unsigned k = 0; k < max_slots; ++k) master_base[k] = project.master.slots[k].params; // roadmap P4: Motion borrows them
     // Knob FX and the master compressor.
     const auto& k = project.knob_fx;
@@ -956,6 +967,8 @@ void EngineHost::apply(const Command& c) {
             sub.sends[c.index - Command::SubSend0] = std::clamp<int>(c.value, 0, 100) / 100.0f;
         break;
     }
+    case Type::BusMute: if (c.index < bus_count) bus_mute[c.index] = c.value != 0; break; // eased with the return
+    case Type::InputWet: input_wet = c.value != 0; break;
     case Type::TrackOut: // the mixer: where a track plays; the next block crosses over from where it played (render())
         if (c.track < track_count) slot.out = c.value > 0 && c.value <= int(sub_count) ? uint8_t(c.value) : out_master;
         break;
@@ -963,6 +976,7 @@ void EngineHost::apply(const Command& c) {
         if (c.track < strip_channels && c.index < unsigned(StripPart::Count)) {
             Strip v = strips[c.track].values();
             strip_set(v, StripPart(c.index), c.value);
+            if (c.track == master_chain) v.comp_amount = 0; // the master's compressor is the Compressor (Shift + Pad 5)
             strips[c.track].set(v);
         }
         break;
@@ -1666,11 +1680,15 @@ void EngineHost::plan_keys() {
     }
     for (unsigned s = 0; s < sub_count; ++s) // a submix's strip: after every track, so a track's key is heard at once
         if (strip_keyed(strip_sub(s))) key_sources |= 1u << (strips[strip_sub(s)].values().comp_key - 1);
+    for (unsigned b = 0; b < bus_count; ++b) // a bus's strip, and the input's: after the tracks and the submixes too
+        if (strip_keyed(bus_chain(b))) key_sources |= 1u << (strips[bus_chain(b)].values().comp_key - 1);
+    if (strip_keyed(strip_input)) key_sources |= 1u << (strips[strip_input].values().comp_key - 1);
 }
 
 bool EngineHost::strip_keyed(unsigned n) const {
     const Strip& v = strips[n % strip_channels].values();
-    const bool itself = (n < track_count && v.comp_key == fx_key_track(n)) || (n >= strip_sub(0) && v.comp_key == fx_key_sub(n - strip_sub(0)));
+    const bool itself = (n < track_count && v.comp_key == fx_key_track(n)) || (n >= strip_sub(0) && v.comp_key == fx_key_sub(n - strip_sub(0)))
+                     || (n >= track_count && n < master_chain && v.comp_key == fx_key_bus(n - track_count));
     return v.comp_on && v.comp_amount && v.comp_key && v.comp_key < fx_key_count && !itself;
 }
 
@@ -3303,7 +3321,8 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
     // mean last block, else last. Then the buses' chains and Knob FX's, each a job of a second run.
     std::array<uint8_t, bus_count + 1> seconds {};
     unsigned second_jobs = 0;
-    for (unsigned b = 0; b < bus_count; ++b) if (fx[bus_chain(b)][0].kind() != EffectKind::None) seconds[second_jobs++] = uint8_t(b);
+    for (unsigned b = 0; b < bus_count; ++b)
+        if (fx[bus_chain(b)][0].kind() != EffectKind::None || !strips[bus_chain(b)].idle()) seconds[second_jobs++] = uint8_t(b);
     unsigned looper_at = loop_ns > track_work_ns / std::max(active, 1u) ? 0 : active;
     auto first_job = [&](unsigned i) {
         if (i == looper_at) {
@@ -3506,27 +3525,42 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
     auto second_job = [&](unsigned i) {
         unsigned b = seconds[i];
         if (b == bus_count) knob.process(knob_l, knob_r, frames);
-        else run_chain(bus_chain(b), bus_l[b], bus_r[b], frames);
+        else { // its chain, then its strip (the mixer)
+            run_chain(bus_chain(b), bus_l[b], bus_r[b], frames);
+            const float* kl = nullptr;
+            const float* kr = nullptr;
+            if (strip_keyed(bus_chain(b))) key_buffers(bus_chain(b), strips[bus_chain(b)].values().comp_key, kl, kr);
+            strips[bus_chain(b)].process(bus_l[b], bus_r[b], frames, kl, kr);
+        }
         if (pdc.on) compensate(b == bus_count ? unsigned(CompensationLines::knob) : CompensationLines::bus0 + b, // as late as the latest return
                                b == bus_count ? knob_l : bus_l[b], b == bus_count ? knob_r : bus_r[b], frames);
     };
     if (parallel && !plugin_on_two_buses()) workers.run(second_jobs, second_job);
     else for (unsigned i = 0; i < second_jobs; ++i) second_job(i);
-    if (pdc.on) { // roadmap P4: a bus with no chain, and Knob FX not running, wait as long as the direct mix
+    if (pdc.on) { // roadmap P4: a bus that had no job (no chain, its strip at rest), and Knob FX not running, wait as long as the direct mix
         for (unsigned b = 0; b < bus_count; ++b)
-            if (fx[bus_chain(b)][0].kind() == EffectKind::None) compensate(CompensationLines::bus0 + b, bus_l[b], bus_r[b], frames);
+            if (std::find(seconds.begin(), seconds.begin() + second_jobs, uint8_t(b)) == seconds.begin() + second_jobs)
+                compensate(CompensationLines::bus0 + b, bus_l[b], bus_r[b], frames);
         if (!knob_runs && knob_fed) compensate(CompensationLines::knob, knob_l, knob_r, frames);
     }
+    const float meter_fall_block = dsp::fall_per_block(0.97f, frames); // the mixer's meters (strip_meter())
+    auto strip_peaks = [&](unsigned n, float l, float r, float reduced) {
+        peak_l[n].store(std::max(l, peak_l[n].load(std::memory_order_relaxed) * meter_fall_block), std::memory_order_relaxed);
+        peak_r[n].store(std::max(r, peak_r[n].load(std::memory_order_relaxed) * meter_fall_block), std::memory_order_relaxed);
+        reductions[n].store(std::max(reduced, reductions[n].load(std::memory_order_relaxed) * meter_fall_block), std::memory_order_relaxed);
+    };
     for (unsigned b = 0; b < bus_count; ++b) {
         auto& back = returns_now[b];
-        back.aim(returns[b], frames, snap_mix);
-        if (chain_rests && zero_block(bus_l[b], bus_r[b], frames)) continue; // a bus that gives nothing, exactly: +0 into the master's sum
-        if (back.flat()) {
-            const float g = back.at(0);
-            for (unsigned f = 0; f < frames; ++f) { master_l[f] += bus_l[b][f] * g; master_r[f] += bus_r[b][f] * g; }
-            continue;
+        back.aim(bus_mute[b] ? 0.0f : returns[b], frames, snap_mix); // muted: eased out with the return
+        float level_l = 0, level_r = 0;
+        const float reduced = strips[bus_chain(b)].reduction_db();
+        if (chain_rests && zero_block(bus_l[b], bus_r[b], frames)) { strip_peaks(bus_chain(b), 0, 0, reduced); continue; } // a bus that gives nothing, exactly: +0 into the master's sum
+        for (unsigned f = 0; f < frames; ++f) {
+            const float g = back.flat() ? back.at(0) : back.at(f), l = bus_l[b][f] * g, r = bus_r[b][f] * g;
+            master_l[f] += l; master_r[f] += r;
+            level_l = std::max(level_l, std::fabs(l)); level_r = std::max(level_r, std::fabs(r));
         }
-        for (unsigned f = 0; f < frames; ++f) { float g = back.at(f); master_l[f] += bus_l[b][f] * g; master_r[f] += bus_r[b][f] * g; }
+        strip_peaks(bus_chain(b), level_l, level_r, reduced);
     }
     // Knob FX into the master. After its targets let go it rings on until its tail has been quiet a while, or at
     // most knob_ring_seconds (then cleared), and rests: nothing it held comes back when it is next fed.
@@ -3572,12 +3606,18 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
     // played back from a pad is. A hardware or USB source at a centred pad's pan law, the level a kit pad at unity
     // plays its take at; a tapped track as it is. Never into a render.
     monitor_now.aim(monitored && !render_out.running() && !render_out.cued() ? 1.0f : 0.0f, frames, snap_mix);
+    const float* heard_l = record_l; // the input after its strip (the mixer), as Monitor hears it
+    const float* heard_r = record_r;
     if (!resampling) {
         take_input();
+        strip_on_input(frames, heard_l, heard_r);
         if (!monitor_now.silent()) {
             const float pan = source_now.load(std::memory_order_relaxed) == unsigned(InputSource::Track) ? 1.0f : pan_centre;
-            for (unsigned f = 0; f < frames; ++f) { float g = monitor_now.at(f) * pan; master_l[f] += record_l[f] * g; master_r[f] += record_r[f] * g; }
+            for (unsigned f = 0; f < frames; ++f) { float g = monitor_now.at(f) * pan; master_l[f] += heard_l[f] * g; master_r[f] += heard_r[f] * g; }
         }
+    }
+    { // the master's strip (the mixer), its compressor held off, before the master's chain
+        strips[master_chain].process(master_l, master_r, frames);
     }
     run_chain(master_chain, master_l, master_r, frames);
     if (punch_target == 255) punch.process(master_l, master_r, frames);
@@ -3603,7 +3643,12 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
     for (unsigned s = 0; s < live_slots; ++s) kept_sounding |= unsigned(kept[s].on) << s;
     kept_on.store(kept_sounding, std::memory_order_relaxed);
     punch_on.store(punch.on() || sounding, std::memory_order_relaxed);
-    if (resampling) take_input(); // the mix itself, before main volume
+    if (resampling) { take_input(); strip_on_input(frames, heard_l, heard_r); } // the mix itself, before main volume
+    { // the master's meter: after its chain and the Compressor, before main volume
+        float level_l = 0, level_r = 0;
+        for (unsigned f = 0; f < frames; ++f) { level_l = std::max(level_l, std::fabs(master_l[f])); level_r = std::max(level_r, std::fabs(master_r[f])); }
+        strip_peaks(master_chain, level_l, level_r, comp.reduction_db());
+    }
     take.process(record_l, record_r, frames);
     audio_in.process(record_l, record_r, frames); // freeze plan F3: an audio track's take, between its bars
     // The meters follow each side sample by sample, as stock's do: up at once, down meter_fall_db a second at the
@@ -3800,6 +3845,33 @@ bool EngineHost::plugin_on_two_chains(unsigned first, unsigned count_of) const {
             seen[count++] = r;
         }
     return false;
+}
+
+// The mixer's input strip on the input source this block (after its gain and Rec Input FX). Recorded wet: in place, so
+// takes, Audio Recall and the input meter hear it too; dry: on a copy (wet_l / wet_r), for Monitor and its meter alone.
+// `heard`: where the input after its strip is. Its key is heard as the master's chain hears one.
+void EngineHost::strip_on_input(unsigned frames, const float*& heard_l, const float*& heard_r) {
+    auto& strip = strips[strip_input];
+    heard_l = record_l; heard_r = record_r;
+    if (!strip.idle()) {
+        float* l = record_l;
+        float* r = record_r;
+        if (!input_wet) {
+            std::copy(record_l, record_l + frames, wet_l); std::copy(record_r, record_r + frames, wet_r);
+            l = wet_l; r = wet_r;
+        }
+        const float* kl = nullptr;
+        const float* kr = nullptr;
+        if (strip_keyed(strip_input)) key_buffers(master_chain, strip.values().comp_key, kl, kr);
+        strip.process(l, r, frames, kl, kr);
+        heard_l = l; heard_r = r;
+    }
+    float level_l = 0, level_r = 0;
+    for (unsigned f = 0; f < frames; ++f) { level_l = std::max(level_l, std::fabs(heard_l[f])); level_r = std::max(level_r, std::fabs(heard_r[f])); }
+    const float fall = dsp::fall_per_block(0.97f, frames);
+    peak_l[strip_input].store(std::max(level_l, peak_l[strip_input].load(std::memory_order_relaxed) * fall), std::memory_order_relaxed);
+    peak_r[strip_input].store(std::max(level_r, peak_r[strip_input].load(std::memory_order_relaxed) * fall), std::memory_order_relaxed);
+    reductions[strip_input].store(std::max(strip.reduction_db(), reductions[strip_input].load(std::memory_order_relaxed) * fall), std::memory_order_relaxed);
 }
 
 // A submix this block (render()): its chain, its strip, then its level and pan, in place in sub_l / sub_r.

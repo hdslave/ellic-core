@@ -171,7 +171,11 @@ struct Command {
         // send 0..100.
         SubMix,
         // The mixer: track, value = where it plays (Mix::out: 0 the master, out_sub(s) submix s).
-        TrackOut
+        TrackOut,
+        // The mixer: index = bus, value 1: its return muted.
+        BusMute,
+        // The mixer: value 1: takes, Audio Recall and the input meter hear the input after its strip (else before).
+        InputWet
 
     };
     enum SubPart : uint16_t { SubLevel, SubPan, SubMute, SubSolo, SubSend0 }; // SubMix's index; SubSend0 + bus

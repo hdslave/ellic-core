@@ -9152,6 +9152,7 @@ void mixer_strips() {
     project->tracks[6].strip.comp_amount = 10; project->tracks[6].strip.comp_key = fx_key_sub(7);
     music.strip.comp_amount = 6;
     project->subs[6].strip.trim = -20; // a submix whose strip alone is set
+    project->buses[2].mute = true; project->input_wet = true;
     bytes = save_project(*project, *bank);
     CHECK(has(bytes, "STRP") && has(bytes, "OUTS") && has(bytes, "SUBM"));
 
@@ -9166,6 +9167,7 @@ void mixer_strips() {
     CHECK(back->tracks[0].strip.flat() && back->tracks[0].mix.out == out_sub(0));
     CHECK(back->tracks[1].mix.out == out_sub(1) && back->tracks[3].mix.out == out_sub(1) && back->tracks[4].mix.out == out_master);
     CHECK(back->buses[0].strip.width == 150 && back->master_strip.eq[7] == 10 && back->input_strip.trim == 60);
+    CHECK(back->buses[2].mute && !back->buses[1].mute && back->input_wet);
     const auto& m = back->subs[1];
     CHECK(!std::strcmp(m.name, "Music") && m.mix.level == 90 && m.mix.pan == -10 && m.mix.mute && !m.mix.solo);
     CHECK(m.mix.sends[0] == 20 && m.mix.sends[3] == 5 && m.fx.count() == 2 && m.fx.slots[0].kind == uint8_t(EffectKind::Echo));
@@ -9178,6 +9180,8 @@ void mixer_strips() {
     for (unsigned n = 0; n < strip_channels; ++n) CHECK(back->strip(n).flat());
     for (const auto& t : back->tracks) CHECK(t.mix.out == out_master);
     for (const auto& s : back->subs) CHECK(s.plain());
+    for (const auto& b : back->buses) CHECK(!b.mute);
+    CHECK(!back->input_wet);
 }
 
 // The mixer's strip as it sounds (engine/channel_strip.h, core step 2): flat passes every sample untouched; a band
@@ -9360,6 +9364,72 @@ void mixer_submixes() {
     std::puts("mixer submixes ok");
 }
 
+// The mixer, core step 5: a bus's strip after its chain, before its return, and its mute; the master's strip before
+// its chain, with no compressor of its own; the input's strip where Monitor hears it, and takes before it (dry) or
+// after it (wet). Their meters.
+void mixer_buses_input() {
+    auto project = std::make_unique<Project>();
+    auto bank = std::make_unique<PatternBank>();
+    tone_kit(*project, 0);
+    project->tracks[0].mix.sends[0] = 100; // into bus A (no chain, its return at 70)
+    project->buses[0].mute = true;
+    auto host = std::make_unique<EngineHost>();
+    host->load(*project, *bank);
+    SampleData tone = tone_sample(1000);
+    CHECK(host->offer_sample(0, &tone));
+    std::vector<int32_t> out(256), in(256);
+    const int32_t* input = nullptr;
+    auto play = [&](unsigned blocks) { // the master's peak over these blocks
+        float most = 0;
+        for (unsigned n = 0; n < blocks; ++n) {
+            host->render(out.data(), 128, 1, input);
+            for (auto v : out) most = std::max(most, std::fabs(v / 2147483648.0f));
+        }
+        return most;
+    };
+    auto set = [&](unsigned n, StripPart part, int value) {
+        CHECK(host->send({Command::Type::StripValue, uint8_t(n), 0, uint16_t(part), int16_t(value)}));
+    };
+    play(2);
+    host->send({Command::Type::NoteOn, 0, 0, uint16_t(sampler_first_note), 100});
+    play(10);
+    const float direct = play(5); // bus A muted (from the file)
+    CHECK(direct > 0.2f && host->strip_meter(bus_chain(0)).left < 1e-6f);
+    host->send({Command::Type::BusMute, 0, 0, 0, 0});
+    play(10);
+    CHECK(std::fabs(play(5) / direct - 1.7f) < 0.02f && std::fabs(host->strip_meter(bus_chain(0)).left / direct - 0.7f) < 0.02f);
+    set(bus_chain(0), StripPart::Trim, -60); // -6 dB on the bus, before its return
+    play(30);
+    CHECK(std::fabs(play(5) / direct - (1 + 0.7f * 0.501f)) < 0.02f);
+    host->send({Command::Type::BusMute, 0, 0, 0, 1});
+    // The master's strip: +6 dB. Its compressor is the Compressor: a value for it is not taken.
+    set(master_chain, StripPart::Trim, 60);
+    set(master_chain, StripPart::Amount, 30);
+    play(30);
+    const float master = play(5);
+    CHECK(std::fabs(master / direct - 1.995f) < 0.03f && host->strip_values(master_chain).comp_amount == 0);
+    CHECK(std::fabs(host->strip_meter(master_chain).left - master) < 0.01f);
+    set(master_chain, StripPart::Trim, 0);
+    host->send({Command::Type::Mute, 0, 0, 0, 1});
+    play(30);
+    // The input: the rear inputs at a quarter, monitored (a centred pad's pan law).
+    for (unsigned f = 0; f < 128; ++f) in[2 * f] = in[2 * f + 1] = int32_t(0.25f * std::sin(2 * 3.14159265f * 1000.0f * float(f) / 128.0f * 4) * 2147483647.0f);
+    input = in.data();
+    host->send({Command::Type::RecordSource, uint8_t(InputSource::Rear), 0, 0, 0});
+    host->send({Command::Type::Monitor, 0, 0, 0, 1});
+    play(20);
+    const float monitored = play(5);
+    CHECK(std::fabs(monitored - 0.25f * 0.7071f) < 0.01f && std::fabs(host->in_level(0) - 0.25f) < 0.01f);
+    set(strip_input, StripPart::Trim, 60); // +6 dB: Monitor hears it; recorded dry, the take (and the meter) do not
+    play(30);
+    CHECK(std::fabs(play(5) / monitored - 1.995f) < 0.03f && std::fabs(host->in_level(0) - 0.25f) < 0.01f);
+    CHECK(std::fabs(host->strip_meter(strip_input).left - 0.5f) < 0.02f);
+    host->send({Command::Type::InputWet, 0, 0, 0, 1}); // wet: they do
+    play(5);
+    CHECK(std::fabs(host->in_level(0) - 0.5f) < 0.02f);
+    std::puts("mixer buses input ok");
+}
+
 void channel_strip_sound() {
     const float rate_was = dsp::sample_rate();
     constexpr unsigned block = 128;
@@ -9491,6 +9561,7 @@ int main() {
     channel_strip_sound();
     mixer_tracks();
     mixer_submixes();
+    mixer_buses_input();
     track_names();
     midi_lookahead();
     pad_sends();

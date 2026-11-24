@@ -1002,6 +1002,12 @@ private:
     // Soloed: its own solo, or its submix's (a submix's solo solos the tracks that play into it).
     bool soloed(const Slot& slot) const { return slot.solo || (slot.out && submixes[(slot.out - 1) % sub_count].solo); }
     bool solo_on() const; // any solo counts: a track's or a submix's (and the Looper's in render())
+    // Core step 5: each bus's return muted; the input heard by takes after its strip (input_wet) or before, the
+    // input after its strip as Monitor hears it (wet_l / wet_r, when it is not recorded wet).
+    std::array<bool, bus_count> bus_mute {};
+    bool input_wet = false;
+    float wet_l[block] {}, wet_r[block] {};
+    void strip_on_input(unsigned frames, const float*& heard_l, const float*& heard_r);
     void keep_keys(unsigned frames); // this block's key sources, for the next
     static inline const float silence_block[block] {}; // the key of a track with nothing on it
     // Roadmap P4, delay compensation: each block's plan (plan_compensation(), at its start) of how late each line

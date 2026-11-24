@@ -424,6 +424,7 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
     for (unsigned b = 0; b < bus_count; ++b) {
         at = w.begin("BUSS");
         w.u8(b); w.u8(project.buses[b].level); write_chain(w, project.buses[b].fx);
+        w.u8(project.buses[b].mute); // the mixer: past what older builds read
         w.end(at);
     }
     at = w.begin("MSTR");
@@ -658,6 +659,11 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
         w.u8(eq_bands); for (auto g : s.eq) w.i16(g);
         w.u8(s.comp_on); w.u8(s.comp_amount); w.u8(s.comp_ratio); w.u8(s.comp_speed); w.u8(s.comp_key); w.u8(s.comp_mix);
         w.i16(s.comp_gain);
+        w.end(at);
+    }
+    if (project.input_wet) { // the mixer's input recorded after its strip
+        at = w.begin("INWT");
+        w.u8(1);
         w.end(at);
     }
     if (std::any_of(project.tracks.begin(), project.tracks.end(), [](const Track& t) { return t.mix.out != out_master; })) {
@@ -1292,6 +1298,8 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
             s.comp_mix = uint8_t(std::min(100u, r.u8()));
             s.comp_gain = int16_t(std::clamp(r.i16(), comp_gain_min, comp_gain_max));
             if (r.ok && n < strip_channels) project->strip(n) = s;
+        } else if (name == "INWT") { // the mixer's input recorded after its strip; without it, before
+            project->input_wet = r.u8() != 0;
         } else if (name == "OUTS") { // the tracks' outputs; without it every track plays into the master
             unsigned count = r.u8();
             for (unsigned t = 0; t < count && r.ok; ++t) {
@@ -1493,6 +1501,7 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
             if (b >= bus_count) continue;
             project->buses[b].level = uint8_t(std::min(100u, r.u8()));
             read_chain(r, project->buses[b].fx);
+            project->buses[b].mute = !r.done() && r.u8() != 0; // the mixer; without it, heard
         } else if (name == "PRNT") { // freeze plan F2a: a print (model/print.h); a later version of it is skipped
             if (r.u8() != 1) continue;
             PrintRecord p;

@@ -99,6 +99,7 @@ struct Bus {
     Chain fx;
     uint8_t level = 70; // the return, 0..100
     Strip strip;        // after its chain (model/strip.h)
+    bool mute = false;  // the mixer: its return silent
 };
 // Chains are numbered for commands: tracks 0-15, buses 16-19, master 20, the Looper's L1-L4 21-24, the submixes
 // 25-32 (sub_chain; past chain_count, which counts the chains as they were before the mixer), then each kit pad's.
@@ -475,6 +476,7 @@ struct Project {
     // are their own.
     std::array<Submix, sub_count> subs {};
     Strip master_strip, input_strip;
+    bool input_wet = false; // the mixer's input: takes, Audio Recall and the input meter after its strip (else before)
     // A strip by its number (strip_input, strip_sub; tracks, buses and the master as their chains).
     Strip& strip(unsigned n) {
         if (n < track_count) return tracks[n].strip;
