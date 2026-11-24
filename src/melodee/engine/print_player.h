@@ -83,7 +83,8 @@ struct FreezePack {
     // Freeze plan F2d: a deep freeze. Its plug-ins are let go once the engine sleeps, so nothing wakes it: hands
     // (pads, keys, the arp) play nothing and a pattern without a print stays silent.
     bool deep = false;
-    uint32_t serial = 0; // identifies the shell request once this pack takes effect
+    uint32_t serial = 0; // identifies the shell request
+    bool clock_rejected = false; // set by the audio thread before retiring an incompatible deep pack
     std::array<PrintClip*, pattern_count> clips {};
     std::vector<std::unique_ptr<PrintClip>> owned;
 };

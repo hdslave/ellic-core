@@ -1168,6 +1168,16 @@ void EngineHost::retire_freeze(FreezePack* pack) {
 void EngineHost::set_freeze(unsigned t, FreezePack* pack) {
     auto& slot = slots[t % track_count];
     if (slot.freeze == pack) return;
+    // A deep pack disables the live engine, so it must be able to play the current print at the handoff.
+    if (pack && pack->deep) {
+        const auto* clip = pack->clips[slot.pattern % pattern_count];
+        const auto& pattern = *patterns[t][slot.pattern];
+        if (clip && !print_fits(*clip, std::max(1u, pattern.length))) {
+            pack->clock_rejected = true;
+            retire_freeze(pack);
+            return;
+        }
+    }
     if (slot.freeze || slot.print.sounding()) {
         if (slot.freeze_leaving) { slot.print.cut_all(); retire_freeze(slot.freeze_leaving); slot.freeze_leaving = nullptr; }
         slot.print.fade_all(dsp::sample_rate());
@@ -1192,12 +1202,17 @@ double EngineHost::pattern_frames(uint32_t ticks) const {
          + (rest > sixteenth_ticks ? (rest - sixteenth_ticks) * off : 0.0);
 }
 
+bool EngineHost::print_fits(const PrintClip& clip, uint32_t length) const {
+    return clip.rate == uint32_t(std::lround(dsp::sample_rate())) &&
+           std::fabs(double(clip.pass) - pattern_frames(length)) <= 64;
+}
+
 // On a tick of a frozen track's pattern: its print plays it, where the pattern is, unless it has none, or none that
 // fits it now (another rate, or a pass of another length: the tempo moved since it was printed): then it plays live.
 void EngineHost::print_tick(unsigned, Slot& slot, uint32_t at, uint32_t length) {
     const float rate = dsp::sample_rate();
     PrintClip* clip = slot.freeze->clips[slot.pattern % pattern_count];
-    if (clip && (clip->rate != uint32_t(std::lround(rate)) || std::fabs(double(clip->pass) - pattern_frames(length)) > 64)) clip = nullptr;
+    if (clip && !print_fits(*clip, length)) clip = nullptr;
     slot.print_on = clip != nullptr;
     if (!clip && !slot.freeze->deep) wake(slot); // freeze plan F2d: a deep freeze stays asleep (its plug-ins are gone)
     slot.print.follow(clip, at, pattern_frames(at), tick_samples(tick_now), rate);
@@ -2784,14 +2799,19 @@ void EngineHost::tick() {
     }
     // A pattern render ends after its ticks, on the frame.
     if (!bounce_song && render_out.running() && tick_now >= bounce_ticks) render_out.finish(block_at);
-    if (tick_now % bar == 0) { freeze_at_bar(); bar_start(); } // freeze plan F2b: a frozen track switches on a bar line
-    if (!running) return;
+    const bool bar_line = tick_now % bar == 0;
+    if (bar_line) bar_start();
+    if (!running) {
+        if (bar_line) freeze_at_bar();
+        return;
+    }
     if (song_mode && !song.tempo.empty()) follow_lane(); // roadmap P5: the tempo lane, this tick's tempo before its length
     if (!song_mode) // roadmap P5: follow actions due on this tick, before the tick's notes (a launch waiting for its bar first)
         for (unsigned t = 0; t < track_count; ++t) {
             auto& slot = slots[t];
             if (slot.follow_do && slot.queued == 255 && !slot.chained && !slot.silent && tick_now >= slot.follow_at) follow(t);
         }
+    if (bar_line) freeze_at_bar(); // after the bar's launches and tempo changes, before its first note
     if (song_mode && tick_now % sixteenth_ticks == 0) play_song_punches();
     for (unsigned t = 0; t < track_count; ++t) {
         auto& slot = slots[t];

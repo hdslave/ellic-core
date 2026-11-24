@@ -586,6 +586,7 @@ private:
     // Freeze plan F2b: track t plays `pack`'s prints from now (nullptr: live again), the one it played fading out;
     // a pack handed back; the frozen tracks waiting for this bar; the engine woken by a hand.
     void set_freeze(unsigned t, FreezePack* pack);
+    bool print_fits(const PrintClip& clip, uint32_t length) const;
     void retire_freeze(FreezePack* pack);
     void freeze_at_bar();
     void wake(Slot& slot) { slot.awake = true; slot.quiet = 0; }
