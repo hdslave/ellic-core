@@ -101,26 +101,28 @@ uint64_t print_hash(const Project& project, const PatternBank& bank, const std::
     bytes.push_back(uint8_t(tail));
     for (unsigned k = 0; k < 4; ++k) bytes.push_back(uint8_t(rate >> (8 * k)));
     if (tail == PrintTail::Ring) {
-        auto has_delay = [](const Chain& chain) {
-            return std::any_of(chain.slots.begin(), chain.slots.end(), [](const EffectSlot& slot) {
+        auto delay_revision = [](const Chain& chain) {
+            unsigned revision = 0;
+            for (const auto& slot : chain.slots) {
                 auto kind = EffectKind(slot.kind);
-                return delay_sync_param(kind) >= 0 || kind == EffectKind::SampleDelay;
-            });
+                if (kind == EffectKind::Spring && !slot.bypass) return 4u;
+                if (delay_sync_param(kind) >= 0 || kind == EffectKind::SampleDelay) revision = 3;
+            }
+            return revision;
         };
-        // A plug-in track can automate its Echo macro. Pad chains are before either tap.
-        // Keep the previous key for files unaffected by the native-delay fix.
+        // Only effects before the tap can change this print. Keep older keys for unaffected WAVs.
         for (const auto& tr : project.tracks) {
             if (!tr.used()) continue;
-            bool pads = tr.engine == EngineKind::Sampler || tr.engine == EngineKind::Keygroup;
-            if (tr.engine == EngineKind::Plugin || (tap == PrintTap::PostFx && has_delay(tr.fx)) ||
-                (pads && std::any_of(tr.pad_fx.at.begin(), tr.pad_fx.at.end(), has_delay))) {
-                bytes.push_back(3);
-                break;
+            unsigned revision = tr.engine == EngineKind::Plugin ? 3u : 0u; // its Echo macro
+            if (tap == PrintTap::PostFx) {
+                revision = std::max(revision, delay_revision(tr.fx));
+                for (const auto& fx : tr.fx.slots)
+                    if (fx.kind == plugin_effect_kind) revision = std::max(revision, 2u);
             }
-            bool plug = false;
-            if (tap == PrintTap::PostFx)
-                for (const auto& fx : tr.fx.slots) plug |= fx.kind == plugin_effect_kind;
-            if (plug || print_sends(tr)) { bytes.push_back(2); break; }
+            if (tr.engine == EngineKind::Sampler || tr.engine == EngineKind::Keygroup)
+                for (const auto& chain : tr.pad_fx.at) revision = std::max(revision, delay_revision(chain));
+            if (print_sends(tr)) revision = std::max(revision, 2u);
+            if (revision) { bytes.push_back(uint8_t(revision)); break; }
         }
     }
     uint64_t h = 0xcbf29ce484222325ull;

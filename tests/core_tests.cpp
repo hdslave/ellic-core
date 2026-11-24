@@ -8554,6 +8554,20 @@ void ring_echo_paths() {
         CHECK(std::equal(made.right.begin(), made.right.end(), reference.right.begin()));
         CHECK(peak_of(reference.left, made.left.size()) < 0.000316f && peak_of(reference.right, made.right.size()) < 0.000316f);
     }
+    // A pad's Spring can stay silent beyond the usual 200 ms even with no track insert.
+    // The pre-FX print and its send must both contain the delayed wet signal.
+    project->tempo = 1200;
+    kit.pad_fx.at[0].slots[0] = {uint8_t(EffectKind::Spring), false, {250, 25, 100, 100, 60, 120}};
+    kit.fx.slots[0] = {};
+    auto spring = print(sixteenth_ticks / 8, PrintTap::PreFx, PrintTail::Ring);
+    auto reference = print(64 * sixteenth_ticks, PrintTap::PreFx, PrintTail::Cut);
+    CHECK(spring.error.empty() && reference.error.empty() && spring.left.size() < reference.left.size());
+    CHECK(peak_of(spring.left) > 0.05f && peak_of(spring.send_right[3]) > 0.05f);
+    CHECK(std::equal(spring.left.begin(), spring.left.end(), reference.left.begin()));
+    CHECK(std::equal(spring.send_right[3].begin(), spring.send_right[3].end(), reference.send_right[3].begin()));
+    CHECK(peak_of(reference.left, spring.left.size()) < 0.000316f);
+    CHECK(peak_of(reference.send_right[3], spring.left.size()) < 0.000316f);
+    kit.pad_fx.at[0].slots[0] = {};
     // A bypassed delay, a dry mix and a track insert after the tap add no waiting time.
     kit.fx.slots[0] = {uint8_t(EffectKind::Echo), false, {60, 0, 100, 60, 9, 0}};
     for (auto tap : {PrintTap::PreFx, PrintTap::PostFx}) {

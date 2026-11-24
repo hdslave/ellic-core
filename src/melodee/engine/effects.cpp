@@ -330,6 +330,8 @@ void Effect::reverb_block(float* l, float* r, unsigned frames) {
 
 unsigned Effect::repeat_gap_frames(double quarter) const {
     if (!memory || bypass || mix <= 0) return 0;
+    // The first wet frame goes through the predelay and one spring round trip.
+    if (current == K::Spring) return predelay + std::max(comb_length[0], comb_length[1]) + 1;
     if (current == K::SampleDelay) return unsigned(std::ceil(std::max(a, b))) + 1;
     const int sync = delay_sync_param(current);
     if (sync < 0) return 0;
