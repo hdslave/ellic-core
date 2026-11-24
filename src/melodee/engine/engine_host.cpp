@@ -1202,15 +1202,18 @@ double EngineHost::pattern_frames(uint32_t ticks, unsigned bpm) const {
 }
 
 bool EngineHost::deep_freeze_fits(unsigned t, const FreezePack& pack) const {
-    // The engine will be unavailable on every pattern after a deep freeze, even if this bar is empty.
-    // A later pattern launch can set its own tempo in Patterns. In Song or under MIDI clock, the clock leads.
+    // The pack must fit each pattern's launch tempo. Song and MIDI sync can lead instead of the pattern.
     const bool shared_clock = song_mode || (ext_on && ext_tempo);
+    const auto& slot = slots[t];
     for (unsigned p = 0; p < pattern_count; ++p) {
         const auto* clip = pack.clips[p];
         if (!clip) continue;
-        const unsigned launch_bpm = seq_tempo && pattern_tempo[p] ? pattern_tempo[p] : global_tempo;
-        const unsigned bpm = shared_clock || p == slots[t].pattern ? tempo : launch_bpm;
-        if (!print_fits(*clip, std::max(1u, patterns[t][p]->length), bpm)) return false;
+        const unsigned pattern_bpm = seq_tempo && pattern_tempo[p] ? pattern_tempo[p] : global_tempo;
+        const unsigned launch_bpm = shared_clock ? tempo : pattern_bpm;
+        const uint32_t length = std::max(1u, patterns[t][p]->length);
+        if (!print_fits(*clip, length, launch_bpm)) return false;
+        // Another track can lead at the handoff. A switched-off track first plays when launched again.
+        if (p == slot.pattern && !slot.off && tempo != launch_bpm && !print_fits(*clip, length, tempo)) return false;
     }
     return true;
 }
