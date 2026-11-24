@@ -211,10 +211,11 @@ public:
     // Roadmap P4: stems beside the next render (StemRing, the service thread's; nullptr: none), taken while it runs.
     void set_stems(StemRing* ring) { stem_ring.store(ring, std::memory_order_release); }
     // Live stems, every block (the Ableton Move's USB submixes): the same stems a render's StemRing gets, each
-    // track as it joins the mix (after its chain, level, pan and mute, eased as heard, its key pad with it) and
-    // each bus's return, written into `rows[(stem * 2 + side) * block + f]`: stems 0-15 the tracks, 16-19 buses
-    // A-D, side 0 left. A track with no engine is silent; a Park's fade is kept, as the stems have it. Audio
-    // thread, before render(), as often as it likes; nullptr (the default): none taken, nothing spent.
+    // track as it leaves for the master or its submix (after its chain, strip, level, pan and mute, eased as heard,
+    // its key pad with it), each bus's return and each submix, written into `rows[(stem * 2 + side) * block + f]`:
+    // stems 0-15 the tracks, 16-19 buses A-D, 20-27 the submixes, side 0 left (StemRing::stem_count rows). A track
+    // with no engine is silent; a Park's fade is kept, as the stems have it. Audio thread, before render(), as often
+    // as it likes; nullptr (the default): none taken, nothing spent.
     void set_live_stems(float* rows) { live_stems = rows; }
     const Bounce& bounce() const { return render_out; }
     // A print host: track `track` taken each block after its chain (`post`), before its strip's level and pan (the

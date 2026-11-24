@@ -507,6 +507,18 @@ struct Project {
 
 // Whether entry `entry` of Project::plugins is played by a PLUGIN track or sits in a chain (a sampler pad's own chain
 // takes none: plugin effects go on tracks, buses, the master and the loop tracks).
+// The mixer's settings in `project` that an export to another product's project (MPC 3, Live) does not carry yet: each
+// strip that is not flat, each used track sent to a submix, each submix with something of its own (a name, its mix or
+// chain), each bus muted. 0: the export plays as Melodee does.
+inline unsigned mixer_left_out(const Project& project) {
+    unsigned n = 0;
+    for (unsigned c = 0; c < strip_channels; ++c) n += !project.strip(c).flat();
+    for (const auto& t : project.tracks) n += t.used() && t.mix.out != out_master;
+    for (const auto& sub : project.subs) n += !sub.plain();
+    for (const auto& bus : project.buses) n += bus.mute;
+    return n;
+}
+
 inline bool plugin_used_by(const Project& project, unsigned entry) {
     for (const auto& t : project.tracks)
         if (t.engine == EngineKind::Plugin && t.plugin == entry) return true;

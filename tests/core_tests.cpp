@@ -7602,10 +7602,20 @@ void exports_p4() {
         CHECK(peak(0) > 0.05f && peak(track_count) > 0.01f); // track 1, bus A
         bool rest_silent = peak(track_count + 1) == 0;
         for (unsigned s = 1; s < track_count; ++s) rest_silent = rest_silent && peak(s) == 0;
+        for (unsigned s = track_count + bus_count; s < StemRing::stem_count; ++s) rest_silent = rest_silent && peak(s) == 0; // the submixes
         CHECK(rest_silent);
         host->send({Command::Type::Return, 0, 0, 0, 0});
         play(40);
         CHECK(peak(track_count) == 0 && peak(0) > 0.05f);
+        // The mixer: sent to submix 4, the submix's stem has it too (the track's own as it leaves for it).
+        const unsigned sub4 = track_count + bus_count + 3;
+        CHECK(StemRing::stem_count == track_count + bus_count + sub_count);
+        host->send({Command::Type::TrackOut, 0, 0, 0, out_sub(3)});
+        play(40);
+        CHECK(peak(sub4) > 0.05f && std::fabs(peak(sub4) - peak(0)) < 0.01f && peak(sub4 - 1) == 0 && peak(sub4 + 1) == 0);
+        host->send({Command::Type::TrackOut, 0, 0, 0, out_master});
+        play(40);
+        CHECK(peak(sub4) == 0 && peak(0) > 0.05f);
         host->send({Command::Type::Mute, 0, 0, 0, 1});
         play(40);
         CHECK(peak(0) == 0);
@@ -9155,6 +9165,7 @@ void mixer_strips() {
     project->buses[2].mute = true; project->input_wet = true;
     bytes = save_project(*project, *bank);
     CHECK(has(bytes, "STRP") && has(bytes, "OUTS") && has(bytes, "SUBM"));
+    CHECK(mixer_left_out(*plain) == 0 && mixer_left_out(*project) > 0); // what an export cannot carry yet
 
     auto back = std::make_unique<Project>();
     auto back_bank = std::make_unique<PatternBank>();

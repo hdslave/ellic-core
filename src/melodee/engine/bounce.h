@@ -135,12 +135,13 @@ private:
     uint32_t tail_frames = 0, quiet = 0;
 };
 
-// Roadmap P4, stems to the card: each track (after its chain, level, pan and mute, as it joins the mix) and each bus's
-// return, stereo, the same frames as the mixdown beside them; up to stem_count of them, those in `mask` taken. Made by
-// the service thread when first wanted (21 MB), handed to the engine host, which writes; the service thread reads.
+// Roadmap P4, stems to the card: each track (after its chain, strip, level, pan and mute, as it leaves for the master or
+// its submix), each bus's return and each submix (the mixer: after its chain, strip, level, pan and mute, as it joins the
+// master), stereo, the same frames as the mixdown beside them; up to stem_count of them, those in `mask` taken. Made by
+// the service thread when first wanted (29 MB), handed to the engine host, which writes; the service thread reads.
 class StemRing {
 public:
-    static constexpr unsigned stem_count = 20;      // tracks 0-15, buses A-D
+    static constexpr unsigned stem_count = 28;      // tracks 0-15, buses A-D 16-19, submixes 20-27
     static constexpr uint32_t ring_frames = 1u << 17; // 2.7 s at 48 kHz: the service thread drains every pass
     StemRing() : ring_(new float[size_t(ring_frames) * stem_count * 2]()) {}
     // Service thread, before the render is armed: which stems, from the start.

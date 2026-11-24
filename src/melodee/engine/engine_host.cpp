@@ -2493,10 +2493,10 @@ void EngineHost::midi_inputs(const int32_t* input, const float* usb, unsigned fr
     }
 }
 
-// Roadmap P4, stems to the card: each track as it joins the mix (after its chain, level, pan and mute, eased as heard,
-// with the kit pad that keys the Sidechain, which joins after the ducking) and each bus's return, the same frames as
-// the mixdown. The same rows, every block, into set_live_stems()'s (the Ableton Move's USB submixes): one
-// computation, so the two never differ.
+// Roadmap P4, stems to the card: each track as it leaves for the master or its submix (after its chain, strip, level,
+// pan and mute, eased as heard, with the kit pad that keys the Sidechain, which joins after the ducking), each bus's
+// return and each submix as it joins the master, the same frames as the mixdown. The same rows, every block, into
+// set_live_stems()'s (the Ableton Move's USB submixes): one computation, so the two never differ.
 void EngineHost::take_stems(unsigned frames) {
     StemRing* ring = stem_ring.load(std::memory_order_acquire);
     unsigned from = 0, to = 0;
@@ -2526,6 +2526,15 @@ void EngineHost::take_stems(unsigned frames) {
         if (!((wanted >> s) & 1)) continue;
         float *l = row(s, 0), *r = row(s, 1);
         for (unsigned f = 0; f < frames; ++f) { float g = returns_now[b].at(f); l[f] = bus_l[b][f] * g; r[f] = bus_r[b][f] * g; }
+        if ((ring_mask >> s) & 1) { left[s] = l; right[s] = r; }
+    }
+    for (unsigned n = 0; n < sub_count; ++n) { // the mixer's submixes, as they join the master
+        const unsigned s = track_count + bus_count + n;
+        if (!((wanted >> s) & 1)) continue;
+        float *l = row(s, 0), *r = row(s, 1);
+        const auto& sub = submixes[n];
+        if (!sub.live) { std::fill(l, l + frames, 0.0f); std::fill(r, r + frames, 0.0f); }
+        else for (unsigned f = 0; f < frames; ++f) { float a = sub.audible.at(f); l[f] = sub_l[n][f] * a; r[f] = sub_r[n][f] * a; }
         if ((ring_mask >> s) & 1) { left[s] = l; right[s] = r; }
     }
     if (bouncing) ring->write(left.data(), right.data(), from, to);

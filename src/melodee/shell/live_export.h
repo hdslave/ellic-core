@@ -48,6 +48,7 @@ struct LiveExport {
     unsigned samples = 0;     // files copied into Samples/Imported
     unsigned missing = 0;     // files not where the project says
     unsigned skipped = 0;     // pads, layers, zones or takes not written (a SoundFont's sounds, a reversed take, ...)
+    unsigned mixer = 0;       // the mixer's settings not carried (model/project.h mixer_left_out())
 };
 
 // Each Melodee track's colour as Live's: an index into Live's palette (0..69). Each product has its own track colours.

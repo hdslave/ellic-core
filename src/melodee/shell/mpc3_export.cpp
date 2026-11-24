@@ -590,6 +590,7 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
                                 const std::string& name, Mpc3Export& report, const PrintTable* prints, const std::string& prints_dir,
                                 const std::string& audio_dir) {
     report = Mpc3Export {};
+    report.mixer = mixer_left_out(project); // strips, submixes and bus mutes: not carried yet (melodee-sample docs/MIXER_PLAN.md, core step 7)
     const juce::var doc = read_template();
     const auto& data = field(doc, "data");
     if (!data.isObject() || !field(doc, "keygroupTrack").isObject()) return "MPC 3 template unreadable";
