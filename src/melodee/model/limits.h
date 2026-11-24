@@ -41,6 +41,8 @@ constexpr unsigned max_slots = 6;
 // The Looper's four tracks, L1-L4 (docs/LOOPER.md): a mix strip and a chain each, there while it is on.
 constexpr unsigned loop_tracks = 4;
 constexpr unsigned chain_count = track_count + bus_count + 1 + loop_tracks; // tracks, buses A-D, master, L1-L4
+// The mixer's stereo submixes (melodee-sample docs/MIXER_PLAN.md): tracks play into one of them or the master.
+constexpr unsigned sub_count = 8;
 constexpr unsigned effect_kinds = 43;                          // EffectKind::Count, None included (engine/effect_info.h checks)
 constexpr unsigned pad_slots = 4;                              // each sampler pad's own chain (PadFX)
 // Motion lanes name engine parameters (0..max_params-1), then the track

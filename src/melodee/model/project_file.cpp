@@ -646,6 +646,35 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
         for (auto v : sends) w.u8(v);
         w.end(at);
     }
+    // The mixer (melodee-sample docs/MIXER_PLAN.md). Each strip that is not as it comes (STRP: its number, trim,
+    // width, the bands, the compressor), the tracks' outputs when one goes to a submix (OUTS), and each submix that
+    // is not as it comes (SUBM: name, level, pan, mute, solo, sends, chain). A reader skips what a newer build
+    // appends to a record; older builds skip the sections, and play every strip flat into the master.
+    for (unsigned n = 0; n < strip_channels; ++n) {
+        const auto& s = project.strip(n);
+        if (s.flat()) continue;
+        at = w.begin("STRP");
+        w.u8(n); w.i16(s.trim); w.u8(s.width); w.u8(s.eq_on);
+        w.u8(eq_bands); for (auto g : s.eq) w.i16(g);
+        w.u8(s.comp_on); w.u8(s.comp_amount); w.u8(s.comp_ratio); w.u8(s.comp_speed); w.u8(s.comp_key); w.u8(s.comp_mix);
+        w.i16(s.comp_gain);
+        w.end(at);
+    }
+    if (std::any_of(project.tracks.begin(), project.tracks.end(), [](const Track& t) { return t.mix.out != out_master; })) {
+        at = w.begin("OUTS");
+        w.u8(track_count);
+        for (const auto& t : project.tracks) w.u8(t.mix.out);
+        w.end(at);
+    }
+    for (unsigned n = 0; n < sub_count; ++n) {
+        const auto& sub = project.subs[n];
+        if (sub.plain()) continue;
+        at = w.begin("SUBM");
+        w.u8(n); w.text(sub.name); w.u8(sub.mix.level); w.i16(sub.mix.pan); w.u8(sub.mix.mute); w.u8(sub.mix.solo);
+        w.u8(bus_count); for (auto v : sub.mix.sends) w.u8(v);
+        write_chain(w, sub.fx);
+        w.end(at);
+    }
     for (unsigned t = 0; t < track_count; ++t) { // 16 Levels' ends where they are not as they come (round 2)
         const auto& tr = project.tracks[t];
         if (tr.levels_ends == Track {}.levels_ends) continue;
@@ -1243,6 +1272,47 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
             std::array<uint8_t, bus_count> sends {};
             for (unsigned b = 0; b < buses && r.ok; ++b) { unsigned v = r.u8(); if (b < bus_count) sends[b] = uint8_t(std::min(100u, v)); }
             if (r.ok && t < track_count) project->tracks[t].mix.sends = sends;
+        } else if (name == "STRP") { // a mixer strip; without it the channel's is flat
+            unsigned n = r.u8();
+            Strip s;
+            s.trim = int16_t(std::clamp(r.i16(), -trim_range, trim_range));
+            s.width = uint8_t(std::min(width_max, r.u8()));
+            s.eq_on = r.u8() != 0;
+            unsigned bands = r.u8();
+            for (unsigned b = 0; b < bands && r.ok; ++b) {
+                int g = std::clamp(r.i16(), -eq_range, eq_range);
+                if (b < eq_bands) s.eq[b] = int16_t(g);
+            }
+            s.comp_on = r.u8() != 0;
+            s.comp_amount = uint8_t(std::min(comp_amount_max, r.u8()));
+            s.comp_ratio = uint8_t(std::clamp(r.u8(), comp_ratio_min, comp_ratio_max));
+            unsigned speed = r.u8(), key = r.u8();
+            s.comp_speed = uint8_t(speed < unsigned(CompSpeed::Count) ? speed : unsigned(CompSpeed::Medium));
+            s.comp_key = uint8_t(key < fx_keys ? key : 0);
+            s.comp_mix = uint8_t(std::min(100u, r.u8()));
+            s.comp_gain = int16_t(std::clamp(r.i16(), comp_gain_min, comp_gain_max));
+            if (r.ok && n < strip_channels) project->strip(n) = s;
+        } else if (name == "OUTS") { // the tracks' outputs; without it every track plays into the master
+            unsigned count = r.u8();
+            for (unsigned t = 0; t < count && r.ok; ++t) {
+                unsigned out = r.u8();
+                if (t < track_count) project->tracks[t].mix.out = uint8_t(out <= sub_count ? out : out_master);
+            }
+        } else if (name == "SUBM") { // a submix; without it the submix is as it comes (its strip is STRP's, kept here)
+            unsigned n = r.u8();
+            Submix sub;
+            r.text(sub.name, sizeof(sub.name));
+            sub.mix.level = uint8_t(std::min(127u, r.u8())); sub.mix.pan = int8_t(std::clamp(r.i16(), -50, 50));
+            sub.mix.mute = r.u8() != 0; sub.mix.solo = r.u8() != 0;
+            unsigned buses = r.u8();
+            for (unsigned b = 0; b < buses && r.ok; ++b) { unsigned v = r.u8(); if (b < bus_count) sub.mix.sends[b] = uint8_t(std::min(100u, v)); }
+            read_chain(r, sub.fx);
+            if (r.ok && n < sub_count) {
+                auto& to = project->subs[n];
+                std::memcpy(to.name, sub.name, sizeof(to.name));
+                to.mix = sub.mix;
+                to.fx = sub.fx;
+            }
         } else if (name == "LVLE") { // 16 Levels' two ends a type (round 2); without it each type's own
             unsigned t = r.u8(), kinds = r.u8();
             for (unsigned k = 0; k < kinds && r.ok; ++k) {

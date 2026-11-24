@@ -9107,10 +9107,72 @@ void slice_hit_notes() {
     CHECK(lay_slice_hits(*full, *full_bank, [&](unsigned) -> const Slices& { return chop; }) == 2 && full_bank->at[2][1].events.size() == 3);
 }
 
+// The mixer's model (melodee-sample docs/MIXER_PLAN.md, core step 1): every channel's strip, the tracks' outputs and
+// the eight submixes go into the file and come back; a project that leaves them as they come writes none of it, and
+// a file without them loads every strip flat and every track into the master.
+void mixer_strips() {
+    auto has = [](const std::vector<uint8_t>& bytes, const char* tag) {
+        return std::search(bytes.begin(), bytes.end(), tag, tag + 4) != bytes.end();
+    };
+    auto plain = std::make_unique<Project>();
+    auto bank = std::make_unique<PatternBank>();
+    CHECK(plain->strip(0).flat() && plain->strip(strip_sub(7)).flat() && plain->subs[3].plain());
+    auto bytes = save_project(*plain, *bank);
+    CHECK(!has(bytes, "STRP") && !has(bytes, "OUTS") && !has(bytes, "SUBM"));
+    // Strip numbers: tracks, buses and the master as their chains, then the input and the submixes.
+    CHECK(&plain->strip(3) == &plain->tracks[3].strip && &plain->strip(bus_chain(2)) == &plain->buses[2].strip);
+    CHECK(&plain->strip(master_chain) == &plain->master_strip && &plain->strip(strip_input) == &plain->input_strip);
+    CHECK(&plain->strip(strip_sub(5)) == &plain->subs[5].strip && strip_channels == strip_sub(sub_count - 1) + 1);
+
+    auto project = std::make_unique<Project>();
+    auto& bass = project->tracks[2].strip;
+    bass.trim = 35; bass.width = 80; bass.eq = {40, 60, 20, -50, -30, 0, 20, 0, -40};
+    bass.comp_amount = 18; bass.comp_ratio = 40; bass.comp_speed = uint8_t(CompSpeed::Fast);
+    bass.comp_key = fx_key_track(0); bass.comp_mix = 70; bass.comp_gain = 20;
+    project->tracks[5].strip.eq_on = false; project->tracks[5].strip.eq[8] = 500; // past the range: read back at 12 dB
+    project->tracks[5].strip.comp_on = false;
+    project->tracks[1].mix.out = out_sub(1); project->tracks[3].mix.out = out_sub(1); project->tracks[0].mix.out = out_sub(0);
+    project->buses[0].strip.width = 150;
+    project->master_strip.eq[7] = 10;
+    project->input_strip.trim = 60;
+    auto& music = project->subs[1];
+    music.mix.level = 90; music.mix.pan = -10; music.mix.sends = {20, 0, 0, 5}; music.mix.mute = true;
+    std::snprintf(music.name, sizeof(music.name), "Music");
+    music.fx.slots[0].kind = uint8_t(EffectKind::Echo);
+    music.strip.comp_amount = 6;
+    project->subs[6].strip.trim = -20; // a submix whose strip alone is set
+    bytes = save_project(*project, *bank);
+    CHECK(has(bytes, "STRP") && has(bytes, "OUTS") && has(bytes, "SUBM"));
+
+    auto back = std::make_unique<Project>();
+    auto back_bank = std::make_unique<PatternBank>();
+    CHECK(load_project(bytes, *back, *back_bank).empty());
+    const auto& b = back->tracks[2].strip;
+    CHECK(b.trim == 35 && b.width == 80 && b.eq_on && b.eq == bass.eq && b.comp_on);
+    CHECK(b.comp_amount == 18 && b.comp_ratio == 40 && b.comp_speed == uint8_t(CompSpeed::Fast) && b.comp_key == fx_key_track(0));
+    CHECK(b.comp_mix == 70 && b.comp_gain == 20 && !b.flat() && !b.eq_flat() && !b.comp_idle());
+    CHECK(!back->tracks[5].strip.eq_on && back->tracks[5].strip.eq[8] == eq_range && !back->tracks[5].strip.comp_on);
+    CHECK(back->tracks[0].strip.flat() && back->tracks[0].mix.out == out_sub(0));
+    CHECK(back->tracks[1].mix.out == out_sub(1) && back->tracks[3].mix.out == out_sub(1) && back->tracks[4].mix.out == out_master);
+    CHECK(back->buses[0].strip.width == 150 && back->master_strip.eq[7] == 10 && back->input_strip.trim == 60);
+    const auto& m = back->subs[1];
+    CHECK(!std::strcmp(m.name, "Music") && m.mix.level == 90 && m.mix.pan == -10 && m.mix.mute && !m.mix.solo);
+    CHECK(m.mix.sends[0] == 20 && m.mix.sends[3] == 5 && m.fx.count() == 1 && m.fx.slots[0].kind == uint8_t(EffectKind::Echo));
+    CHECK(m.strip.comp_amount == 6 && m.mix.out == out_master && !m.plain());
+    CHECK(back->subs[6].plain() && back->subs[6].strip.trim == -20 && back->subs[0].plain() && back->subs[0].strip.flat());
+
+    // A file from before the mixer: TRAK's mix alone. Loaded over a project that had strips, nothing of them is left.
+    CHECK(load_project(save_project(*plain, *bank), *back, *back_bank).empty());
+    for (unsigned n = 0; n < strip_channels; ++n) CHECK(back->strip(n).flat());
+    for (const auto& t : back->tracks) CHECK(t.mix.out == out_master);
+    for (const auto& s : back->subs) CHECK(s.plain());
+}
+
 } // namespace
 
 int main() {
     slice_hit_notes();
+    mixer_strips();
     track_names();
     midi_lookahead();
     pad_sends();

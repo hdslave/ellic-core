@@ -15,6 +15,7 @@
 #include "melodee/model/pattern.h"
 #include "melodee/model/sampler.h"
 #include "melodee/model/slot_table.h"
+#include "melodee/model/strip.h"
 #include <algorithm>
 #include <array>
 #include <iterator>
@@ -91,10 +92,16 @@ struct Chain {
 struct Bus {
     Chain fx;
     uint8_t level = 70; // the return, 0..100
+    Strip strip;        // after its chain (model/strip.h)
 };
 // Chains are numbered for commands: tracks 0-15, buses 16-19, master 20, the Looper's L1-L4 21-24.
 constexpr unsigned bus_chain(unsigned bus) { return track_count + bus; }
 constexpr unsigned master_chain = track_count + bus_count;
+// The mixer's strips are numbered for files and commands: tracks 0-15, buses 16-19 and the master 20 as their
+// chains, then the input and the submixes (not chain numbers: those go on to the Looper's).
+constexpr unsigned strip_input = master_chain + 1;
+constexpr unsigned strip_sub(unsigned sub) { return strip_input + 1 + sub % sub_count; }
+constexpr unsigned strip_channels = strip_input + 1 + sub_count;
 constexpr unsigned loop_chain(unsigned loop) { return master_chain + 1 + loop; }
 constexpr bool is_loop_chain(unsigned n) { return n > master_chain && n < master_chain + 1 + loop_tracks; }
 // Each sampler pad's own chain follows: pad_chain(track, pad).
@@ -113,6 +120,24 @@ struct Mix {
     uint8_t bus = 0;     // 0..3: A-D
     bool mute = false, solo = false;
     std::array<uint8_t, 4> sends {}; // a track's send into each bus A-D, 0..100 (round 2: four sends a track)
+    uint8_t out = 0; // a track's output: 0 the master, out_sub(s) submix s (a submix itself plays into the master)
+};
+constexpr uint8_t out_master = 0;
+constexpr uint8_t out_sub(unsigned sub) { return uint8_t(1 + sub % sub_count); }
+
+// A submix (melodee-sample docs/MIXER_PLAN.md): a stereo group that tracks play into in place of the master
+// (Mix::out). Like a track it has a strip, a chain, a level, pan, mute, solo and four sends; it plays into the master.
+struct Submix {
+    char name[name_length] {};
+    Mix mix;
+    Strip strip;
+    Chain fx {{}, track_slots};
+    // As it comes: the file leaves it out (its strip is the file's STRP, as every strip).
+    bool plain() const {
+        const Mix m;
+        return !name[0] && mix.level == m.level && mix.pan == m.pan && !mix.mute && !mix.solo && mix.sends == m.sends
+            && fx.count() == 0 && fx.size == track_slots;
+    }
 };
 
 // The arrange view: clips of patterns on track lanes over bars, named
@@ -279,6 +304,7 @@ struct Track {
     uint8_t last_note = 50;
     std::array<ModRoute, mod_routes> mods {};
     Chain fx {{}, track_slots};
+    Strip strip;          // the mixer's strip, after `fx` (model/strip.h)
     PadChains pad_fx;     // a sampler track: each pad's chain (PadFX)
     int8_t transpose = 0; // Shift + Minus / Plus: the pads moved by semitones, -12..12
     // A sampler track's kit (unused by the synth engines).
@@ -434,6 +460,20 @@ struct Project {
     std::array<Macro, macro_count> macros {};
     std::array<Scene, pattern_count> scenes {}; // roadmap P5: each scene's name, tempo and colour (SCNE)
     uint8_t scene = 0; // the scene in hand: launched last; a pattern picked by hand is kept in it (SEQL)
+    // The mixer (melodee-sample docs/MIXER_PLAN.md): the submixes, and the strips of the master (after its chain,
+    // before the Compressor) and of the input (where the monitored sound joins the mix). Tracks' and buses' strips
+    // are their own.
+    std::array<Submix, sub_count> subs {};
+    Strip master_strip, input_strip;
+    // A strip by its number (strip_input, strip_sub; tracks, buses and the master as their chains).
+    Strip& strip(unsigned n) {
+        if (n < track_count) return tracks[n].strip;
+        if (n < master_chain) return buses[n - track_count].strip;
+        if (n == master_chain) return master_strip;
+        if (n == strip_input) return input_strip;
+        return subs[(n - strip_sub(0)) % sub_count].strip;
+    }
+    const Strip& strip(unsigned n) const { return const_cast<Project*>(this)->strip(n); }
     Chain& chain(unsigned n) {
         if (n >= pad_chain_base) { n -= pad_chain_base; return tracks[(n / sampler_pads) % track_count].pad_fx.at[n % sampler_pads]; }
         if (is_loop_chain(n)) return loop_fx[n - loop_chain(0)];
@@ -459,6 +499,9 @@ inline bool plugin_used_by(const Project& project, unsigned entry) {
         if (t.engine == EngineKind::Plugin && t.plugin == entry) return true;
     for (unsigned n = 0; n < chain_count; ++n)
         for (const auto& s : project.chain(n).slots)
+            if (s.kind == plugin_effect_kind && unsigned(s.params[0]) == entry) return true;
+    for (const auto& sub : project.subs)
+        for (const auto& s : sub.fx.slots)
             if (s.kind == plugin_effect_kind && unsigned(s.params[0]) == entry) return true;
     return false;
 }
