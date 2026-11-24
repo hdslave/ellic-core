@@ -586,7 +586,9 @@ private:
     // Freeze plan F2b: track t plays `pack`'s prints from now (nullptr: live again), the one it played fading out;
     // a pack handed back; the frozen tracks waiting for this bar; the engine woken by a hand.
     void set_freeze(unsigned t, FreezePack* pack);
-    bool print_fits(const PrintClip& clip, uint32_t length) const;
+    bool deep_freeze_fits(unsigned t, const FreezePack& pack) const;
+    bool print_fits(const PrintClip& clip, uint32_t length, unsigned bpm) const;
+    double pattern_frames(uint32_t ticks, unsigned bpm) const;
     void retire_freeze(FreezePack* pack);
     void freeze_at_bar();
     void wake(Slot& slot) { slot.awake = true; slot.quiet = 0; }
@@ -655,7 +657,8 @@ private:
     void schedule_off(Slot& slot, int key, int32_t samples);
     void run_offs(Slot& slot, unsigned frames);
     void cancel_off(Slot& slot, int key);
-    double tick_length() const { return dsp::sample_rate() * 60.0 / (tempo / 10.0) / ticks_per_quarter; } // device frames a clock tick
+    double tick_length(unsigned bpm) const { return dsp::sample_rate() * 60.0 / (bpm / 10.0) / ticks_per_quarter; }
+    double tick_length() const { return tick_length(tempo); } // device frames a clock tick
     double arp_tick_length() const { return tick_length() * (ticks_per_quarter / arp_ticks_per_quarter); }
     // MIDI out and sync (parity phase 9).
     // Roadmap P4: out as late as everything heard is held back (compensation()), so outside gear lines up with it; a

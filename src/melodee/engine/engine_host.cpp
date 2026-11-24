@@ -1168,15 +1168,10 @@ void EngineHost::retire_freeze(FreezePack* pack) {
 void EngineHost::set_freeze(unsigned t, FreezePack* pack) {
     auto& slot = slots[t % track_count];
     if (slot.freeze == pack) return;
-    // A deep pack disables the live engine, so it must be able to play the current print at the handoff.
-    if (pack && pack->deep) {
-        const auto* clip = pack->clips[slot.pattern % pattern_count];
-        const auto& pattern = *patterns[t][slot.pattern];
-        if (clip && !print_fits(*clip, std::max(1u, pattern.length))) {
-            pack->clock_rejected = true;
-            retire_freeze(pack);
-            return;
-        }
+    if (pack && pack->deep && !deep_freeze_fits(t, *pack)) {
+        pack->clock_rejected = true;
+        retire_freeze(pack);
+        return;
     }
     if (slot.freeze || slot.print.sounding()) {
         if (slot.freeze_leaving) { slot.print.cut_all(); retire_freeze(slot.freeze_leaving); slot.freeze_leaving = nullptr; }
@@ -1196,15 +1191,33 @@ void EngineHost::freeze_at_bar() {
 }
 
 double EngineHost::pattern_frames(uint32_t ticks) const {
-    const double base = tick_length(), on = base * swing / 50.0, off = base * (100 - swing) / 50.0; // as tick_samples()
+    return pattern_frames(ticks, tempo);
+}
+
+double EngineHost::pattern_frames(uint32_t ticks, unsigned bpm) const {
+    const double base = tick_length(bpm), on = base * swing / 50.0, off = base * (100 - swing) / 50.0; // as tick_samples()
     const uint32_t pair = 2 * sixteenth_ticks, pairs = ticks / pair, rest = ticks % pair;
     return double(pairs) * sixteenth_ticks * (on + off) + std::min<uint32_t>(rest, sixteenth_ticks) * on
          + (rest > sixteenth_ticks ? (rest - sixteenth_ticks) * off : 0.0);
 }
 
-bool EngineHost::print_fits(const PrintClip& clip, uint32_t length) const {
+bool EngineHost::deep_freeze_fits(unsigned t, const FreezePack& pack) const {
+    // The engine will be unavailable on every pattern after a deep freeze, even if this bar is empty.
+    // A later pattern launch can set its own tempo in Patterns. In Song or under MIDI clock, the clock leads.
+    const bool shared_clock = song_mode || (ext_on && ext_tempo);
+    for (unsigned p = 0; p < pattern_count; ++p) {
+        const auto* clip = pack.clips[p];
+        if (!clip) continue;
+        const unsigned launch_bpm = seq_tempo && pattern_tempo[p] ? pattern_tempo[p] : global_tempo;
+        const unsigned bpm = shared_clock || p == slots[t].pattern ? tempo : launch_bpm;
+        if (!print_fits(*clip, std::max(1u, patterns[t][p]->length), bpm)) return false;
+    }
+    return true;
+}
+
+bool EngineHost::print_fits(const PrintClip& clip, uint32_t length, unsigned bpm) const {
     return clip.rate == uint32_t(std::lround(dsp::sample_rate())) &&
-           std::fabs(double(clip.pass) - pattern_frames(length)) <= 64;
+           std::fabs(double(clip.pass) - pattern_frames(length, bpm)) <= 64;
 }
 
 // On a tick of a frozen track's pattern: its print plays it, where the pattern is, unless it has none, or none that
@@ -1212,7 +1225,7 @@ bool EngineHost::print_fits(const PrintClip& clip, uint32_t length) const {
 void EngineHost::print_tick(unsigned, Slot& slot, uint32_t at, uint32_t length) {
     const float rate = dsp::sample_rate();
     PrintClip* clip = slot.freeze->clips[slot.pattern % pattern_count];
-    if (clip && !print_fits(*clip, length)) clip = nullptr;
+    if (clip && !print_fits(*clip, length, tempo)) clip = nullptr;
     slot.print_on = clip != nullptr;
     if (!clip && !slot.freeze->deep) wake(slot); // freeze plan F2d: a deep freeze stays asleep (its plug-ins are gone)
     slot.print.follow(clip, at, pattern_frames(at), tick_samples(tick_now), rate);
