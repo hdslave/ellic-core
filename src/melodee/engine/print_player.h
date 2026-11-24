@@ -127,6 +127,7 @@ private:
     unsigned fed = 0;
     bool native_playback = false;
     void begin(PrintClip* clip, uint32_t frame, bool fade_in, float rate);
+    bool open_voice(Voice& voice, PrintClip& clip, uint32_t frame, bool fade_in, float rate);
     void close(Voice& v);
     void retire_main(bool ring, float rate); // the main voice to another, ringing on or fading
 };

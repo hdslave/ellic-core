@@ -110,21 +110,28 @@ void PrintPlayer::begin(PrintClip* clip, uint32_t frame, bool fade_in, float rat
     auto& m = voices[0];
     if (m.clip) close(m);
     if (!clip || frame >= clip->frames) return;
-    m.clip = clip;
-    m.at = frame;
-    m.gain = fade_in ? 0.0f : 1.0f;
-    m.step = fade_in ? 1.0f / (fade_seconds * rate) : 0.0f;
-    if (clip->resident) return;
-    const uint32_t safe = clip->safe_from(frame);
-    m.seeking = safe == 0;
-    // The pager counts interleaved floats, including the bus channels.
-    const uint32_t start = clip->stride * frame;
-    if (clip->windows) m.stream = clip->windows->open(start, safe);
-    else if (pager) m.stream = pager->open(clip->source->part, start, false, ahead_speed(rate) * clip->stride / 2, safe);
-    if (m.stream < 0) {
-        ++underruns;
-        close(m); // follow() can try again on the next tick
+    if (!open_voice(m, *clip, frame, fade_in, rate)) ++underruns; // follow() can try again on the next tick
+}
+
+bool PrintPlayer::open_voice(Voice& voice, PrintClip& clip, uint32_t frame, bool fade_in, float rate) {
+    int stream = -1;
+    uint32_t safe = 0;
+    if (!clip.resident) {
+        safe = clip.safe_from(frame);
+        // The pager counts interleaved floats, including the bus channels.
+        const uint32_t start = clip.stride * frame;
+        if (clip.windows) stream = clip.windows->open(start, safe);
+        else if (pager) stream = pager->open(clip.source->part, start, false, ahead_speed(rate) * clip.stride / 2, safe);
+        if (stream < 0) return false;
     }
+    voice = Voice {};
+    voice.clip = &clip;
+    voice.at = frame;
+    voice.stream = stream;
+    voice.seeking = !clip.resident && safe == 0;
+    voice.gain = fade_in ? 0.0f : 1.0f;
+    voice.step = fade_in ? 1.0f / (fade_seconds * rate) : 0.0f;
+    return true;
 }
 
 void PrintPlayer::retire_main(bool ring, float rate) {
@@ -167,13 +174,28 @@ void PrintPlayer::release(float rate) {
 void PrintPlayer::follow(PrintClip* clip, uint32_t at, double start, double tick, float rate, bool native) {
     auto& m = voices[0];
     if (!clip) { release(rate); return; }
-    if (native && m.clip == clip) { native_playback = true; return; }
-    if (m.clip != clip || native_playback) { // a new clip, or a return to the sequencer's clock
+    if (m.clip != clip) { // a launch, a follow action, a song clip, Play, or the freeze itself
         release(rate);
         const uint64_t frame = at ? uint64_t(std::max(0.0, std::ceil(start - 1e-6))) : 0;
         begin(clip, uint32_t(std::min<uint64_t>(frame, UINT32_MAX)), at != 0, rate);
         expect = frame;
         carry = start - double(frame);
+    } else if (native) {
+        native_playback = true;
+        return;
+    } else if (native_playback) {
+        // Rejoin at the permanently pinned head. Leave the current voice alone until the new cursor is available.
+        if (at) return;
+        if (m.at != 0) {
+            Voice next;
+            const bool fade = m.at < clip->frames;
+            if (!clip->safe_from(0) || !open_voice(next, *clip, 0, fade, rate)) return;
+            if (fade) retire_main(false, rate);
+            else close(m);
+            m = next;
+        }
+        expect = 0;
+        carry = 0;
     } else if (at == 0) { // the pattern comes round
         if (clip->tail == PrintTail::Loop) {
             // The print wraps itself as the pass ends; a tick a frame or two off leaves it where it is.

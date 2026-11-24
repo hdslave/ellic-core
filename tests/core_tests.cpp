@@ -8542,6 +8542,39 @@ void freeze_f2b() {
         CHECK(l[127] > 0.2f && player.underruns == late + 1);
         player.cut_all();
         while (pager.pump()) {}
+
+        PrintPlayer thaw;
+        thaw.set_pager(&pager);
+        thaw.follow(&clip, 0, 0, 128, rate, true);
+        auto hear = [&] {
+            std::fill(l.begin(), l.end(), 0.0f);
+            std::fill(r.begin(), r.end(), 0.0f);
+            thaw.render(l.data(), r.data(), 128);
+            for (unsigned f = 0; f < 128; ++f) CHECK(l[f] == 0.25f && r[f] == 0.25f);
+        };
+        for (unsigned b = 0; b < 4; ++b) hear();
+        thaw.follow(&clip, 9, 4.5 * stream_chunk, 128, rate); // restored tempo, unpinned mid-pattern target
+        for (unsigned b = 0; b < 6; ++b) hear();
+        CHECK(thaw.position() == 10 * 128);
+
+        std::array<int, PrintPlayer::voice_count - 1> occupied {};
+        for (auto& stream : occupied) {
+            stream = clip.windows->open(0, clip.safe_from(0));
+            CHECK(stream >= 0);
+        }
+        thaw.follow(&clip, 0, 0, 128, rate); // no spare cursor, even at the pinned head
+        hear();
+        CHECK(thaw.position() == 11 * 128);
+        for (int stream : occupied) clip.windows->close(stream);
+        thaw.follow(&clip, 0, 0, 128, rate);
+        for (unsigned b = 0; b < 4; ++b) {
+            std::fill(l.begin(), l.end(), 0.0f);
+            thaw.render(l.data(), r.data(), 128);
+            for (float v : l) CHECK(std::fabs(v - 0.25f) < 1e-5f); // both inputs remain readable through the fade
+        }
+        CHECK(thaw.position() == 4 * 128 && thaw.waits == 0 && thaw.underruns == 0);
+        thaw.cut_all();
+        while (pager.pump()) {}
         pin_log = nullptr;
     }
     { // Clock thaw keeps the original PCM, including a Ring print's tail, across loop boundaries.
