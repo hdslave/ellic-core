@@ -163,7 +163,10 @@ struct Command {
         Chop,
         // Issue 27, Settings > SEQ > Mute: value 1 Notes, a muted track or kit pad starts no new notes and what it
         // plays rings on (a MIDI track sends no All Notes Off); 0 Audio, a mute silences it at once.
-        MuteMode
+        MuteMode,
+        // The mixer (docs/MIXER_PLAN.md): track = a strip number (model/project.h; tracks 0-15 so far), index =
+        // StripPart (model/strip.h), value: one value of that channel's strip.
+        StripValue
 
     };
     Command() = default;

@@ -300,8 +300,8 @@ void ChannelStrip::process(float* l, float* r, unsigned frames, const float* key
 #if defined(__ARM_NEON)
                 for (; f + 4 <= f1; f += 4) {
                     const float32x4_t level = vmaxq_f32(vabsq_f32(vld1q_f32(hear_l + f)), vabsq_f32(vld1q_f32(hear_r + f)));
-                    vst1q_f32(rise + f - f0, vmulq_n_f32(level, 1 - att));
-                    vst1q_f32(fall + f - f0, vmulq_n_f32(level, 1 - rel));
+                    vst1q_f32(rise + (f - f0), vmulq_n_f32(level, 1 - att));
+                    vst1q_f32(fall + (f - f0), vmulq_n_f32(level, 1 - rel));
                 }
 #endif
                 for (; f < f1; ++f) {

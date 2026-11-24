@@ -3,6 +3,7 @@
 #pragma once
 #include "melodee/engine/spsc_queue.h"
 #include "melodee/engine/arp.h"
+#include "melodee/engine/channel_strip.h"
 #include "melodee/engine/note_repeat.h"
 #include "melodee/engine/command.h"
 #include "melodee/engine/compensation.h"
@@ -216,9 +217,11 @@ public:
     // thread, before render(), as often as it likes; nullptr (the default): none taken, nothing spent.
     void set_live_stems(float* rows) { live_stems = rows; }
     const Bounce& bounce() const { return render_out; }
-    // A print host: track `track` taken each block as the Track input source does, after its chain (`post`) or as its
-    // engine left it; print_left() / print_right() hold the block just rendered.
+    // A print host: track `track` taken each block after its chain (`post`), before its strip's level and pan (the
+    // mixer, docs/MIXER_PLAN.md: a print holds neither), or as its engine left it; print_left() / print_right() hold
+    // the block just rendered.
     void set_print_tap(unsigned track, bool post) {
+        print_host = true;
         source_track.store(track % track_count, std::memory_order_relaxed);
         source_post.store(post, std::memory_order_relaxed);
         source_now.store(unsigned(InputSource::Track), std::memory_order_relaxed);
@@ -277,6 +280,16 @@ public:
     bool song_playing() const { return in_song.load(std::memory_order_relaxed); }
     unsigned song_bar() const { return bar_now.load(std::memory_order_relaxed); }
     float meter(unsigned track) const { return meters[track % track_count].load(std::memory_order_relaxed); }
+    // A mixer channel's meter, by its strip number (model/project.h; tracks so far, docs/MIXER_PLAN.md core step 3):
+    // each side's peak after its strip, level, pan and mute, and its compressor's gain reduction in dB, each falling
+    // back as meter() does.
+    struct StripMeter { float left = 0, right = 0, reduction = 0; };
+    StripMeter strip_meter(unsigned n) const {
+        n %= strip_channels;
+        return {peak_l[n].load(std::memory_order_relaxed), peak_r[n].load(std::memory_order_relaxed), reductions[n].load(std::memory_order_relaxed)};
+    }
+    // What a channel's strip plays now (the values its commands set), by strip number.
+    const Strip& strip_values(unsigned n) const { return strips[n % strip_channels].values(); }
     // The voices of the track the screen watches (engine/voice_tap.h), as the last block left them; false while a
     // write was under way each time it looked. watch_taps(-1): none taken.
     void watch_taps(int track) { tap_track.store(track, std::memory_order_relaxed); }
@@ -513,7 +526,6 @@ private:
         std::bitset<256> hand {};
         float* print_l = nullptr;
         float* print_r = nullptr;
-        Ease print_mix_l, print_mix_r;
         // Freeze plan F3: an AUDIO track's engine (its takes' voices), its patterns' takes, ones replaced whose voices
         // still fade, and the pattern tick it followed last (a jump when the next is not the one after).
         AudioTrackEngine audio;
@@ -583,6 +595,7 @@ private:
     std::array<FreezePack*, track_count> freeze_next {}; // waiting for the next bar
     static constexpr float sleep_floor = 3.16e-5f; // -90 dB: a frozen track's engine below it a second sleeps
     float pan_centre = 0.7071f;                    // set_pan()'s sides at the centre, as a print was made at
+    static constexpr float pan_balance = 1.4142f;  // a track's pan on the engine's picture: unity at the centre
     SpscQueue<64, FreezePack*> done_freezes;
     // Freeze plan F3: audio tracks.
     void set_audio(unsigned t, AudioPack* pack);
@@ -945,6 +958,7 @@ private:
     std::array<Ease, bus_count> returns_now {};
     Ease volume_now, monitor_now; // main volume and Monitor as the block plays them
     bool snap_mix = true;         // the next block's eases start at their targets (a project just loaded)
+    bool print_host = false;      // set_print_tap(): a print's tap, not the Track source's
     float bus_l[bus_count][block] {}, bus_r[bus_count][block] {}, master_l[block] {}, master_r[block] {};
     void run_chain(unsigned chain, float* left, float* right, unsigned frames);
     // Roadmap P4, keyed Compressors and Gates: each slot's key (model/project.h fx_key_*), and this block's plan of
@@ -957,6 +971,12 @@ private:
     std::array<std::array<float, block>, track_count + bus_count> key_prev_l {}, key_prev_r {};
     void plan_keys();
     void key_effect(unsigned chain, unsigned slot, Effect& effect);
+    // Where `key` (fx_key_*) is heard by chain `chain` this block, as key_effect() has it.
+    void key_buffers(unsigned chain, unsigned key, const float*& l, const float*& r);
+    // Mixer (docs/MIXER_PLAN.md): each channel's strip, by strip number (model/project.h), after its chain and before
+    // its level and pan. Tracks so far (core step 3).
+    std::array<ChannelStrip, strip_channels> strips {};
+    bool strip_keyed(unsigned n) const; // its compressor listens to another channel this block
     void keep_keys(unsigned frames); // this block's key sources, for the next
     static inline const float silence_block[block] {}; // the key of a track with nothing on it
     // Roadmap P4, delay compensation: each block's plan (plan_compensation(), at its start) of how late each line
@@ -1050,6 +1070,7 @@ private:
     std::atomic<bool> in_song {false};
     std::atomic<unsigned> bar_now {0};
     std::array<std::atomic<float>, track_count> meters {};
+    std::array<std::atomic<float>, strip_channels> peak_l {}, peak_r {}, reductions {}; // strip_meter()
     std::atomic<int> tap_track {-1};
     TapBoard tap_board;
     std::atomic<float> output_peak {0};

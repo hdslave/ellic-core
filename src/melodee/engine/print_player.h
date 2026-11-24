@@ -51,8 +51,8 @@ struct PrintClip {
 struct FreezePack {
     uint8_t track = 0;
     PrintTap tap = PrintTap::PostFx;
-    // Freeze plan F2c: the level and pan its Post FX prints were made at (print_mix(), model/print.h); played at the
-    // track's level and pan now, relative to these.
+    // Freeze plan F2c: the level and pan its Post FX prints were made at (print_mix(), model/print.h): unity and
+    // centred since the mixer's strip, the prints played before the track's strip, level and pan as its chain is.
     uint8_t level = 100;
     int8_t pan = 0;
     // Freeze plan F2d: a deep freeze. Its plug-ins are let go once the engine sleeps, so nothing wakes it: hands

@@ -7988,11 +7988,12 @@ void prints_f2a() {
         change(*p, *b);
         return hash(*p, *b) != h;
     };
-    // Freeze plan F2c: with effects on its chain the level and pan meet them first, as live (print_mix()): they count;
-    // with an empty chain the print is made at unity and centred and they do not. Sends never do.
+    // The mixer: a track's level and pan come after its chain and its strip, so a print is made at unity and centred
+    // with its strip flat, and none of those count, with effects on its chain or not (print_mix()). Sends never do.
     CHECK(project->tracks[0].fx.slots[0].used());
-    CHECK(changed([](Project& p, PatternBank&) { p.tracks[0].mix.level = 64; }) && changed([](Project& p, PatternBank&) { p.tracks[0].mix.pan = -30; }));
+    CHECK(!changed([](Project& p, PatternBank&) { p.tracks[0].mix.level = 64; }) && !changed([](Project& p, PatternBank&) { p.tracks[0].mix.pan = -30; }));
     CHECK(!changed([](Project& p, PatternBank&) { p.tracks[0].mix.sends[1] = 80; }));
+    CHECK(!changed([](Project& p, PatternBank&) { p.tracks[0].strip.eq[4] = 60; p.tracks[0].strip.comp_amount = 20; }));
     {
         auto plain = std::make_unique<Project>(*project);
         plain->tracks[0].fx = Chain {};
@@ -8198,8 +8199,9 @@ void freeze_f2b() {
         for (unsigned p : {0u, 1u}) { pack->owned.push_back(clip_of(from, p, tail, tap)); pack->clips[p] = pack->owned.back().get(); }
         return pack;
     };
-    // The project played, track 1 taken after its chain as the Track source takes it: A1 for two passes, then A2
-    // (launched in the second pass). Frozen on `pack` from the start when one is given. `each` before every block.
+    // The project played, track 1 taken as the Track source takes it (after its chain, strip, level and pan): A1 for
+    // two passes, then A2 (launched in the second pass). Frozen on `pack` from the start when one is given. `each`
+    // before every block.
     struct Run { std::vector<float> l, r; std::unique_ptr<EngineHost> host; };
     const uint64_t pass = uint64_t(std::llround(ticks * 44100.0 * 60 / 120 / ticks_per_quarter * rate / 44100));
     const unsigned blocks = unsigned((3 * pass + pass / 2) / 128);
@@ -8209,7 +8211,7 @@ void freeze_f2b() {
         auto& host = *out.host;
         host.load(from, *bank);
         CHECK(host.offer_sample(0, &tone));
-        host.set_print_tap(0, true);
+        host.send({Command::Type::RecordSource, uint8_t(InputSource::Track), 0, 0, 1});
         if (pack) { Command c {Command::Type::Freeze, 0}; c.freeze = pack; CHECK(host.send(c)); }
         host.send({Command::Type::Play});
         std::vector<int32_t> o(256);
@@ -8251,21 +8253,23 @@ void freeze_f2b() {
         auto frozen = run(*echoed, pack_of(*echoed, PrintTail::Loop, PrintTap::PreFx));
         CHECK(differ(heard, live, 1e-3f) > 0 && differ(heard, frozen) == 0);
     }
-    {   // Freeze plan F2c: Post FX with a Drive on the chain at level 60, panned: the print is made at that level and pan
-        // (print_mix()), as the Drive hears them live, so it sounds the same
+    {   // Post FX with a Drive on the chain at level 60, panned: the Drive never hears the level or pan (the mixer:
+        // they come after the chain and the strip), so the print is made at unity and centred (print_mix()) and the
+        // frozen track sounds the same; its strip stays live on the print
         auto driven = std::make_unique<Project>(*project);
         driven->tracks[0].fx.slots[0] = {uint8_t(EffectKind::Drive), false, {90, 60, 50, 50, 0, 0}};
         driven->tracks[0].mix.level = 60; driven->tracks[0].mix.pan = 15;
-        CHECK(print_mix(driven->tracks[0]).level == 60 && print_mix(driven->tracks[0]).pan == 15 && print_mix(project->tracks[0]).level == 100);
+        driven->tracks[0].strip.eq[3] = 60; driven->tracks[0].strip.comp_amount = 18;
+        CHECK(print_mix(driven->tracks[0]).level == 100 && print_mix(driven->tracks[0]).pan == 0);
         auto heard = run(*driven, nullptr);
-        auto* pack = pack_of(*driven, PrintTail::Loop, PrintTap::PostFx);
-        pack->level = 60; pack->pan = 15;
-        auto frozen = run(*driven, pack);
+        auto frozen = run(*driven, pack_of(*driven, PrintTail::Loop, PrintTap::PostFx));
         CHECK(differ(heard, frozen, 1e-5f) == 0);
+        auto flat = std::make_unique<Project>(*driven); // the strip flat: the print the same, the sound not
+        flat->tracks[0].strip = Strip {};
+        CHECK(differ(run(*flat, pack_of(*flat, PrintTail::Loop, PrintTap::PostFx)), frozen, 1e-3f) > 0);
         auto louder = std::make_unique<Project>(*driven); // the level turned up after the freeze: the print follows it
         louder->tracks[0].mix.level = 80;
         auto* again = pack_of(*driven, PrintTail::Loop, PrintTap::PostFx);
-        again->level = 60; again->pan = 15;
         auto up = run(*louder, again);
         CHECK(peak_of(up.l, 0, up.l.size()) > peak_of(frozen.l, 0, frozen.l.size()) * 1.5f);
     }
@@ -9173,6 +9177,81 @@ void mixer_strips() {
 // lifts or cuts its octave and leaves the others; trim and the compressor's gain are plain gains; the compressor
 // takes a loud tone down by its ratio over the threshold, hears its key in place of the channel when keyed, and does
 // nothing at mix 0 or off; width 0 is mono; a change glides; the bands sit at their frequencies at 96 kHz too.
+// The mixer, core step 3 (melodee-sample docs/MIXER_PLAN.md): a track's strip after its chain and before its level and
+// pan, set from the project or a value at a time (StripValue); each side's meter and the compressor's reduction; a
+// strip keyed by another track.
+void mixer_tracks() {
+    auto project = std::make_unique<Project>();
+    auto bank = std::make_unique<PatternBank>();
+    tone_kit(*project, 0); tone_kit(*project, 1);
+    project->tracks[1].strip.eq[2] = 30; project->tracks[1].strip.comp_ratio = 80;
+    auto host = std::make_unique<EngineHost>();
+    host->load(*project, *bank);
+    SampleData tone = tone_sample(1000);
+    CHECK(host->offer_sample(0, &tone));
+    CHECK(host->strip_values(1).eq[2] == 30 && host->strip_values(1).comp_ratio == 80 && host->strip_values(0).flat());
+    host->send({Command::Type::RecordSource, uint8_t(InputSource::Track), 0, 0, 1}); // track 1 as the mix takes it
+    std::vector<int32_t> out(256);
+    float most_l = 0, most_r = 0; // the Track source's peaks over the last play()
+    auto play = [&](unsigned blocks) {
+        most_l = most_r = 0;
+        for (unsigned n = 0; n < blocks; ++n) {
+            host->render(out.data(), 128, 1);
+            for (unsigned f = 0; f < 128; ++f) {
+                most_l = std::max(most_l, std::fabs(host->print_left()[f])); most_r = std::max(most_r, std::fabs(host->print_right()[f]));
+            }
+        }
+        return std::max(most_l, most_r);
+    };
+    auto set = [&](unsigned t, StripPart part, int value) {
+        CHECK(host->send({Command::Type::StripValue, uint8_t(t), 0, uint16_t(part), int16_t(value)}));
+    };
+    auto note = [&](unsigned t, bool on) {
+        host->send({on ? Command::Type::NoteOn : Command::Type::NoteOff, uint8_t(t), 0, uint16_t(sampler_first_note), 100});
+    };
+    play(2);
+    note(0, true);
+    const float flat = play(10);
+    CHECK(flat > 0.2f && host->strip_meter(0).left > 0.2f && host->strip_meter(0).right > 0.2f && host->strip_meter(0).reduction == 0);
+    // A band at 1 kHz lifted 12 dB (it glides there in 0.1 s): about four times as loud.
+    set(0, eq_part(4), 120);
+    play(30);
+    const float lifted = play(5);
+    CHECK(host->strip_values(0).eq[4] == 120 && lifted > flat * 3.5f && lifted < flat * 4.2f);
+    set(0, eq_part(4), 900); // out of range: held at +12 dB
+    CHECK(play(2) > 0 && host->strip_values(0).eq[4] == 120);
+    set(0, eq_part(4), 0);
+    play(30);
+    // The compressor, then the level after it: turned down, the sound drops and the reduction stays.
+    set(0, StripPart::Amount, 30);
+    const float pressed = (play(40), play(5));
+    const float reduced = host->strip_meter(0).reduction;
+    CHECK(reduced > 3 && pressed < flat * 0.8f);
+    host->send({Command::Type::Level, 0, 0, 0, 50}); // level_gain(50): a quarter
+    play(10);
+    const float quieter = play(5);
+    CHECK(std::fabs(host->strip_meter(0).reduction - reduced) < 0.5f && std::fabs(quieter / pressed - 0.25f) < 0.02f);
+    // The pan last of all: hard left, nothing on the right.
+    host->send({Command::Type::Pan, 0, 0, 0, -50});
+    play(4);
+    play(5);
+    CHECK(std::fabs(most_l / quieter - 1.4142f) < 0.05f && most_r == 0.0f); // a side at the centre: 0.71 of a hard pan
+    host->send({Command::Type::Pan, 0, 0, 0, 0});
+    host->send({Command::Type::Level, 0, 0, 0, 100});
+    // Keyed by track 2: it hears track 2, silent at first, then playing.
+    set(0, StripPart::Key, fx_key_track(1));
+    note(0, false); note(0, true); // the tone again from its start
+    play(200); // the release (Medium: about 43 dB a second at 4:1) from the 13 dB it took above
+    CHECK(host->strip_meter(0).reduction < 0.5f && play(5) > flat * 0.9f);
+    note(1, true);
+    play(20);
+    CHECK(host->strip_meter(0).reduction > 3 && play(5) < flat * 0.8f);
+    set(0, StripPart::CompOn, 0); // off: its values kept, the sound as it comes
+    play(20);
+    CHECK(host->strip_values(0).comp_amount == 30 && play(5) > flat * 0.9f);
+    std::puts("mixer tracks ok");
+}
+
 void channel_strip_sound() {
     const float rate_was = dsp::sample_rate();
     constexpr unsigned block = 128;
@@ -9302,6 +9381,7 @@ int main() {
     slice_hit_notes();
     mixer_strips();
     channel_strip_sound();
+    mixer_tracks();
     track_names();
     midi_lookahead();
     pad_sends();

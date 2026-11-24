@@ -46,4 +46,51 @@ struct Strip {
     }
 };
 
+// A strip's values one at a time, as a command, a knob or (later) a Motion lane sets them.
+enum class StripPart : uint8_t {
+    Trim, Width, EqOn,
+    Eq0, Eq1, Eq2, Eq3, Eq4, Eq5, Eq6, Eq7, Eq8, // the bands, 63 Hz .. 16 kHz
+    CompOn, Amount, Ratio, Speed, Key, Mix, Gain,
+    Count
+};
+constexpr StripPart eq_part(unsigned band) { return StripPart(unsigned(StripPart::Eq0) + band % eq_bands); }
+
+inline int strip_get(const Strip& s, StripPart part) {
+    const unsigned p = unsigned(part);
+    if (p >= unsigned(StripPart::Eq0) && p <= unsigned(StripPart::Eq8)) return s.eq[p - unsigned(StripPart::Eq0)];
+    switch (part) {
+    case StripPart::Trim: return s.trim;
+    case StripPart::Width: return s.width;
+    case StripPart::EqOn: return s.eq_on;
+    case StripPart::CompOn: return s.comp_on;
+    case StripPart::Amount: return s.comp_amount;
+    case StripPart::Ratio: return s.comp_ratio;
+    case StripPart::Speed: return s.comp_speed;
+    case StripPart::Key: return s.comp_key;
+    case StripPart::Mix: return s.comp_mix;
+    case StripPart::Gain: return s.comp_gain;
+    default: return 0;
+    }
+}
+
+// `value` into its range first. Key: 0 .. 20, as fx_keys (model/project.h) counts them.
+inline void strip_set(Strip& s, StripPart part, int value) {
+    auto clamp = [](int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; };
+    const unsigned p = unsigned(part);
+    if (p >= unsigned(StripPart::Eq0) && p <= unsigned(StripPart::Eq8)) { s.eq[p - unsigned(StripPart::Eq0)] = int16_t(clamp(value, -eq_range, eq_range)); return; }
+    switch (part) {
+    case StripPart::Trim: s.trim = int16_t(clamp(value, -trim_range, trim_range)); break;
+    case StripPart::Width: s.width = uint8_t(clamp(value, 0, int(width_max))); break;
+    case StripPart::EqOn: s.eq_on = value != 0; break;
+    case StripPart::CompOn: s.comp_on = value != 0; break;
+    case StripPart::Amount: s.comp_amount = uint8_t(clamp(value, 0, int(comp_amount_max))); break;
+    case StripPart::Ratio: s.comp_ratio = uint8_t(clamp(value, int(comp_ratio_min), int(comp_ratio_max))); break;
+    case StripPart::Speed: s.comp_speed = uint8_t(clamp(value, 0, int(CompSpeed::Count) - 1)); break;
+    case StripPart::Key: s.comp_key = uint8_t(clamp(value, 0, 20)); break;
+    case StripPart::Mix: s.comp_mix = uint8_t(clamp(value, 0, 100)); break;
+    case StripPart::Gain: s.comp_gain = int16_t(clamp(value, comp_gain_min, comp_gain_max)); break;
+    default: break;
+    }
+}
+
 } // namespace melodee
