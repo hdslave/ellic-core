@@ -8496,6 +8496,56 @@ void freeze_f2b() {
     std::puts("freeze ok");
 }
 
+// A post-FX Ring print keeps the pre-insert pad send even when an insert mutes both main channels.
+void ring_pad_send() {
+    auto project = std::make_unique<Project>();
+    auto bank = std::make_unique<PatternBank>();
+    tone_kit(*project, 0);
+    project->tempo = 1200;
+    auto& kit = project->tracks[0];
+    kit.pads[0].play = PadPlay::OneShot;
+    kit.pads[0].sends[3] = 100;
+    kit.fx.slots[0] = {plugin_effect_kind, false, {0}};
+    bank->at[0][0].length = sixteenth_ticks;
+    put(bank->at[0][0], 0, sampler_first_note, 110);
+    auto tone = tone_sample();
+    std::fill(tone.left.begin(), tone.left.end(), 0.0f); // only the right channel of bus D carries the tail
+
+    struct MutingInsert final : PluginRunner {
+        unsigned lag = 0;
+        double tail = 0;
+        unsigned latency() const override { return lag; }
+        double tail_seconds() const override { return tail; }
+        void midi(uint8_t, uint8_t, uint8_t) override {}
+        void silence() override {}
+        void render(float* left, float* right, unsigned frames) override {
+            std::fill_n(left, frames, 0.0f);
+            std::fill_n(right, frames, 0.0f);
+        }
+    } insert;
+    const uint8_t sends = print_sends(kit);
+    auto print = [&](PrintTap tap, uint8_t buses) {
+        auto host = std::make_unique<EngineHost>(EngineHost::Lean {0});
+        host->load(*project, *bank);
+        CHECK(host->offer_sample(0, &tone) && host->offer_plugin(0, &insert));
+        return render_print(*host, 0, sixteenth_ticks, tap, PrintTail::Ring, {}, buses);
+    };
+
+    auto reference = print(PrintTap::PreFx, sends);
+    CHECK(reference.error.empty() && sends == 8 && peak_of(reference.send_left[3]) == 0);
+    CHECK(peak_of(reference.send_right[3], size_t(0.5 * dsp::sample_rate())) > 0.1f);
+    for (unsigned lag : {0u, 641u}) {
+        insert.lag = lag;
+        insert.tail = lag ? 1.0 : 0.0; // exercise both the quiet stop and the trim after a declared tail
+        auto made = print(PrintTap::PostFx, sends);
+        CHECK(made.error.empty() && made.latency == lag && peak_of(made.left) == 0 && peak_of(made.right) == 0);
+        CHECK(made.send_right[3] == reference.send_right[3] && made.send_left[3] == reference.send_left[3]);
+        CHECK(made.left.size() == made.send_right[3].size());
+    }
+    auto main_only = print(PrintTap::PostFx, 0);
+    CHECK(main_only.error.empty() && main_only.left.size() == main_only.pass + uint64_t(0.2f * dsp::sample_rate()));
+}
+
 // Pad sends, freeze: a kit's print carries its pads' sends in a pair a bus (A and C here), cut to the print's frames;
 // a frozen kit plays them into its buses as the live kit sends, at its level, so what the buses hear is the same.
 void pad_sends_freeze() {
@@ -9288,6 +9338,7 @@ int main() {
     pad_sends();
     pad_cloud();
     pad_sends_freeze();
+    std::thread(ring_pad_send).join(); // a print host installs its private effect clock on its thread
     plugin_macros();
     capture_p5();
     prints_f2a();

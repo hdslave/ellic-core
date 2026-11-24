@@ -35,6 +35,7 @@ PrintAudio render_print(EngineHost& host, unsigned track, uint32_t ticks, PrintT
     std::vector<int32_t> out(B * 2);
     // Kept: the frames [from, to) of what the host plays, `to` moving on while a Ring print's tail sounds.
     uint64_t from = 0, to = 0, quiet = 0, played = 0;
+    unsigned send_shift = 0; // the pad sends leave before the track inserts
     bool planned = false, done = false, stopped = false;
     const uint64_t quiet_frames = uint64_t(ring_quiet_seconds * rate), most_frames = uint64_t(print_ring_limit_seconds * rate);
     while (true) {
@@ -47,6 +48,7 @@ PrintAudio render_print(EngineHost& host, unsigned track, uint32_t ticks, PrintT
         if (!planned) { // the first block has Play, the tempo and the track's latency in place
             a.pass = host.tick_frame(std::max<uint32_t>(ticks, 1));
             a.latency = tap == PrintTap::PreFx ? host.engine_latency(track) : host.track_latency(track); // Pre FX: before the chain
+            send_shift = a.latency - std::min(a.latency, host.engine_latency(track));
             from = (tail == PrintTail::Loop ? a.pass : 0) + a.latency;
             to = from + a.pass;
             a.left.reserve(size_t(a.pass)); a.right.reserve(size_t(a.pass));
@@ -73,6 +75,13 @@ PrintAudio render_print(EngineHost& host, unsigned track, uint32_t ticks, PrintT
             a.left.push_back(l[f]); a.right.push_back(r[f]);
             if (at >= to) { // Ring: the tail, until it has been quiet a while
                 bool loud = std::fabs(l[f]) >= ring_silence || std::fabs(r[f]) >= ring_silence;
+                if (a.sends && !loud) {
+                    const size_t send_frame = size_t(at - send_shift);
+                    for (unsigned b = 0; b < 4 && !loud; ++b) {
+                        if ((a.sends >> b) & 1)
+                            loud = std::fabs(heard_l[b][send_frame]) >= ring_silence || std::fabs(heard_r[b][send_frame]) >= ring_silence;
+                    }
+                }
                 quiet = loud ? 0 : quiet + 1;
                 const uint64_t elapsed = at + 1 - to;
                 done = quiet >= quiet_needed || elapsed >= most_frames;
@@ -90,10 +99,8 @@ PrintAudio render_print(EngineHost& host, unsigned track, uint32_t ticks, PrintT
     }
     a.rendered = played;
     host.send({Command::Type::Stop});
-    if (a.error.empty() && a.sends) { // the sends' frames as the print's, `shift` sooner: they did not wait for the chain
-        const unsigned engine = host.engine_latency(track);
-        const uint64_t shift = a.latency > engine ? a.latency - engine : 0;
-        const uint64_t first = from > shift ? from - shift : 0;
+    if (a.error.empty() && a.sends) {
+        const uint64_t first = from - send_shift;
         for (unsigned b = 0; b < 4; ++b) {
             if (!((a.sends >> b) & 1)) continue;
             a.send_left[b].assign(a.left.size(), 0.0f); a.send_right[b].assign(a.left.size(), 0.0f);

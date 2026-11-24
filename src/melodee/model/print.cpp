@@ -99,13 +99,13 @@ uint64_t print_hash(const Project& project, const PatternBank& bank, const std::
     bytes.push_back(uint8_t(tap));
     bytes.push_back(uint8_t(tail));
     for (unsigned k = 0; k < 4; ++k) bytes.push_back(uint8_t(rate >> (8 * k)));
-    // Earlier Ring prints could cut off a plug-in during the silence before a repeat. Reprint those tracks once.
+    // Reprint Ring files that may have missed a changed plug-in tail or trimmed an audible pad send.
     if (tail == PrintTail::Ring) {
         for (const auto& tr : project.tracks) {
             bool plug = tr.engine == EngineKind::Plugin;
             if (tap == PrintTap::PostFx)
                 for (const auto& fx : tr.fx.slots) plug |= fx.kind == plugin_effect_kind;
-            if (plug) { bytes.push_back(1); break; }
+            if (plug || print_sends(tr)) { bytes.push_back(2); break; }
         }
     }
     uint64_t h = 0xcbf29ce484222325ull;
