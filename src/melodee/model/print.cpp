@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #include "melodee/model/print.h"
 #include "melodee/model/project_file.h"
-#include "melodee/engine/effect_info.h"
+#include "melodee/engine/effects.h"
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
@@ -100,13 +100,17 @@ uint64_t print_hash(const Project& project, const PatternBank& bank, const std::
     bytes.push_back(uint8_t(tap));
     bytes.push_back(uint8_t(tail));
     for (unsigned k = 0; k < 4; ++k) bytes.push_back(uint8_t(rate >> (8 * k)));
+    // Earlier print hosts ran a variable number of DSP blocks while their rack opened.
+    if (std::any_of(project.plugins.begin(), project.plugins.end(), [](const PluginRef& ref) { return ref.used(); }))
+        bytes.push_back(5);
     if (tail == PrintTail::Ring) {
         auto delay_revision = [](const Chain& chain) {
             unsigned revision = 0;
             for (const auto& slot : chain.slots) {
                 auto kind = EffectKind(slot.kind);
-                if (kind == EffectKind::Spring && !slot.bypass) return 4u;
-                if (delay_sync_param(kind) >= 0 || kind == EffectKind::SampleDelay) revision = 3;
+                if (kind == EffectKind::Spring && !slot.bypass) revision = std::max(revision, 4u);
+                else if (delay_sync_param(kind) >= 0 || kind == EffectKind::SampleDelay) revision = std::max(revision, 3u);
+                else if (!slot.bypass && effect_needs_memory(kind)) return 5u;
             }
             return revision;
         };

@@ -8498,6 +8498,49 @@ void freeze_f2b() {
 
 // In a fully wet chain the first repeat can be the first audible frame. The same note
 // in a longer pattern provides a reference independent of the Ring silence detector.
+// A wet repeat starts after four complete passes. Compare every overlapping contribution
+// in the stereo mix and the kit send, including after the pattern stops and on reuse.
+void frozen_overlapping_tails() {
+    constexpr unsigned pass = 512, duration = 7 * pass, launches = 10;
+    constexpr float rate = 48000;
+    std::vector<float> frames(4 * duration);
+    for (unsigned i = 4 * pass; i < duration; ++i) {
+        frames[4*i] = 0.25f; frames[4*i+1] = -0.125f;
+        frames[4*i+2] = 0.0625f; frames[4*i+3] = -0.5f;
+    }
+    PrintClip clip;
+    clip.hold_whole(std::move(frames), unsigned(rate), pass, PrintTail::Ring, 8);
+    PrintPlayer player;
+    for (unsigned round = 0; round < 2; ++round) {
+        for (unsigned block = 0; block < launches + duration / pass; ++block) {
+            if (block < launches) player.follow(&clip, 0, 0, pass, rate);
+            else if (block == launches) player.release(rate);
+            float left[pass] {}, right[pass] {}, bus_left[pass] {}, bus_right[pass] {};
+            float* sends_l[] = {nullptr, nullptr, nullptr, bus_left};
+            float* sends_r[] = {nullptr, nullptr, nullptr, bus_right};
+            player.render(left, right, pass, sends_l, sends_r);
+            int repeats = 0;
+            for (unsigned n = 0; n < launches; ++n)
+                if (block >= n + 4 && block < n + duration / pass) ++repeats;
+            for (unsigned i = 0; i < pass; ++i) {
+                CHECK(left[i] == repeats * 0.25f && right[i] == repeats * -0.125f);
+                CHECK(bus_left[i] == repeats * 0.0625f && bus_right[i] == repeats * -0.5f);
+            }
+        }
+        CHECK(!player.sounding() && !player.underruns && !player.waits);
+    }
+    for (unsigned n = 0; n < launches; ++n) {
+        player.follow(&clip, 0, 0, pass, rate);
+        float l[pass] {}, r[pass] {};
+        player.render(l, r, pass);
+    }
+    player.fade_all(rate);
+    CHECK(player.leaving());
+    float l[pass] {}, r[pass] {};
+    player.render(l, r, pass);
+    CHECK(!player.leaving() && !player.sounding());
+}
+
 void ring_echo_paths() {
     auto project = std::make_unique<Project>();
     auto bank = std::make_unique<PatternBank>();
@@ -9427,6 +9470,7 @@ int main() {
     plugin_macros();
     capture_p5();
     prints_f2a();
+    frozen_overlapping_tails();
     freeze_f2b();
     audio_track_playback();
     audio_warp();

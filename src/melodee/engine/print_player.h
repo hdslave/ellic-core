@@ -20,6 +20,20 @@
 // held, a wait).
 namespace melodee {
 
+struct PrintClip;
+struct PrintVoice {
+    PrintClip* clip = nullptr;
+    uint32_t at = 0;
+    int stream = -1;
+    bool seeking = false, leaving = false;
+    float gain = 1, step = 0;
+};
+
+struct PrintTailVoice {
+    PrintVoice voice;
+    PrintTailVoice* next = nullptr;
+};
+
 // One print as the audio thread plays it: its frames interleaved float, read by the pager as one side of `stride`
 // floats a frame: the print's two, then a pair for each bus its kit's pad sends ride along for (PrintRecord::sends).
 // The shell (shell/print_engine.cpp) maps it; tests hold the frames in memory (resident).
@@ -38,6 +52,11 @@ struct PrintClip {
     struct Held { uint32_t from = 0, to = 0; }; // floats pinned while the clip lives, [from, to)
     std::vector<Held> held;
     std::vector<float> owned; // resident: the frames
+    // Long overlapping tails share one pinned region. Their cursors are allocated before playback.
+    std::vector<PrintTailVoice> tail_voices;
+    PrintTailVoice* spare = nullptr;
+    uint32_t tail_from() const;
+    bool prepare_tails(uint32_t shortest_pass);
     const float* data() const { return part.left; }
     // Floats safe to read from frame `frame` on without the pager's word (0: none held there).
     uint32_t safe_from(uint32_t frame) const;
@@ -63,7 +82,7 @@ struct FreezePack {
 };
 
 // A track's print voices, on the audio thread: the main voice plays the print of the pattern playing, where the
-// pattern is; up to three more play out what it leaves behind (a Ring print's tail, or a fade).
+// pattern is. Ordinary tails and fades stream; longer overlaps play from their shared pinned tail.
 class PrintPlayer {
 public:
     static constexpr unsigned voice_count = 4;
@@ -90,14 +109,9 @@ public:
     uint32_t waits = 0;     // the same just after a jump to where nothing is held (counted apart: not late, not yet)
 
 private:
-    struct Voice {
-        PrintClip* clip = nullptr;
-        uint32_t at = 0;
-        int stream = -1;
-        bool seeking = false, leaving = false;
-        float gain = 1, step = 0; // a fade: step a frame
-    };
+    using Voice = PrintVoice;
     std::array<Voice, voice_count> voices {}; // [0] the main voice
+    PrintTailVoice* ringing = nullptr;
     uint64_t expect = 0;  // the main voice's frame on the next tick
     double carry = 0;     // the next tick's place less `expect`, as render() counts ticks (-1..0]
     StreamPager* pager = nullptr;

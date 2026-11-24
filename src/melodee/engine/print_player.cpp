@@ -34,29 +34,60 @@ void PrintClip::hold_whole(std::vector<float> interleaved, uint32_t at_rate, uin
     part.frames.store(part.total);
     rate = at_rate; pass = pass_frames; tail = how;
     resident = true;
+    prepare_tails(pass);
 }
+
+uint32_t PrintClip::tail_from() const { return pass > PrintPlayer::slack ? pass - PrintPlayer::slack : 0; }
+
+bool PrintClip::prepare_tails(uint32_t shortest_pass) {
+    spare = nullptr;
+    tail_voices.clear();
+    if (tail != PrintTail::Ring || !pass || !shortest_pass || frames <= tail_from()) return false;
+    const uint32_t length = frames - tail_from();
+    // Leave one streaming voice for a fade at a launch. Tick rounding can shorten a pass by a frame.
+    if (length <= uint64_t(PrintPlayer::voice_count - 2) * std::max(1u, shortest_pass - 1)) return false;
+    const uint32_t interval = pass > 1 ? pass - 1 : 1;
+    tail_voices.resize(size_t(length / interval) + 2);
+    for (auto& tail_voice : tail_voices) { tail_voice.next = spare; spare = &tail_voice; }
+    return true;
+}
+
+namespace {
+void recycle(PrintTailVoice*& link, PrintClip& clip) {
+    auto* finished = link;
+    link = finished->next;
+    finished->next = clip.spare;
+    clip.spare = finished;
+}
+} // namespace
 
 void PrintPlayer::close(Voice& v) {
     if (v.stream >= 0 && pager) pager->close(v.stream);
     v = Voice {};
 }
 
-void PrintPlayer::cut_all() { for (auto& v : voices) close(v); }
+void PrintPlayer::cut_all() {
+    for (auto& v : voices) close(v);
+    while (ringing) recycle(ringing, *ringing->voice.clip);
+}
 
 void PrintPlayer::fade_all(float rate) {
-    for (auto& v : voices) {
-        if (!v.clip) continue;
+    auto fade = [&](Voice& v) {
         v.leaving = true;
         v.step = std::min(v.step, -1.0f / (fade_seconds * rate));
-    }
+    };
+    for (auto& v : voices) if (v.clip) fade(v);
+    for (auto* t = ringing; t; t = t->next) fade(t->voice);
 }
 
 bool PrintPlayer::leaving() const {
+    for (auto* t = ringing; t; t = t->next) if (t->voice.leaving) return true;
     for (const auto& v : voices) if (v.clip && v.leaving) return true;
     return false;
 }
 
 bool PrintPlayer::sounding() const {
+    if (ringing) return true;
     for (const auto& v : voices) if (v.clip) return true;
     return false;
 }
@@ -80,6 +111,16 @@ void PrintPlayer::begin(PrintClip* clip, uint32_t frame, bool fade_in, float rat
 void PrintPlayer::retire_main(bool ring, float rate) {
     auto& m = voices[0];
     if (!m.clip) return;
+    if (ring && m.clip->spare && m.at >= m.clip->tail_from()) {
+        auto* t = m.clip->spare;
+        m.clip->spare = t->next;
+        t->voice = m;
+        t->voice.stream = -1; // the tail is already held, including every pad-send channel
+        t->next = ringing;
+        ringing = t;
+        close(m);
+        return;
+    }
     Voice* to = nullptr;
     for (unsigned n = 1; n < voice_count && !to; ++n) if (!voices[n].clip) to = &voices[n];
     if (!to) { // none free: the one nearest its end makes room
@@ -137,20 +178,19 @@ void PrintPlayer::follow(PrintClip* clip, uint32_t at, double start, double tick
 
 void PrintPlayer::render(float* left, float* right, unsigned frames, float* const* send_l, float* const* send_r) {
     fed = 0;
-    for (unsigned n = 0; n < voice_count; ++n) {
-        auto& v = voices[n];
-        if (!v.clip) continue;
+    auto render_voice = [&](Voice& v, bool pinned) {
         const PrintClip& c = *v.clip;
-        if (!c.resident && (v.stream < 0 || pager->dead(v.stream))) { // no stream, or the card went: silent
+        const bool held = pinned || c.resident;
+        if (!held && (v.stream < 0 || pager->dead(v.stream))) { // no stream, or the card went: silent
             if (v.stream >= 0) close(v);
-            continue;
+            return;
         }
-        uint32_t limit = c.resident ? c.part.total : pager->limit(v.stream);
+        uint32_t limit = held ? c.part.total : pager->limit(v.stream);
         bool late = false, waited = false;
         unsigned f = 0;
         while (f < frames) {
             if (v.at >= c.frames) {
-                if (n == 0 && c.tail == PrintTail::Loop && !v.leaving) { // a Loop print wraps on itself
+                if (&v == &voices[0] && c.tail == PrintTail::Loop && !v.leaving) { // a Loop print wraps on itself
                     v.at = 0;
                     if (!c.resident) {
                         uint32_t safe = c.safe_from(0);
@@ -203,6 +243,14 @@ void PrintPlayer::render(float* left, float* right, unsigned frames, float* cons
         underruns += late;
         waits += waited;
         if (v.clip && v.stream >= 0) pager->place(v.stream, uint32_t(std::min<uint64_t>(uint64_t(v.at) * c.stride, c.part.total)));
+    };
+    for (auto& v : voices) if (v.clip) render_voice(v, false);
+    for (auto** link = &ringing; *link;) {
+        auto& v = (*link)->voice;
+        auto* clip = v.clip;
+        render_voice(v, true);
+        if (v.clip) link = &(*link)->next;
+        else recycle(*link, *clip);
     }
 }
 

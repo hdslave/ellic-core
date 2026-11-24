@@ -304,6 +304,8 @@ public:
     // audio thread swaps it in at its next block, after the commands sent before it, and hands the one it replaced
     // back through take_retired_plugin(), to be freed there.
     bool offer_plugin(unsigned entry, PluginRunner* runner) { return plugin_offers.push({uint8_t(entry), runner}); }
+    // Offline only, before rendering: accept the rack's offers without advancing the DSP clock.
+    bool attach_print_plugins(const Project& project);
     bool take_retired_plugin(PluginRunner*& runner) { return retired_plugins.pop(runner); }
     // MIDI thread: a ProjectPack the audio thread has finished with, to free.
     bool take_done_pack(const ProjectPack*& pack) { return done_packs.pop(pack); }

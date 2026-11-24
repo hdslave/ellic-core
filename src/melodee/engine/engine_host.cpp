@@ -1736,6 +1736,13 @@ void EngineHost::plan_compensation() {
     for (unsigned b = 0; b < bus_count; ++b) pdc_buses[b].store(bus_own[b], std::memory_order_relaxed);
 }
 
+bool EngineHost::attach_print_plugins(const Project& project) {
+    take_plugins();
+    for (unsigned e = 0; e < max_plugins; ++e)
+        if (project.plugins[e].used() && !runner_of(e)) return false;
+    return true;
+}
+
 // The rack's plug-ins, each into its entry; the one it replaces goes back to be freed (held in limbo while the queue
 // is full; with limbo full too the offer waits in its queue for the next block).
 void EngineHost::take_plugins() {

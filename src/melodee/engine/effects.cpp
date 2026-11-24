@@ -330,6 +330,28 @@ void Effect::reverb_block(float* l, float* r, unsigned frames) {
 
 unsigned Effect::repeat_gap_frames(double quarter) const {
     if (!memory || bypass || mix <= 0) return 0;
+    // These wet paths read older frames even when the delay has no tempo control.
+    // Count serial stages in each path and the longest of its parallel taps.
+    switch (current) {
+    case K::Room: case K::Plate: case K::Reverb: case K::Shimmer: {
+        unsigned path = 0;
+        for (unsigned side = 0; side < 2; ++side) {
+            const auto first = comb_length.begin() + 4 * side;
+            path = std::max(path, *std::max_element(first, first + 4) + pass_length[2 * side] + pass_length[2 * side + 1]);
+        }
+        return predelay + path + (current == K::Shimmer ? unsigned(std::ceil(window)) + 2 : 1);
+    }
+    case K::Looper: return delay + 1; // a recorded loop can play after RECORD is turned off
+    case K::Chorus: return unsigned(std::ceil((0.015f + 0.007f * b) * fs())) + 2;
+    case K::Flanger: return unsigned(std::ceil((0.003f + 0.0025f * b) * fs())) + 2;
+    case K::PedalChorus: return unsigned(std::ceil((0.009f + 0.0045f * b) * fs())) + 2;
+    case K::Ensemble: return unsigned(std::ceil(c + b + d * 0.0012f * fs())) + 2;
+    case K::MultiChorus: return unsigned(std::ceil(c + b)) + 2;
+    case K::Tape: return unsigned(std::ceil(0.005f * fs() * (1 + c * 0.6f))) + 2;
+    case K::Vinyl: return unsigned(std::ceil((0.004f + c * 0.0025f) * fs())) + 2;
+    case K::TapeEmu: return unsigned(std::ceil((0.008f + a * 0.003f + c * 0.004f) * fs())) + 2;
+    default: break;
+    }
     // The first wet frame goes through the predelay and one spring round trip.
     if (current == K::Spring) return predelay + std::max(comb_length[0], comb_length[1]) + 1;
     if (current == K::SampleDelay) return unsigned(std::ceil(std::max(a, b))) + 1;
