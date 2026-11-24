@@ -57,6 +57,7 @@ public:
         macros.set(slot, macro_kind(stored[plugin_track::Kind1 + slot], slot), stored[plugin_track::Macro1 + slot]);
     }
     void set_pool(DelayPool* pool) { macros.set_pool(pool); }
+    unsigned repeat_gap_frames(double quarter) const { return macros.repeat_gap_frames(quarter); }
     void release_macros() { macros.release(); } // the track plays something else now
     void set_wheel(float amount) override {
         if (runner) runner->midi(0xb0, 1, uint8_t(std::lround(std::clamp(amount, 0.0f, 1.0f) * 127)));

@@ -328,6 +328,27 @@ void Effect::reverb_block(float* l, float* r, unsigned frames) {
     write += frames;
 }
 
+unsigned Effect::repeat_gap_frames(double quarter) const {
+    if (!memory || bypass || mix <= 0) return 0;
+    if (current == K::SampleDelay) return unsigned(std::ceil(std::max(a, b))) + 1;
+    const int sync = delay_sync_param(current);
+    if (sync < 0) return 0;
+    const double beats = delay_sync_quarters(p[size_t(sync)]);
+    // A synced read head glides from its last position towards the new tempo.
+    double frames = beats > 0 ? std::max(double(synced), std::min(quarter * beats, double(DelayPool::half - 64))) : double(delay);
+    if (current == K::TapeEcho) frames *= 1.0 + c * 0.004; // longest point of its wow
+    if (current == K::DiffDelay) { // the four diffusers can delay the repeat on either side
+        unsigned longest = 0;
+        for (unsigned side = 0; side < 2; ++side) {
+            unsigned path = 0;
+            for (unsigned i = side * 4; i < side * 4 + 4; ++i) path += comb_length[i];
+            longest = std::max(longest, path);
+        }
+        frames += longest;
+    }
+    return unsigned(std::ceil(frames)) + 2; // include the interpolated tap's last frame
+}
+
 float Effect::sync_back(float limit) {
     int index = delay_sync_param(current);
     double quarters = index >= 0 ? delay_sync_quarters(p[size_t(index)]) : 0;

@@ -54,6 +54,7 @@ public:
     void process(float* left, float* right, unsigned frames);
     void release(); // the track is no longer a plug-in's: delay memory back to the pool, tails gone
     bool sounding() const;
+    unsigned repeat_gap_frames(double quarter) const;
 
 private:
     struct Slot {

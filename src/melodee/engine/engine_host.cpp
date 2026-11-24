@@ -1484,15 +1484,21 @@ double EngineHost::print_tail_seconds(unsigned track, bool post) const {
     const auto& slot = slots[track % track_count];
     const auto* instrument = slot.engine == &slot.plugin ? slot.plugin.attached() : nullptr;
     double seconds = instrument ? std::max(0.0, instrument->tail_seconds()) : 0.0;
+    unsigned frames = 0;
+    if (slot.engine == &slot.sampler && pad_fx_kinds[track % track_count].any())
+        frames = slot.sampler.repeat_gap_frames(fx_clock->quarter);
+    if (slot.engine == &slot.plugin) frames = slot.plugin.repeat_gap_frames(fx_clock->quarter);
     if (post) {
         for (const auto& effect : fx[track % track_count]) {
             if (effect.kind() == EffectKind::None) break;
-            if (effect.kind() != EffectKind::Plugin || effect.bypassed()) continue;
-            if (const auto* runner = runner_of(unsigned(effect.param(0))))
-                seconds += std::max(0.0, runner->tail_seconds());
+            if (effect.bypassed()) continue;
+            if (effect.kind() == EffectKind::Plugin) {
+                if (const auto* runner = runner_of(unsigned(effect.param(0))))
+                    seconds += std::max(0.0, runner->tail_seconds());
+            } else frames += effect.repeat_gap_frames(fx_clock->quarter);
         }
     }
-    return seconds;
+    return seconds + frames / double(dsp::sample_rate());
 }
 
 // Roadmap P4: the frames chain `chain` holds its sound back: each plug-in's latency (its rate converter's in it) and

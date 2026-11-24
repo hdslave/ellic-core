@@ -8496,6 +8496,76 @@ void freeze_f2b() {
     std::puts("freeze ok");
 }
 
+// In a fully wet chain the first repeat can be the first audible frame. The same note
+// in a longer pattern provides a reference independent of the Ring silence detector.
+void ring_echo_paths() {
+    auto project = std::make_unique<Project>();
+    auto bank = std::make_unique<PatternBank>();
+    tone_kit(*project, 0);
+    project->tempo = 1200;
+    auto& kit = project->tracks[0];
+    kit.pads[0].play = PadPlay::OneShot;
+    kit.pads[0].sends[3] = 100;
+    auto tone = tone_sample();
+    tone.frames = 440;
+    tone.left.resize(tone.frames); tone.right.resize(tone.frames);
+    project->samples.edit(0).frames = tone.frames;
+    auto& pattern = bank->at[0][0];
+    put(pattern, 0, sampler_first_note, 110);
+    auto print = [&](uint32_t ticks, PrintTap tap, PrintTail tail) {
+        pattern.length = ticks;
+        auto host = std::make_unique<EngineHost>(EngineHost::Lean {4});
+        host->load(*project, *bank);
+        CHECK(host->offer_sample(0, &tone));
+        return render_print(*host, 0, ticks, tap, tail, {}, print_sends(kit));
+    };
+
+    // Two serial delays: a pad feeding bus D before the track insert. A half-note pad
+    // delay at 60 BPM also checks that its lane stays alive across a two-second gap.
+    for (int tempo : {1200, 600}) {
+        project->tempo = uint16_t(tempo);
+        kit.pad_fx.at[0].slots[0] = {uint8_t(EffectKind::Echo), false, {60, 0, 100, 60, 11, 0}};
+        kit.fx.slots[0] = {uint8_t(EffectKind::Echo), false, {60, 0, 100, 60, 9, 0}};
+        for (auto tap : {PrintTap::PreFx, PrintTap::PostFx}) {
+            auto reference = print(32 * sixteenth_ticks, tap, PrintTail::Cut);
+            auto made = print(sixteenth_ticks, tap, PrintTail::Ring);
+            CHECK(made.error.empty() && reference.error.empty() && made.left.size() < reference.left.size());
+            size_t pad_echo = size_t(dsp::sample_rate() * 1200 / tempo);
+            size_t main_echo = tap == PrintTap::PreFx ? pad_echo : pad_echo + pad_echo / 2;
+            CHECK(peak_of(made.send_right[3], pad_echo, pad_echo + 500) > 0.2f);
+            CHECK(peak_of(made.left, main_echo, main_echo + 500) > 0.2f);
+            CHECK(std::equal(made.left.begin(), made.left.end(), reference.left.begin()));
+            CHECK(std::equal(made.send_right[3].begin(), made.send_right[3].end(), reference.send_right[3].begin()));
+            CHECK(peak_of(reference.left, made.left.size()) == 0 && peak_of(reference.send_right[3], made.left.size()) == 0);
+        }
+    }
+    // Free-time delays, including feedback and stereo offset, on a track insert. Check the tail
+    // against the longer pass at both channels, down to Ring's silence floor.
+    kit.pad_fx.at[0].slots[0] = {};
+    for (auto kind : {EffectKind::Echo, EffectKind::TapeEcho, EffectKind::PingPong, EffectKind::DiffDelay, EffectKind::SampleDelay}) {
+        auto& fx = kit.fx.slots[0];
+        fx = {uint8_t(kind), false, {72, 16, 100, 30, 0, 0}};
+        if (kind == EffectKind::SampleDelay) fx.params = {210, 250, 100, 0, 0, 0};
+        const uint32_t short_pass = sixteenth_ticks / 8;
+        auto reference = print(32 * sixteenth_ticks, PrintTap::PostFx, PrintTail::Cut);
+        auto made = print(short_pass, PrintTap::PostFx, PrintTail::Ring);
+        CHECK(made.left.size() < reference.left.size() && made.right.size() == made.left.size());
+        CHECK(std::equal(made.left.begin(), made.left.end(), reference.left.begin()));
+        CHECK(std::equal(made.right.begin(), made.right.end(), reference.right.begin()));
+        CHECK(peak_of(reference.left, made.left.size()) < 0.000316f && peak_of(reference.right, made.right.size()) < 0.000316f);
+    }
+    // A bypassed delay, a dry mix and a track insert after the tap add no waiting time.
+    kit.fx.slots[0] = {uint8_t(EffectKind::Echo), false, {60, 0, 100, 60, 9, 0}};
+    for (auto tap : {PrintTap::PreFx, PrintTap::PostFx}) {
+        kit.fx.slots[0].bypass = tap == PrintTap::PostFx;
+        auto plain = print(sixteenth_ticks, tap, PrintTail::Ring);
+        CHECK(plain.rendered < plain.pass + uint64_t(0.2f * dsp::sample_rate()) + EngineHost::block);
+    }
+    kit.fx.slots[0].bypass = false; kit.fx.slots[0].params[2] = 0;
+    auto dry = print(sixteenth_ticks, PrintTap::PostFx, PrintTail::Ring);
+    CHECK(dry.rendered < dry.pass + uint64_t(0.2f * dsp::sample_rate()) + EngineHost::block);
+}
+
 // A post-FX Ring print keeps the pre-insert pad send even when an insert mutes both main channels.
 void ring_pad_send() {
     auto project = std::make_unique<Project>();
@@ -9338,6 +9408,7 @@ int main() {
     pad_sends();
     pad_cloud();
     pad_sends_freeze();
+    std::thread(ring_echo_paths).join();
     std::thread(ring_pad_send).join(); // a print host installs its private effect clock on its thread
     plugin_macros();
     capture_p5();

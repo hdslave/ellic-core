@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #include "melodee/model/print.h"
 #include "melodee/model/project_file.h"
+#include "melodee/engine/effect_info.h"
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
@@ -99,10 +100,24 @@ uint64_t print_hash(const Project& project, const PatternBank& bank, const std::
     bytes.push_back(uint8_t(tap));
     bytes.push_back(uint8_t(tail));
     for (unsigned k = 0; k < 4; ++k) bytes.push_back(uint8_t(rate >> (8 * k)));
-    // Reprint Ring files that may have missed a changed plug-in tail or trimmed an audible pad send.
     if (tail == PrintTail::Ring) {
+        auto has_delay = [](const Chain& chain) {
+            return std::any_of(chain.slots.begin(), chain.slots.end(), [](const EffectSlot& slot) {
+                auto kind = EffectKind(slot.kind);
+                return delay_sync_param(kind) >= 0 || kind == EffectKind::SampleDelay;
+            });
+        };
+        // A plug-in track can automate its Echo macro. Pad chains are before either tap.
+        // Keep the previous key for files unaffected by the native-delay fix.
         for (const auto& tr : project.tracks) {
-            bool plug = tr.engine == EngineKind::Plugin;
+            if (!tr.used()) continue;
+            bool pads = tr.engine == EngineKind::Sampler || tr.engine == EngineKind::Keygroup;
+            if (tr.engine == EngineKind::Plugin || (tap == PrintTap::PostFx && has_delay(tr.fx)) ||
+                (pads && std::any_of(tr.pad_fx.at.begin(), tr.pad_fx.at.end(), has_delay))) {
+                bytes.push_back(3);
+                break;
+            }
+            bool plug = false;
             if (tap == PrintTap::PostFx)
                 for (const auto& fx : tr.fx.slots) plug |= fx.kind == plugin_effect_kind;
             if (plug || print_sends(tr)) { bytes.push_back(2); break; }

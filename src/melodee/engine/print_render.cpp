@@ -38,6 +38,7 @@ PrintAudio render_print(EngineHost& host, unsigned track, uint32_t ticks, PrintT
     unsigned send_shift = 0; // the pad sends leave before the track inserts
     bool planned = false, done = false, stopped = false;
     const uint64_t quiet_frames = uint64_t(ring_quiet_seconds * rate), most_frames = uint64_t(print_ring_limit_seconds * rate);
+    uint64_t quiet_needed = quiet_frames;
     while (true) {
         if (keep_going && !keep_going()) { a.error = "stopped"; break; }
         // Ring: the block split where the pass ends, so the sequencer stops there and only the tail sounds after it.
@@ -62,11 +63,11 @@ PrintAudio render_print(EngineHost& host, unsigned track, uint32_t ticks, PrintT
             const float* sr = host.print_send_right(b);
             heard_l[b].insert(heard_l[b].end(), sl, sl + n); heard_r[b].insert(heard_r[b].end(), sr, sr + n);
         }
-        // A plug-in may be silent between repeats. Listen through its declared tail up to Ring's usual limit.
-        uint64_t quiet_needed = quiet_frames;
+        // A pad or macro may finish while its last repeat still travels through a track insert.
+        // Keep the longest gap observed in this tail, up to Ring's limit.
         if (tail == PrintTail::Ring && played + n > to) {
             double seconds = std::min<double>(print_ring_limit_seconds, host.print_tail_seconds(track, tap == PrintTap::PostFx));
-            quiet_needed = std::max(quiet_frames, uint64_t(std::ceil(seconds * rate)));
+            quiet_needed = std::max(quiet_needed, uint64_t(std::ceil(seconds * rate)));
         }
         for (unsigned f = 0; f < n && !done; ++f) {
             uint64_t at = played + f;

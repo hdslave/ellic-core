@@ -96,7 +96,7 @@ void MacroStage::send_into(Slot& s, float* left, float* right, unsigned frames) 
     }
     // Silent with nothing going in for a second: its memory back to the pool until the knob comes up again.
     s.quiet = aim <= 0 && s.send <= 0 && peak < 1e-5f ? s.quiet + frames : 0;
-    if (s.quiet >= uint32_t(dsp::sample_rate())) {
+    if (s.quiet >= uint32_t(dsp::sample_rate()) && s.quiet >= s.fx.repeat_gap_frames(effect_clock_now->quarter)) {
         s.fx.set_kind(EffectKind::None, *pool);
         s.set_up = false; s.send = 0; s.quiet = 0;
     }
@@ -121,6 +121,13 @@ void MacroStage::release() {
         if (s.set_up && pool) s.fx.set_kind(EffectKind::None, *pool);
         s.set_up = false; s.send = 0; s.quiet = 0;
     }
+}
+
+unsigned MacroStage::repeat_gap_frames(double quarter) const {
+    unsigned frames = 0;
+    for (const auto& s : slots)
+        if (s.set_up) frames += s.fx.repeat_gap_frames(quarter);
+    return frames;
 }
 
 bool MacroStage::sounding() const {

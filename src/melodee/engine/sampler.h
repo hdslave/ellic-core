@@ -144,6 +144,7 @@ public:
     // send of its own, plays through a lane of its own, up to `lanes` pads at
     // once; a chain's lane stays with its pad after the pad falls silent, for tails.
     using PadEffects = std::array<std::array<Effect, pad_slots>, sampler_pads>;
+    unsigned repeat_gap_frames(double quarter) const;
     void set_pad_effects(PadEffects* effects) { pad_effects = effects; }
     static constexpr unsigned lanes = 16;
     // Pad sends (PadSound::sends): a pad's lane, after its chain, also plays into bus `bus`'s l / r at its send into
@@ -379,7 +380,7 @@ private:
     float g = 1, k = 2, s1[2] {}, s2[2] {};
     bool filtered = false;
     // A pad's chain plays on in its lane after the pad falls silent, until its own tail has been quiet for
-    // lane_quiet_seconds (longer than any echo's time, so a late repeat is not lost) or lane_ring_seconds have gone.
+    // lane_quiet_seconds and through its next possible repeat, or until lane_ring_seconds have gone.
     static constexpr float lane_quiet_seconds = 1.5f, lane_ring_seconds = 30.0f, lane_floor = 1e-5f;
     struct Lane { int pad = -1; uint32_t quiet = 0, ringing = 0; bool fed = false; float l[128] {}, r[128] {}; };
     PadEffects* pad_effects = nullptr;
@@ -395,6 +396,7 @@ private:
     unsigned send_used = 0;
     std::array<std::array<float, send_buses>, sampler_pads> send_now {}; // each pad's sends as heard, easing to its own
     bool knobbed(int pad) const { return pad >= 0 && pad < 128 && ((knob_mask[pad / 64] >> (pad % 64)) & 1); }
+    unsigned pad_repeat_gap(int pad, double quarter) const;
     bool chained(int pad) const { return pad_effects && (*pad_effects)[size_t(pad)][0].kind() != EffectKind::None; }
     bool sends_heard(int pad) const; // its sends, or what is left of them easing away
     // On the heap: sixteen lanes are 16 kB a kit, and the host keeps sixteen kits (made with the engine, not on the audio thread).

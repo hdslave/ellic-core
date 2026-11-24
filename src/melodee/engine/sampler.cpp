@@ -821,6 +821,20 @@ void SamplerEngine::silence() {
     mono_key.fill(-1);
     mono_held_count = 0;
 }
+unsigned SamplerEngine::pad_repeat_gap(int pad, double quarter) const {
+    unsigned frames = 0;
+    if (chained(pad))
+        for (const auto& effect : (*pad_effects)[size_t(pad)]) frames += effect.repeat_gap_frames(quarter);
+    return frames;
+}
+
+unsigned SamplerEngine::repeat_gap_frames(double quarter) const {
+    unsigned longest = 0; // each pad has a serial chain; the pads play in parallel
+    for (const auto& l : *lane)
+        if (l.pad >= 0) longest = std::max(longest, pad_repeat_gap(l.pad, quarter));
+    return longest;
+}
+
 bool SamplerEngine::sounding() const {
     for (auto& v : voices) if (v.pad >= 0) return true;
     if (grains_live) for (auto& g : grains) if (g.sample) return true;
@@ -1843,7 +1857,8 @@ void SamplerEngine::render_stereo(float* left, float* right, unsigned frames) {
             bool rung = l.ringing >= uint32_t(lane_ring_seconds * dsp::sample_rate());
             if (rung && own_chain) for (auto& effect : (*pad_effects)[size_t(l.pad)]) effect.clear();
             // A lane for sends alone holds no tail: it goes as soon as nothing fed it.
-            bool done = own_chain ? rung || l.quiet >= uint32_t(lane_quiet_seconds * dsp::sample_rate()) : !l.fed;
+            bool quiet = l.quiet >= uint32_t(lane_quiet_seconds * dsp::sample_rate());
+            bool done = own_chain ? rung || (quiet && l.quiet >= pad_repeat_gap(l.pad, effect_clock_now->quarter)) : !l.fed;
             if (done) l.pad = -1;
         }
     for (auto& v : voices) if (v.stream >= 0 && v.pad < 0) end_stream(v); // what ended this block lets its stream go
