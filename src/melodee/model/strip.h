@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #pragma once
+#include "melodee/model/limits.h"
 #include <array>
 #include <cstdint>
 
@@ -92,6 +93,23 @@ inline void strip_set(Strip& s, StripPart part, int value) {
     case StripPart::Gain: s.comp_gain = int16_t(clamp(value, comp_gain_min, comp_gain_max)); break;
     default: break;
     }
+}
+
+// Motion (docs/MIXER_PLAN.md core step 6; decision 7: tracks' strips only): a lane for each value of a track's strip
+// but its two switches and its key, after the mix's lanes (model/limits.h).
+constexpr StripPart strip_lane_parts[] {StripPart::Trim, StripPart::Width, StripPart::Eq0, StripPart::Eq1, StripPart::Eq2,
+                                        StripPart::Eq3, StripPart::Eq4, StripPart::Eq5, StripPart::Eq6, StripPart::Eq7,
+                                        StripPart::Eq8, StripPart::Amount, StripPart::Ratio, StripPart::Speed, StripPart::Mix,
+                                        StripPart::Gain};
+constexpr unsigned motion_strip_base = motion_mix_end;
+constexpr unsigned motion_strip_count = sizeof(strip_lane_parts) / sizeof(strip_lane_parts[0]);
+static_assert(motion_strip_base + motion_strip_count <= motion_bend, "the strip's lanes fit below the pitch bend's");
+constexpr bool is_strip_lane(unsigned param) { return param >= motion_strip_base && param < motion_strip_base + motion_strip_count; }
+constexpr StripPart strip_lane_part(unsigned param) { return strip_lane_parts[(param - motion_strip_base) % motion_strip_count]; }
+// The lane of `part`, or -1 (a switch, the key).
+constexpr int motion_strip(StripPart part) {
+    for (unsigned n = 0; n < motion_strip_count; ++n) if (strip_lane_parts[n] == part) return int(motion_strip_base + n);
+    return -1;
 }
 
 } // namespace melodee

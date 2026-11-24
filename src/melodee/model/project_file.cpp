@@ -377,10 +377,16 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
                 for (const auto& l : pattern.lanes) { w.u8(l.key); w.u32(l.length); }
                 w.end(at);
             }
-            if (!pattern.motion.empty()) { // Motion (roadmap P1): the pattern's own points at their ticks, locks with their hold
-                at = w.begin("MOTK");
-                w.u8(t); w.u8(p); w.u32(uint32_t(pattern.motion.size()));
-                for (const auto& m : pattern.motion) { w.u32(m.tick); w.u8(m.param); w.u8(m.pad); w.i16(m.value); w.u16(m.hold); }
+            // Motion (roadmap P1): the pattern's own points at their ticks, locks with their hold. The mixer strip's lanes
+            // (model/strip.h) in MOTS, the same records, which older builds skip (they took 206.. for a pad's values).
+            for (bool strip_lanes : {false, true}) {
+                uint32_t count = 0;
+                for (const auto& m : pattern.motion) count += is_strip_lane(m.param) == strip_lanes;
+                if (!count) continue;
+                at = w.begin(strip_lanes ? "MOTS" : "MOTK");
+                w.u8(t); w.u8(p); w.u32(count);
+                for (const auto& m : pattern.motion)
+                    if (is_strip_lane(m.param) == strip_lanes) { w.u32(m.tick); w.u8(m.param); w.u8(m.pad); w.i16(m.value); w.u16(m.hold); }
                 w.end(at);
             }
         }
@@ -1231,18 +1237,21 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
                 uint32_t ticks = r.u32();
                 if (r.ok) pattern.set_lane_length(key, ticks); // EVNT came first: the pattern's length is known
             }
-        } else if (name == "MOTK") { // Motion (roadmap P1): a pattern's points at their ticks
+        } else if (name == "MOTK" || name == "MOTS") { // Motion (roadmap P1): a pattern's points at their ticks
+            // (MOTS: the mixer strip's lanes, after MOTK, joining its points)
             unsigned t = r.u8(), p = r.u8();
             if (t >= track_count || p >= pattern_count) continue;
             auto& pattern = patterns->at[t][p];
+            const bool strip_lanes = name == "MOTS";
             uint32_t count = std::min<uint32_t>(r.u32(), motion_points);
-            pattern.motion.clear();
-            pattern.motion.reserve(count);
+            if (!strip_lanes) pattern.motion.clear();
+            count = std::min<uint32_t>(count, uint32_t(motion_points - std::min<size_t>(pattern.motion.size(), motion_points)));
+            pattern.motion.reserve(pattern.motion.size() + count);
             for (uint32_t k = 0; k < count && r.ok; ++k) {
                 MotionPoint m;
                 m.tick = r.u32(); m.param = uint8_t(r.u8()); m.pad = uint8_t(r.u8() % sampler_pads); m.value = int16_t(r.i16());
                 m.hold = uint16_t(r.u16());
-                if (r.ok) pattern.motion.push_back(m);
+                if (r.ok && is_strip_lane(m.param) == strip_lanes) pattern.motion.push_back(m);
             }
             pattern.sort_motion();
         } else if (name == "MOTN" || name == "MOT2") { // the project's Motion before roadmap P1

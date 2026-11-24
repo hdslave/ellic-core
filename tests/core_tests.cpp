@@ -9430,6 +9430,73 @@ void mixer_buses_input() {
     std::puts("mixer buses input ok");
 }
 
+// The mixer, core step 6: Motion on a track's strip. A lane a value but the switches and the key; a lane stands where
+// the strip is set; a print leaves the lanes live; a file keeps them in MOTS (older builds skip it); played, a lane
+// moves the strip, and Stop puts it back as set (a value set meanwhile counting).
+void mixer_motion() {
+    CHECK(motion_strip_count == 16 && motion_strip_base == motion_mix_end && motion_strip(StripPart::Trim) == int(motion_strip_base));
+    CHECK(motion_strip(StripPart::Eq4) == int(motion_strip_base) + 6 && motion_strip(StripPart::Gain) == int(motion_strip_base) + 15);
+    CHECK(motion_strip(StripPart::EqOn) < 0 && motion_strip(StripPart::CompOn) < 0 && motion_strip(StripPart::Key) < 0);
+    CHECK(!is_strip_lane(motion_strip_base - 1) && !is_strip_lane(motion_strip_base + 16) && !is_mix_lane(motion_strip_base));
+    for (unsigned n = 0; n < motion_strip_count; ++n) CHECK(motion_strip(strip_lane_part(motion_strip_base + n)) == int(motion_strip_base + n));
+
+    auto project = std::make_unique<Project>();
+    auto bank = std::make_unique<PatternBank>();
+    tone_kit(*project, 0);
+    project->tracks[0].strip.eq[4] = -30; project->tracks[0].strip.comp_ratio = 60;
+    const unsigned eq_lane = unsigned(motion_strip(StripPart::Eq4)), ratio_lane = unsigned(motion_strip(StripPart::Ratio));
+    CHECK(lane_own(*project, 0, eq_lane, 0) == -30 && lane_own(*project, 0, ratio_lane, 0) == 60);
+    auto& pattern = bank->at[0][0];
+    put(pattern, 0, uint8_t(sampler_first_note), 100);
+    pattern.write_motion(point(0, eq_lane, 120));
+    pattern.write_motion(point(4, motion_level, 80));
+    pattern.write_motion(point(8, ratio_lane, 150));
+
+    // The file: the strip's points in MOTS, the rest in MOTK, together again on load.
+    auto has = [](const std::vector<uint8_t>& bytes, const char* tag) { return std::search(bytes.begin(), bytes.end(), tag, tag + 4) != bytes.end(); };
+    auto bytes = save_project(*project, *bank);
+    CHECK(has(bytes, "MOTS") && has(bytes, "MOTK"));
+    auto back = std::make_unique<Project>();
+    auto back_bank = std::make_unique<PatternBank>();
+    CHECK(load_project(bytes, *back, *back_bank).empty());
+    const auto& m = back_bank->at[0][0].motion;
+    CHECK(m.size() == 3 && m[0].param == eq_lane && m[0].value == 120 && m[1].param == motion_level && m[2].param == ratio_lane);
+    {
+        auto lone = std::make_unique<PatternBank>();
+        lone->at[2][5].write_motion(point(3, eq_lane, -60)); // a pattern with the strip's points alone
+        auto b = save_project(*project, *lone);
+        CHECK(has(b, "MOTS") && load_project(b, *back, *back_bank).empty() && back_bank->at[2][5].motion.size() == 1);
+    }
+    // A print: the strip's lanes stay live, as the mix's.
+    {
+        auto p = std::make_unique<Project>(*project);
+        auto b = std::make_unique<PatternBank>(*bank);
+        print_project(*p, *b, 0, 0);
+        CHECK(b->at[0][0].motion.empty());
+    }
+
+    // Played: the lanes move the strip; Stop puts it back as set.
+    auto host = std::make_unique<EngineHost>();
+    host->load(*project, *bank);
+    SampleData tone = tone_sample();
+    CHECK(host->offer_sample(0, &tone));
+    std::vector<int32_t> out(256);
+    auto play = [&](unsigned blocks) { for (unsigned n = 0; n < blocks; ++n) host->render(out.data(), 128, 1); };
+    play(2);
+    CHECK(host->strip_values(0).eq[4] == -30);
+    host->send({Command::Type::Play});
+    play(4);
+    CHECK(host->strip_values(0).eq[4] == 120 && host->strip_values(0).comp_ratio == 60);
+    play(unsigned(44100 / 128)); // past step 9 at 120 BPM
+    CHECK(host->strip_values(0).comp_ratio == 150);
+    host->send({Command::Type::StripValue, 0, 0, uint16_t(StripPart::Trim), 30}); // set while it plays: kept
+    host->send({Command::Type::Stop});
+    play(2);
+    const Strip& now = host->strip_values(0);
+    CHECK(now.eq[4] == -30 && now.comp_ratio == 60 && now.trim == 30);
+    std::puts("mixer motion ok");
+}
+
 void channel_strip_sound() {
     const float rate_was = dsp::sample_rate();
     constexpr unsigned block = 128;
@@ -9562,6 +9629,7 @@ int main() {
     mixer_tracks();
     mixer_submixes();
     mixer_buses_input();
+    mixer_motion();
     track_names();
     midi_lookahead();
     pad_sends();

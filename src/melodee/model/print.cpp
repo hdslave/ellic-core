@@ -33,7 +33,7 @@ void print_project(Project& project, PatternBank& bank, unsigned track, unsigned
     auto& kept = bank.at[t][p];
     kept.punches.clear();      // punches stay live
     kept.follow = PatternFollow {}; // the pattern plays on
-    kept.motion.erase(std::remove_if(kept.motion.begin(), kept.motion.end(), [](const MotionPoint& m) { return is_mix_lane(m.param); }),
+    kept.motion.erase(std::remove_if(kept.motion.begin(), kept.motion.end(), [](const MotionPoint& m) { return is_mix_lane(m.param) || is_strip_lane(m.param); }),
                       kept.motion.end());
 
     // The project as new, with only what one track's sound hears of it.
@@ -71,7 +71,7 @@ void print_project(Project& project, PatternBank& bank, unsigned track, unsigned
     for (unsigned m = 0; m < modulator_count; ++m) { // only targets on the track's own sound
         Modulator mod = project.modulators[m];
         for (auto& target : mod.targets)
-            if (target.used() && (target.track != t || is_mix_lane(target.param))) target = ModTarget {};
+            if (target.used() && (target.track != t || is_mix_lane(target.param) || is_strip_lane(target.param))) target = ModTarget {};
         if (mod.target_count()) out->modulators[m] = mod;
     }
     project = *out;

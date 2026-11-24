@@ -5,7 +5,7 @@
 #include "melodee/model/project.h"
 
 // Roadmap P4: where a Motion lane of track `t` stands as set (Motion aside), from the project alone: an engine
-// parameter, an effect of the track's chain, a kit pad's own value, the mod wheel and pitch bend, the track's level, pan and sends,
+// parameter, an effect of the track's chain, a kit pad's own value, the mod wheel and pitch bend, the track's level, pan, sends and strip,
 // the master's chain and the returns. Modulators move a lane around it; macros set it.
 namespace melodee {
 
@@ -13,6 +13,7 @@ inline int lane_own(const Project& project, unsigned t, unsigned param, unsigned
     const auto& track = project.tracks[t % track_count];
     if (param == motion_wheel) return track.wheel;
     if (param == motion_bend) return track.bend;
+    if (is_strip_lane(param)) return strip_get(track.strip, strip_lane_part(param)); // the mixer
     if (is_mix_lane(param)) {
         if (param == motion_level) return track.mix.level;
         if (param == motion_pan) return track.mix.pan;

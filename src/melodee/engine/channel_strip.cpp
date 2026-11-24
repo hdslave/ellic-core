@@ -179,6 +179,9 @@ void ramp(float* l, float* r, unsigned frames, float from, float d) {
 } // namespace
 
 void ChannelStrip::set(const Strip& strip) {
+    // The speeds worked out again only for a new speed: a band's coefficients follow its gain every block it glides,
+    // so a value set often (Motion) costs no sines and powers it does not need.
+    if (strip.comp_speed != strip_.comp_speed) rate_ = 0;
     strip_ = strip;
     trim_target_ = strip.trim / 10.0f;
     for (unsigned n = 0; n < eq_bands; ++n) bands_[n].target = strip.eq_on ? strip.eq[n] / 10.0f : 0.0f;
@@ -188,7 +191,6 @@ void ChannelStrip::set(const Strip& strip) {
     threshold_db_ = -float(strip.comp_amount);
     slope_ = 1 - 10.0f / float(std::max<unsigned>(strip.comp_ratio, comp_ratio_min));
     width_target_ = strip.width / 100.0f;
-    rate_ = 0; // speeds and the bands' coefficients worked out again at the next block
     idle_ = false;
 }
 

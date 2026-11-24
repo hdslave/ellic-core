@@ -423,6 +423,7 @@ void EngineHost::load_track(unsigned t, const Track& track) {
     apply({Command::Type::Pan, uint8_t(t), 0, 0, track.mix.pan});
     strips[t].set(track.strip);
     strips[t].reset(); // as loaded, not glided to from the last project's
+    strip_set_by[t] = track.strip; slot.strip_moved = false;
     apply({Command::Type::TrackOut, uint8_t(t), 0, 0, track.mix.out});
     slot.out_was = slot.out; // loaded: no crossing over
     for (unsigned b = 0; b < bus_count; ++b) { slot.sends[b] = track.mix.sends[b] / 100.0f; slot.mix_sends[b] = track.mix.sends[b]; }
@@ -978,6 +979,11 @@ void EngineHost::apply(const Command& c) {
             strip_set(v, StripPart(c.index), c.value);
             if (c.track == master_chain) v.comp_amount = 0; // the master's compressor is the Compressor (Shift + Pad 5)
             strips[c.track].set(v);
+            if (c.track < track_count) { // as set, apart from what Motion moves; Motion's modulators swing around it
+                strip_set(strip_set_by[c.track], StripPart(c.index), c.value);
+                const int lane = motion_strip(StripPart(c.index));
+                if (mods_on && lane >= 0) mod_note(c.track, unsigned(lane), 0, strip_get(strip_set_by[c.track], StripPart(c.index)), true);
+            }
         }
         break;
     case Type::Send: // index: the bus
@@ -1596,6 +1602,7 @@ void EngineHost::mod_back(unsigned t, int param, unsigned pad) {
 // A modulated value to its lane, as Motion would write it, telling no modulator (at a block's start: straight in).
 void EngineHost::mod_write(unsigned t, unsigned param, unsigned pad, int value) {
     auto& slot = slots[t % track_count];
+    if (is_strip_lane(param)) { move_strip(t % track_count, param, value); return; } // a modulator's swing: Stop leaves it
     if (is_mix_lane(param)) {
         bool mix = slot.mix_moved, master = slot.master_moved; // a modulator's swing is not Motion's: Stop leaves it be
         move_mix(t, slot, param, value);
@@ -1826,6 +1833,10 @@ void EngineHost::restore(Slot& slot) {
     for (auto& l : slot.locks) l.param = -1; // locks end with everything they moved
     slot.locks_on = 0;
     if (mods_on) mod_back(unsigned(&slot - slots.data())); // roadmap P4: modulators swing around the values as set again
+    if (slot.strip_moved) { // the mixer's strip back as set (it glides there)
+        strips[unsigned(&slot - slots.data())].set(strip_set_by[unsigned(&slot - slots.data())]);
+        slot.strip_moved = false;
+    }
     if (slot.mix_moved) { // roadmap P4: the strip back where it was set
         set_level(slot, slot.mix_level); set_pan(slot, slot.mix_pan);
         for (unsigned b = 0; b < bus_count; ++b) slot.sends[b] = slot.mix_sends[b] / 100.0f;
@@ -1895,6 +1906,18 @@ void EngineHost::move_mix(unsigned, Slot& slot, unsigned param, int value) {
     }
 }
 
+// The mixer: one value of track `t`'s strip moved by Motion (or a modulator), or back as set. It glides there as a
+// turned knob does (ChannelStrip).
+void EngineHost::move_strip(unsigned t, unsigned param, int value) {
+    Strip v = strips[t].values();
+    strip_set(v, strip_lane_part(param), value);
+    strips[t].set(v);
+}
+
+void EngineHost::restore_strip(unsigned t, unsigned param) {
+    move_strip(t, param, strip_get(strip_set_by[t], strip_lane_part(param)));
+}
+
 void EngineHost::restore_mix(Slot& slot, unsigned param) {
     if (param == motion_level) set_level(slot, slot.mix_level);
     else if (param == motion_pan) set_pan(slot, slot.mix_pan);
@@ -1910,6 +1933,7 @@ void EngineHost::restore_mix(Slot& slot, unsigned param) {
 
 void EngineHost::move_lane(unsigned t, Slot& slot, unsigned param, unsigned pad, int value) {
     if (mods_on) { if (is_master_lane(param)) mod_note_any(param, value, false); else mod_note(t, param, pad, value, false); } // roadmap P4: modulated around it
+    if (is_strip_lane(param)) { move_strip(t, param, value); slot.strip_moved = true; return; } // the mixer
     if (is_mix_lane(param)) { move_mix(t, slot, param, value); return; } // roadmap P4
     if (param == motion_wheel) { // the mod wheel's lane (parity phase 8)
         if (slot.engine) { engine_wheel(slot, std::clamp(value / 127.0f, 0.0f, 1.0f)); slot.wheel_moved = true; }
@@ -1944,6 +1968,7 @@ void EngineHost::move_lane(unsigned t, Slot& slot, unsigned param, unsigned pad,
 
 void EngineHost::restore_lane(unsigned t, Slot& slot, unsigned param, unsigned pad) {
     if (mods_on) mod_back(t, int(param), pad); // roadmap P4: modulated around its own again
+    if (is_strip_lane(param)) { restore_strip(t, param); return; } // the mixer
     if (is_mix_lane(param)) { restore_mix(slot, param); return; } // roadmap P4
     if (param == motion_wheel) { engine_wheel(slot, slot.wheel); return; }
     if (param == motion_bend) { engine_bend(slot, slot.bend); return; }

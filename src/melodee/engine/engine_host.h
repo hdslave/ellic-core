@@ -471,6 +471,7 @@ private:
         int16_t mix_level = 100, mix_pan = 0;
         std::array<int16_t, bus_count> mix_sends {};
         bool mix_moved = false, master_moved = false;
+        bool strip_moved = false; // the mixer: Motion moved its strip (core step 6); Stop puts it back as set
         bool moved = false;                       // motion changed a value since Play
         // Issue 32: a kit's pad mutes as set (Mute + pad; a mute lane only borrows them), and whether a lane moved one.
         std::array<uint64_t, (sampler_pads + 63) / 64> pad_mutes {};
@@ -629,6 +630,11 @@ private:
     // back to the track's own (the master's as set).
     void move_mix(unsigned t, Slot& slot, unsigned param, int value);
     void restore_mix(Slot& slot, unsigned param);
+    // The mixer, core step 6: a track's strip on Motion's lanes (model/strip.h is_strip_lane()). strip_set_by: each
+    // track's strip as its commands set it, which Motion moves away from and Stop (or a lane's end) brings back.
+    void move_strip(unsigned t, unsigned param, int value);
+    void restore_strip(unsigned t, unsigned param);
+    std::array<Strip, track_count> strip_set_by {};
     // Roadmap P4, modulators (model/modulators.h): each as the shell last sent it, where its cycle is, its random
     // values, a follower's level, and each target's lane: where it stands (`center`: as set, or where Motion has it),
     // as set (`own`), and what was last written there. A lane set from elsewhere tells them (mod_note); the
