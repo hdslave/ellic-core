@@ -3,6 +3,7 @@
 #pragma once
 #include "melodee/engine/dsp.h"
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -135,39 +136,88 @@ private:
     uint32_t tail_frames = 0, quiet = 0;
 };
 
-// Roadmap P4, stems to the card: each track (after its chain, level, pan and mute, as it joins the mix) and each bus's
-// return, stereo, the same frames as the mixdown beside them; up to stem_count of them, those in `mask` taken. Made by
-// the service thread when first wanted (21 MB), handed to the engine host, which writes; the service thread reads.
+// Roadmap P4, stems to the card: each track (after its chain, strip, level, pan and mute, as it leaves for the master or
+// its submix), each bus's return and each submix (the mixer: after its chain, strip, level, pan and mute, as it joins the
+// master), stereo, the same frames as the mixdown beside them; up to stem_count of them, those in `mask` taken. Then the
+// pad stems: a kit pad's voices apart (after its own chain, volume and pan, at its track's level, pan and mute, as its
+// pad sends are taken), up to pad_most in one render, each the pad set_pad() names. Only the stems taken have rows. Made
+// by the service thread when first wanted, grown when a render needs more rows, handed to the engine host, which
+// writes; the service thread reads.
 class StemRing {
 public:
-    static constexpr unsigned stem_count = 20;      // tracks 0-15, buses A-D
+    static constexpr unsigned stem_count = 28;      // tracks 0-15, buses A-D 16-19, submixes 20-27
+    static constexpr unsigned pad_most = 96;        // pad stems in one render at most
+    static constexpr unsigned row_most = stem_count + pad_most; // a stem's number: 0-27 as above, then pad stem n at 28 + n
+    static constexpr unsigned tracks = 16, kit_pads = 128;      // track_count and sampler_pads (checked in engine_host.cpp)
     static constexpr uint32_t ring_frames = 1u << 17; // 2.7 s at 48 kHz: the service thread drains every pass
-    StemRing() : ring_(new float[size_t(ring_frames) * stem_count * 2]()) {}
-    // Service thread, before the render is armed: which stems, from the start.
-    void arm(uint32_t mask) { mask_.store(mask); read_.store(0); write_.store(0); failed_.store(false); }
+    // Service thread (or the MIDI thread), before the render is armed: which stems, from the start, and how many pad
+    // stems after them (set_pad() says whose). Makes room for its rows (1 MB each, half that past 48 rows).
+    void arm(uint32_t mask, unsigned pads = 0) {
+        pads = std::min(pads, pad_most);
+        unsigned rows = 0;
+        for (unsigned s = 0; s < stem_count; ++s) if ((mask >> s) & 1) row_stem_[rows++] = uint8_t(s);
+        for (unsigned n = 0; n < pads; ++n) row_stem_[rows++] = uint8_t(stem_count + n);
+        frames_ = rows > 48 ? ring_frames / 2 : ring_frames;
+        if (size_t(rows) * frames_ * 2 > room_) { room_ = size_t(rows) * frames_ * 2; ring_.reset(new float[room_]()); }
+        for (auto& track : pad_row_) track.fill(-1);
+        rows_ = rows; pads_ = pads;
+        for (auto& d : pad_delay_) d.store(0);
+        mask_.store(mask); read_.store(0); write_.store(0); failed_.store(false);
+    }
+    // Service thread, after arm(): pad stem n is pad `pad` of track `track`.
+    void set_pad(unsigned n, unsigned track, unsigned pad) {
+        if (n < pads_ && track < tracks && pad < kit_pads) pad_row_[track][pad] = int16_t(n);
+    }
     uint32_t mask() const { return mask_.load(std::memory_order_relaxed); }
-    // Audio thread: frames [from, to) of this block, stem s's left and right at `l[s]`, `r[s]` (nullptr: silence).
+    unsigned pads() const { return pads_; }
+    unsigned rows() const { return rows_; }
+    unsigned row_stem(unsigned row) const { return row < rows_ ? row_stem_[row] : 0; } // its stem's number
+    // Audio thread: track t's pads, each its pad stem's number or -1.
+    const int16_t* pad_rows(unsigned track) const { return pad_row_[track % tracks].data(); }
+    // The frames track t's pad stems come early by (taken before its chain and its delay compensation, as its pad
+    // sends are): the audio thread says, the writer puts that much silence before them.
+    void set_pad_delay(unsigned track, uint32_t frames) { pad_delay_[track % tracks].store(frames, std::memory_order_relaxed); }
+    uint32_t pad_delay(unsigned track) const { return pad_delay_[track % tracks].load(std::memory_order_relaxed); }
+    // Audio thread: frames [from, to) of this block, stem s's left and right at `l[s]`, `r[s]` (nullptr: silence),
+    // for s up to stem_count, or row_most when pads() > 0.
     void write(const float* const* l, const float* const* r, unsigned from, unsigned to) {
         uint64_t w = write_.load(std::memory_order_relaxed), rd = read_.load(std::memory_order_acquire);
-        if (w + (to - from) - rd > ring_frames) { failed_.store(true, std::memory_order_relaxed); return; }
-        uint32_t m = mask_.load(std::memory_order_relaxed);
+        if (w + (to - from) - rd > frames_) { failed_.store(true, std::memory_order_relaxed); return; }
         for (unsigned f = from; f < to; ++f) {
-            float* frame = ring_.get() + size_t((w + f - from) % ring_frames) * stem_count * 2;
-            for (unsigned s = 0; s < stem_count; ++s) {
-                bool on = ((m >> s) & 1) && l[s];
-                frame[2 * s] = on ? l[s][f] : 0.0f; frame[2 * s + 1] = on ? r[s][f] : 0.0f;
+            float* frame = ring_.get() + size_t((w + f - from) % frames_) * rows_ * 2;
+            for (unsigned row = 0; row < rows_; ++row) {
+                const unsigned s = row_stem_[row];
+                frame[2 * row] = l[s] ? l[s][f] : 0.0f; frame[2 * row + 1] = r[s] ? r[s][f] : 0.0f;
             }
         }
         write_.store(w + (to - from), std::memory_order_release);
     }
     // Service thread: up to `max` frames of stem `s` and every other into `out` (a stem's frames apart, interleaved
-    // stereo, stem_count blocks of 2 * max floats); the count.
+    // stereo, stem_count blocks of 2 * max floats, a stem not taken silent; no pad stems); the count.
     unsigned pop(float* out, unsigned max) {
         uint64_t rd = read_.load(std::memory_order_relaxed), w = write_.load(std::memory_order_acquire);
         unsigned n = unsigned(std::min<uint64_t>(w - rd, max));
+        std::fill(out, out + size_t(stem_count) * 2 * max, 0.0f);
         for (unsigned f = 0; f < n; ++f) {
-            const float* frame = ring_.get() + size_t((rd + f) % ring_frames) * stem_count * 2;
-            for (unsigned s = 0; s < stem_count; ++s) { out[size_t(s) * 2 * max + 2 * f] = frame[2 * s]; out[size_t(s) * 2 * max + 2 * f + 1] = frame[2 * s + 1]; }
+            const float* frame = ring_.get() + size_t((rd + f) % frames_) * rows_ * 2;
+            for (unsigned row = 0; row < rows_; ++row) {
+                const unsigned s = row_stem_[row];
+                if (s >= stem_count) continue;
+                out[size_t(s) * 2 * max + 2 * f] = frame[2 * row]; out[size_t(s) * 2 * max + 2 * f + 1] = frame[2 * row + 1];
+            }
+        }
+        read_.store(rd + n, std::memory_order_release);
+        return n;
+    }
+    // Service thread: the same by row, pad stems too: rows() blocks of 2 * max floats, row_stem() names each.
+    unsigned pop_rows(float* out, unsigned max) {
+        uint64_t rd = read_.load(std::memory_order_relaxed), w = write_.load(std::memory_order_acquire);
+        unsigned n = unsigned(std::min<uint64_t>(w - rd, max));
+        for (unsigned f = 0; f < n; ++f) {
+            const float* frame = ring_.get() + size_t((rd + f) % frames_) * rows_ * 2;
+            for (unsigned row = 0; row < rows_; ++row) {
+                out[size_t(row) * 2 * max + 2 * f] = frame[2 * row]; out[size_t(row) * 2 * max + 2 * f + 1] = frame[2 * row + 1];
+            }
         }
         read_.store(rd + n, std::memory_order_release);
         return n;
@@ -176,9 +226,15 @@ public:
     bool failed() const { return failed_.load(std::memory_order_relaxed); }
 private:
     std::unique_ptr<float[]> ring_;
+    size_t room_ = 0;                                 // floats ring_ holds
+    uint32_t frames_ = ring_frames;
+    unsigned rows_ = 0, pads_ = 0;
+    std::array<uint8_t, row_most> row_stem_ {};
+    std::array<std::array<int16_t, kit_pads>, tracks> pad_row_ {};
     std::atomic<uint32_t> mask_ {0};
     std::atomic<uint64_t> read_ {0}, write_ {0};
     std::atomic<bool> failed_ {false};
+    std::array<std::atomic<uint32_t>, tracks> pad_delay_ {};
 };
 
 } // namespace melodee

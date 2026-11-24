@@ -1726,6 +1726,7 @@ void SamplerEngine::render_stereo(float* left, float* right, unsigned frames) {
         double every = dsp::sample_rate() / std::max(1, int(1 + own.cloud_density * 0.99));
         while (v.next_grain <= 0) { spawn(v); v.next_grain += every; }
     }
+    sub_used = 0;
     if (grains_live) { // none started since they last all ended: nothing to read
         bool live = false;
         for (auto& g : grains) {
@@ -1733,6 +1734,11 @@ void SamplerEngine::render_stereo(float* left, float* right, unsigned frames) {
             const float* l = g.l;
             const float* r = g.r;
             const double span = double(g.top - g.low);
+            float* stem_l = stem_out(g.pad, 0); // its pad's stem too
+            float* stem_r = stem_out(g.pad, 1);
+            float* to_l = left;
+            float* to_r = right;
+            if (const int s = routed(g.pad); s >= 0) { to_l = sub_l[s]; to_r = sub_r[s]; sub_used |= 1u << s; } // its submix
             for (unsigned f = 0; f < frames && g.age < g.length; ++f, ++g.age) {
                 // Only a region shorter than the grain gets this far: round inside it.
                 if (g.position >= g.top) g.position -= span * std::floor((g.position - g.low) / span);
@@ -1740,7 +1746,9 @@ void SamplerEngine::render_stereo(float* left, float* right, unsigned frames) {
                 float frac = float(g.position - i);
                 unsigned j = i + 1 < g.top ? i + 1 : g.low;
                 float w = std::sin(dsp::pi * float(g.age) / float(g.length)) * g.gain * 0.5f; // a smooth window
-                left[f] += (l[i] + (l[j] - l[i]) * frac) * w * g.left; right[f] += (r[i] + (r[j] - r[i]) * frac) * w * g.right;
+                const float gl = (l[i] + (l[j] - l[i]) * frac) * w * g.left, gr = (r[i] + (r[j] - r[i]) * frac) * w * g.right;
+                to_l[f] += gl; to_r[f] += gr;
+                if (stem_l) { stem_l[f] += gl; stem_r[f] += gr; }
                 g.position += g.step;
             }
             if (g.age >= g.length) g.sample = nullptr;
@@ -1753,18 +1761,28 @@ void SamplerEngine::render_stereo(float* left, float* right, unsigned frames) {
     bool sending = false;
     for (unsigned b = 0; b < send_buses; ++b) sending |= send_l[b] && send_r[b];
     send_used = 0;
-    auto on_lane = [&](int pad) { return laned && pad < int(sampler_pads) && (chained(pad) || (sending && sends_heard(pad))); };
+    const bool stemming = stem_rows && laned;
+    auto on_lane = [&](int pad) {
+        return laned && pad < int(sampler_pads) && (chained(pad) || (sending && sends_heard(pad)) || (stemming && stem_rows[pad] >= 0));
+    };
     bool knobbing = (knob_mask[0] || knob_mask[1]) && knob_l && knob_r && frames <= 128;
     if (laned) for (auto& l : *lane) if (l.pad >= 0) { l.fed = false; std::fill(l.l, l.l + frames, 0.0f); std::fill(l.r, l.r + frames, 0.0f); }
     knob_used = false;
     // Where a pad's sound joins: the kit, the Sidechain's key (first: it must not duck itself), or Knob FX's own output.
     bool keying = key_pad >= 0 && frames <= 128;
+    // Then a submix it is sent to (PadSound::out), else the kit.
     auto out_l = [&](int pad) {
         if (keying && pad == key_pad) return key_l;
         if (knobbing && knobbed(pad)) { knob_used = true; return knob_l; }
+        if (const int s = routed(pad); s >= 0) { sub_used |= 1u << s; return sub_l[s]; }
         return left;
     };
-    auto out_r = [&](int pad) { return keying && pad == key_pad ? key_r : knobbing && knobbed(pad) ? knob_r : right; };
+    auto out_r = [&](int pad) {
+        if (keying && pad == key_pad) return key_r;
+        if (knobbing && knobbed(pad)) return knob_r;
+        if (const int s = routed(pad); s >= 0) return sub_r[s];
+        return right;
+    };
     for (auto& v : voices) {
         if (v.pad < 0 || v.cloud) continue;
         v.wrapped = false;
@@ -1838,6 +1856,10 @@ void SamplerEngine::render_stereo(float* left, float* right, unsigned frames) {
             for (unsigned f = 0; f < frames; ++f) {
                 into_l[f] += l.l[f]; into_r[f] += l.r[f];
                 loudest = std::max(loudest, std::max(std::fabs(l.l[f]), std::fabs(l.r[f])));
+            }
+            if (float* stem_l = stemming ? stem_out(l.pad, 0) : nullptr) { // its pad stem: the lane as it joins the kit
+                float* stem_r = stem_out(l.pad, 1);
+                for (unsigned f = 0; f < frames; ++f) { stem_l[f] += l.l[f]; stem_r[f] += l.r[f]; }
             }
             // Its sends: into each bus as much as the pad sends there, eased across the block so a turn never clicks.
             auto& now = send_now[size_t(l.pad)];

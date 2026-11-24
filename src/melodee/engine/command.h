@@ -163,9 +163,22 @@ struct Command {
         Chop,
         // Issue 27, Settings > SEQ > Mute: value 1 Notes, a muted track or kit pad starts no new notes and what it
         // plays rings on (a MIDI track sends no All Notes Off); 0 Audio, a mute silences it at once.
-        MuteMode
+        MuteMode,
+        // The mixer (docs/MIXER_PLAN.md): track = a strip number (model/project.h; tracks 0-15 so far), index =
+        // StripPart (model/strip.h), value: one value of that channel's strip.
+        StripValue,
+        // The mixer: track = a submix 0-7, index = SubPart, value: its level 0..127, pan -50..50, mute, solo or a
+        // send 0..100.
+        SubMix,
+        // The mixer: track, value = where it plays (Mix::out: 0 the master, out_sub(s) submix s).
+        TrackOut,
+        // The mixer: index = bus, value 1: its return muted.
+        BusMute,
+        // The mixer: value 1: takes, Audio Recall and the input meter hear the input after its strip (else before).
+        InputWet
 
     };
+    enum SubPart : uint16_t { SubLevel, SubPan, SubMute, SubSolo, SubSend0 }; // SubMix's index; SubSend0 + bus
     Command() = default;
     Command(Type type, uint8_t track = 0, uint8_t pattern = 0, uint16_t index = 0, int16_t value = 0)
         : type(type), track(track), pattern(pattern), index(index), value(value) {}

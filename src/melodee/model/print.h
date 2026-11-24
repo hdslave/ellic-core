@@ -82,16 +82,17 @@ struct PrintTable {
 };
 
 // `project` and `bank` (copies) made into what a print of pattern `pattern` of track `track` plays: that track alone
-// in its place, playing that pattern and no other, its level at unity, pan centred, no sends, mute or solo, no
-// chain of patterns (with effects on its chain its level and pan kept: print_mix()); the pattern without its kept punches, follow action and mix lanes (level, pan, sends, the
+// in its place, playing that pattern and no other, its level at unity, pan centred, its mixer strip flat, no sends,
+// mute or solo, no chain of patterns; the pattern without its kept punches, follow action and mix lanes (level, pan, sends, the
 // master's and the returns' values), which stay live; the project's tempo the one that pattern plays at; no buses'
 // or master's effects, Knob FX, master compressor, Looper, macros or song; only the samples, chops, plug-ins and
 // modulator targets the track uses. What the screen keeps of the track (its name, last pad and note, fader) is
 // cleared too, so it does not move the hash.
 void print_project(Project& project, PatternBank& bank, unsigned track, unsigned pattern);
-// Freeze plan F2c: the level and pan a Post FX print of `track` is made at. A track with effects on its chain keeps
-// its own, as live, where they meet the chain first (a compressor or a drive hears the level it hears live); one
-// without, unity and centred. Playback takes the track's level and pan relative to these.
+// Freeze plan F2c: the level and pan a Post FX print of `track` is made at. Unity and centred: since the mixer's strip
+// (docs/MIXER_PLAN.md) a track's level and pan come after its chain and its strip, so a chain never hears them and a
+// print holds neither; playback takes the track's own. (Before, a track with effects kept its own here; such a print's
+// project hashes differently now, so it is printed again.)
 Mix print_mix(const Track& track);
 
 // What made a print: a print_project() and the plug-ins' states (plugin/plugin_rack.h; only the entries it uses

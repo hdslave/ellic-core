@@ -140,19 +140,30 @@ public:
     void taps(TrackTaps& out) const;
     // The project's tempo, for Follow (tenths of a BPM).
     void set_tempo(unsigned tenths) { if (tenths != tempo) { tempo = tenths; tempo_moved = true; } }
-    // PadFX: each pad's own chain (the host's). A pad with a chain, or with a
-    // send of its own, plays through a lane of its own, up to `lanes` pads at
-    // once; a chain's lane stays with its pad after the pad falls silent, for tails.
+    // PadFX: each pad's own chain (the host's). A pad with a chain, a send of
+    // its own or a pad stem plays through a lane of its own, up to `lanes` pads
+    // at once; a chain's lane stays with its pad after the pad falls silent, for tails.
     using PadEffects = std::array<std::array<Effect, pad_slots>, sampler_pads>;
     unsigned repeat_gap_frames(double quarter) const;
     void set_pad_effects(PadEffects* effects) { pad_effects = effects; }
-    static constexpr unsigned lanes = 16;
+    static constexpr unsigned lanes = 32;
     // Pad sends (PadSound::sends): a pad's lane, after its chain, also plays into bus `bus`'s l / r at its send into
     // it, eased, added to what is there. The host hands this sub-block's place in its own buffers before each render,
     // as for Knob FX; nullptr: none (no pad sends into that bus).
     static constexpr unsigned send_buses = 4;
     void set_send_out(unsigned bus, float* l, float* r) { if (bus < send_buses) { send_l[bus] = l; send_r[bus] = r; } }
     unsigned sends_fed() const { return send_used; } // a bit a bus: the last render put something there
+    // Pads sent to a submix (PadSound::out): a pad's voices, after its own chain and punch (a cloud's grains as they
+    // are), play into submix n's l / r instead of the kit, added to what is there. The host hands this sub-block's
+    // place in its own buffers before each render, as for the sends; nullptr: they play in the kit.
+    static constexpr unsigned sub_outs = 8;
+    void set_sub_out(unsigned n, float* l, float* r) { if (n < sub_outs) { sub_l[n] = l; sub_r[n] = r; } }
+    unsigned subs_fed() const { return sub_used; } // a bit a submix: the last render put something there
+    uint8_t routes() const {                          // a bit a submix a pad with a sound is sent to
+        uint8_t bits = 0;
+        for (const auto& pad : pads) if (pad.out && pad.out <= sub_outs && pad.used()) bits |= uint8_t(1u << (pad.out - 1));
+        return bits;
+    }
     // Knob FX (parity phase 7): the voices of these pads (a bit a pad) play
     // into the host's l / r instead, after their own chain and punch, added to
     // what is there, for the host to put through Knob FX. No bits: none. Like
@@ -165,6 +176,16 @@ public:
     // added to what is there; the host hands this sub-block's place in its own buffers before each render
     // (a render can be part of the host's block). -1: none.
     void set_key_pad(int pad, float* l, float* r) { key_pad = l && r ? pad : -1; key_l = l; key_r = r; }
+    // Pad stems (engine/bounce.h StemRing): a pad whose entry in `rows` is a pad stem's number n plays into that
+    // stem's row too, after its own chain and punch (a cloud's grains as they are), added to what is there: left at
+    // base + 2n * stride + at, right a stride after. The host hands this sub-block's place before each render, as
+    // for the sends; nullptr: none. Its own filter, chain and strip are the kit track's, after; the stems have none.
+    void set_stem_out(const int16_t* rows, float* base, unsigned stride, unsigned at) {
+        stem_rows = rows && base ? rows : nullptr; stem_base = base; stem_stride = stride; stem_at = at;
+    }
+    // A song's render starts (EngineHost, BounceArm): the random picks (layers, clouds) and Cycle's turns start
+    // again, so each render of the song plays the same hits.
+    void reseed() { seed = 99; layer_turn.fill(0); }
 
 private:
     struct Voice {
@@ -394,12 +415,27 @@ private:
     float* send_l[send_buses] {};
     float* send_r[send_buses] {};
     unsigned send_used = 0;
+    float* sub_l[sub_outs] {};
+    float* sub_r[sub_outs] {};
+    unsigned sub_used = 0;
+    int routed(int pad) const { // the submix the pad plays into, or -1: the kit
+        if (pad < 0 || pad >= int(sampler_pads)) return -1;
+        const unsigned out = pads[size_t(pad)].out;
+        return out && out <= sub_outs && sub_l[out - 1] && sub_r[out - 1] ? int(out - 1) : -1;
+    }
+    const int16_t* stem_rows = nullptr; // set_stem_out()'s
+    float* stem_base = nullptr;
+    unsigned stem_stride = 0, stem_at = 0;
+    float* stem_out(int pad, unsigned side) const { // the pad's pad stem row, or nullptr
+        if (!stem_rows || pad < 0 || pad >= int(sampler_pads) || stem_rows[pad] < 0) return nullptr;
+        return stem_base + size_t(2 * stem_rows[pad] + side) * stem_stride + stem_at;
+    }
     std::array<std::array<float, send_buses>, sampler_pads> send_now {}; // each pad's sends as heard, easing to its own
     bool knobbed(int pad) const { return pad >= 0 && pad < 128 && ((knob_mask[pad / 64] >> (pad % 64)) & 1); }
     unsigned pad_repeat_gap(int pad, double quarter) const;
     bool chained(int pad) const { return pad_effects && (*pad_effects)[size_t(pad)][0].kind() != EffectKind::None; }
     bool sends_heard(int pad) const; // its sends, or what is left of them easing away
-    // On the heap: sixteen lanes are 16 kB a kit, and the host keeps sixteen kits (made with the engine, not on the audio thread).
+    // On the heap: thirty-two lanes are 32 kB a kit, and the host keeps sixteen kits (made with the engine, not on the audio thread).
     std::unique_ptr<std::array<Lane, lanes>> lane = std::make_unique<std::array<Lane, lanes>>();
     Lane* lane_for(int pad); // the pad's lane, a free one, or nullptr
     void stretch(Voice& v, const float* l, const float* r, float* to_l, float* to_r, unsigned from, unsigned frames);

@@ -377,10 +377,16 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
                 for (const auto& l : pattern.lanes) { w.u8(l.key); w.u32(l.length); }
                 w.end(at);
             }
-            if (!pattern.motion.empty()) { // Motion (roadmap P1): the pattern's own points at their ticks, locks with their hold
-                at = w.begin("MOTK");
-                w.u8(t); w.u8(p); w.u32(uint32_t(pattern.motion.size()));
-                for (const auto& m : pattern.motion) { w.u32(m.tick); w.u8(m.param); w.u8(m.pad); w.i16(m.value); w.u16(m.hold); }
+            // Motion (roadmap P1): the pattern's own points at their ticks, locks with their hold. The mixer strip's lanes
+            // (model/strip.h) in MOTS, the same records, which older builds skip (they took 206.. for a pad's values).
+            for (bool strip_lanes : {false, true}) {
+                uint32_t count = 0;
+                for (const auto& m : pattern.motion) count += is_strip_lane(m.param) == strip_lanes;
+                if (!count) continue;
+                at = w.begin(strip_lanes ? "MOTS" : "MOTK");
+                w.u8(t); w.u8(p); w.u32(count);
+                for (const auto& m : pattern.motion)
+                    if (is_strip_lane(m.param) == strip_lanes) { w.u32(m.tick); w.u8(m.param); w.u8(m.pad); w.i16(m.value); w.u16(m.hold); }
                 w.end(at);
             }
         }
@@ -424,6 +430,7 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
     for (unsigned b = 0; b < bus_count; ++b) {
         at = w.begin("BUSS");
         w.u8(b); w.u8(project.buses[b].level); write_chain(w, project.buses[b].fx);
+        w.u8(project.buses[b].mute); // the mixer: past what older builds read
         w.end(at);
     }
     at = w.begin("MSTR");
@@ -557,11 +564,11 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
     }
     { // Compressors and Gates keyed by another track or bus (roadmap P4): chain, slot, key
         unsigned keyed = 0;
-        for (unsigned n = 0; n < chain_count; ++n) for (const auto& s : project.chain(n).slots) keyed += s.used() && s.key;
-        if (keyed) {
+        for (unsigned n = 0; n < mix_chain_count; ++n) for (const auto& s : project.chain(n).slots) keyed += s.used() && s.key;
+        if (keyed) { // the submixes' chains (25-32) and keys (21-28) are past what older builds read, which skip them
             at = w.begin("FXKY");
             w.u16(keyed);
-            for (unsigned n = 0; n < chain_count; ++n)
+            for (unsigned n = 0; n < mix_chain_count; ++n)
                 for (unsigned k = 0; k < max_slots; ++k)
                     if (const auto& s = project.chain(n).slots[k]; s.used() && s.key) { w.u8(n); w.u8(k); w.u8(s.key); }
             w.end(at);
@@ -596,6 +603,16 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
         w.u8(t); w.u8(used);
         for (unsigned n = 0; n < sampler_pads; ++n)
             if (tr.pads[n].used() && tr.pads[n].sending()) { w.u8(n); for (auto send : tr.pads[n].sends) w.u8(send); }
+        w.end(at);
+    }
+    for (unsigned t = 0; t < track_count; ++t) { // kit pads sent to a submix: pad, submix 1-8
+        const auto& tr = project.tracks[t];
+        unsigned used = 0;
+        for (const auto& pad : tr.pads) used += pad.used() && pad.out;
+        if (!used) continue;
+        at = w.begin("PSUB");
+        w.u8(t); w.u8(used);
+        for (unsigned n = 0; n < sampler_pads; ++n) if (tr.pads[n].used() && tr.pads[n].out) { w.u8(n); w.u8(tr.pads[n].out); }
         w.end(at);
     }
     for (unsigned t = 0; t < track_count; ++t) { // kit pads with a cloud, or cloud values of their own
@@ -644,6 +661,40 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
         at = w.begin("SNDS");
         w.u8(t); w.u8(bus_count);
         for (auto v : sends) w.u8(v);
+        w.end(at);
+    }
+    // The mixer (melodee-sample docs/MIXER_PLAN.md). Each strip that is not as it comes (STRP: its number, trim,
+    // width, the bands, the compressor), the tracks' outputs when one goes to a submix (OUTS), and each submix that
+    // is not as it comes (SUBM: name, level, pan, mute, solo, sends, chain). A reader skips what a newer build
+    // appends to a record; older builds skip the sections, and play every strip flat into the master.
+    for (unsigned n = 0; n < strip_channels; ++n) {
+        const auto& s = project.strip(n);
+        if (s.flat()) continue;
+        at = w.begin("STRP");
+        w.u8(n); w.i16(s.trim); w.u8(s.width); w.u8(s.eq_on);
+        w.u8(eq_bands); for (auto g : s.eq) w.i16(g);
+        w.u8(s.comp_on); w.u8(s.comp_amount); w.u8(s.comp_ratio); w.u8(s.comp_speed); w.u8(s.comp_key); w.u8(s.comp_mix);
+        w.i16(s.comp_gain);
+        w.end(at);
+    }
+    if (project.input_wet) { // the mixer's input recorded after its strip
+        at = w.begin("INWT");
+        w.u8(1);
+        w.end(at);
+    }
+    if (std::any_of(project.tracks.begin(), project.tracks.end(), [](const Track& t) { return t.mix.out != out_master; })) {
+        at = w.begin("OUTS");
+        w.u8(track_count);
+        for (const auto& t : project.tracks) w.u8(t.mix.out);
+        w.end(at);
+    }
+    for (unsigned n = 0; n < sub_count; ++n) {
+        const auto& sub = project.subs[n];
+        if (sub.plain()) continue;
+        at = w.begin("SUBM");
+        w.u8(n); w.text(sub.name); w.u8(sub.mix.level); w.i16(sub.mix.pan); w.u8(sub.mix.mute); w.u8(sub.mix.solo);
+        w.u8(bus_count); for (auto v : sub.mix.sends) w.u8(v);
+        write_chain(w, sub.fx);
         w.end(at);
     }
     for (unsigned t = 0; t < track_count; ++t) { // 16 Levels' ends where they are not as they come (round 2)
@@ -960,7 +1011,7 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
             unsigned keyed = r.u16();
             for (unsigned k = 0; k < keyed && r.ok; ++k) {
                 unsigned n = r.u8(), slot = r.u8(), key = r.u8();
-                if (n < chain_count && slot < max_slots && key < fx_keys) project->chain(n).slots[slot].key = uint8_t(key);
+                if (n < mix_chain_count && slot < max_slots && key < fx_key_count) project->chain(n).slots[slot].key = uint8_t(key);
             }
         } else if (name == "PXFD") { // loop seam crossfades (roadmap P3); without it no pad's seam is faded
             unsigned t = r.u8();
@@ -988,6 +1039,14 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
                 std::array<uint8_t, 4> sends {};
                 for (auto& send : sends) send = uint8_t(std::min(r.u8(), 100u));
                 if (r.ok) project->tracks[t].pads[n % sampler_pads].sends = sends;
+            }
+        } else if (name == "PSUB") { // kit pads sent to a submix; without it each plays in its kit
+            unsigned t = r.u8();
+            if (t >= track_count) continue;
+            unsigned used = r.u8();
+            for (unsigned k = 0; k < used && r.ok; ++k) {
+                unsigned n = r.u8(), out = r.u8();
+                if (r.ok && out <= 8) project->tracks[t].pads[n % sampler_pads].out = uint8_t(out);
             }
         } else if (name == "PCLD") { // kit pads' clouds; without it a pad plays as a cloud only from an older file's kit-wide Cloud
             unsigned t = r.u8();
@@ -1196,18 +1255,21 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
                 uint32_t ticks = r.u32();
                 if (r.ok) pattern.set_lane_length(key, ticks); // EVNT came first: the pattern's length is known
             }
-        } else if (name == "MOTK") { // Motion (roadmap P1): a pattern's points at their ticks
+        } else if (name == "MOTK" || name == "MOTS") { // Motion (roadmap P1): a pattern's points at their ticks
+            // (MOTS: the mixer strip's lanes, after MOTK, joining its points)
             unsigned t = r.u8(), p = r.u8();
             if (t >= track_count || p >= pattern_count) continue;
             auto& pattern = patterns->at[t][p];
+            const bool strip_lanes = name == "MOTS";
             uint32_t count = std::min<uint32_t>(r.u32(), motion_points);
-            pattern.motion.clear();
-            pattern.motion.reserve(count);
+            if (!strip_lanes) pattern.motion.clear();
+            count = std::min<uint32_t>(count, uint32_t(motion_points - std::min<size_t>(pattern.motion.size(), motion_points)));
+            pattern.motion.reserve(pattern.motion.size() + count);
             for (uint32_t k = 0; k < count && r.ok; ++k) {
                 MotionPoint m;
                 m.tick = r.u32(); m.param = uint8_t(r.u8()); m.pad = uint8_t(r.u8() % sampler_pads); m.value = int16_t(r.i16());
                 m.hold = uint16_t(r.u16());
-                if (r.ok) pattern.motion.push_back(m);
+                if (r.ok && is_strip_lane(m.param) == strip_lanes) pattern.motion.push_back(m);
             }
             pattern.sort_motion();
         } else if (name == "MOTN" || name == "MOT2") { // the project's Motion before roadmap P1
@@ -1243,6 +1305,50 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
             std::array<uint8_t, bus_count> sends {};
             for (unsigned b = 0; b < buses && r.ok; ++b) { unsigned v = r.u8(); if (b < bus_count) sends[b] = uint8_t(std::min(100u, v)); }
             if (r.ok && t < track_count) project->tracks[t].mix.sends = sends;
+        } else if (name == "STRP") { // a mixer strip; without it the channel's is flat
+            unsigned n = r.u8();
+            Strip s;
+            s.trim = int16_t(std::clamp(r.i16(), -trim_range, trim_range));
+            s.width = uint8_t(std::min(width_max, r.u8()));
+            s.eq_on = r.u8() != 0;
+            unsigned bands = r.u8();
+            for (unsigned b = 0; b < bands && r.ok; ++b) {
+                int g = std::clamp(r.i16(), -eq_range, eq_range);
+                if (b < eq_bands) s.eq[b] = int16_t(g);
+            }
+            s.comp_on = r.u8() != 0;
+            s.comp_amount = uint8_t(std::min(comp_amount_max, r.u8()));
+            s.comp_ratio = uint8_t(std::clamp(r.u8(), comp_ratio_min, comp_ratio_max));
+            unsigned speed = r.u8(), key = r.u8();
+            s.comp_speed = uint8_t(speed < unsigned(CompSpeed::Count) ? speed : unsigned(CompSpeed::Medium));
+            s.comp_key = uint8_t(key < fx_key_count ? key : 0);
+            s.comp_mix = uint8_t(std::min(100u, r.u8()));
+            s.comp_gain = int16_t(std::clamp(r.i16(), comp_gain_min, comp_gain_max));
+            if (r.ok && n < strip_channels) project->strip(n) = s;
+        } else if (name == "INWT") { // the mixer's input recorded after its strip; without it, before
+            project->input_wet = r.u8() != 0;
+        } else if (name == "OUTS") { // the tracks' outputs; without it every track plays into the master
+            unsigned count = r.u8();
+            for (unsigned t = 0; t < count && r.ok; ++t) {
+                unsigned out = r.u8();
+                if (t < track_count) project->tracks[t].mix.out = uint8_t(out <= sub_count ? out : out_master);
+            }
+        } else if (name == "SUBM") { // a submix; without it the submix is as it comes (its strip is STRP's, kept here)
+            unsigned n = r.u8();
+            Submix sub;
+            r.text(sub.name, sizeof(sub.name));
+            sub.mix.level = uint8_t(std::min(127u, r.u8())); sub.mix.pan = int8_t(std::clamp(r.i16(), -50, 50));
+            sub.mix.mute = r.u8() != 0; sub.mix.solo = r.u8() != 0;
+            unsigned buses = r.u8();
+            for (unsigned b = 0; b < buses && r.ok; ++b) { unsigned v = r.u8(); if (b < bus_count) sub.mix.sends[b] = uint8_t(std::min(100u, v)); }
+            read_chain(r, sub.fx);
+            if (r.ok && n < sub_count) {
+                auto& to = project->subs[n];
+                std::memcpy(to.name, sub.name, sizeof(to.name));
+                to.mix = sub.mix;
+                for (unsigned k = 0; k < max_slots; ++k) sub.fx.slots[k].key = to.fx.slots[k].key; // FXKY's, if it came first
+                to.fx = sub.fx;
+            }
         } else if (name == "LVLE") { // 16 Levels' two ends a type (round 2); without it each type's own
             unsigned t = r.u8(), kinds = r.u8();
             for (unsigned k = 0; k < kinds && r.ok; ++k) {
@@ -1422,6 +1528,7 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
             if (b >= bus_count) continue;
             project->buses[b].level = uint8_t(std::min(100u, r.u8()));
             read_chain(r, project->buses[b].fx);
+            project->buses[b].mute = !r.done() && r.u8() != 0; // the mixer; without it, heard
         } else if (name == "PRNT") { // freeze plan F2a: a print (model/print.h); a later version of it is skipped
             if (r.u8() != 1) continue;
             PrintRecord p;
@@ -1667,6 +1774,14 @@ std::vector<uint8_t> save_bank(const BankFile& bank) {
             if (bank.pads[k].used() && bank.pads[k].sending()) { w.u8(k); for (auto send : bank.pads[k].sends) w.u8(send); }
         w.end(at);
     }
+    unsigned routed = 0; // the pads sent to a submix, as PSUB: pad, submix
+    for (const auto& pad : bank.pads) routed += pad.used() && pad.out;
+    if (routed) {
+        at = w.begin("BSUB");
+        w.u8(routed);
+        for (unsigned k = 0; k < bank_pads; ++k) if (bank.pads[k].used() && bank.pads[k].out) { w.u8(k); w.u8(bank.pads[k].out); }
+        w.end(at);
+    }
     unsigned clouded = 0; // the pads' clouds, as PCLD
     for (const auto& pad : bank.pads) clouded += pad.used() && !pad.plain_cloud();
     if (clouded) {
@@ -1727,6 +1842,12 @@ bool load_bank(const std::vector<uint8_t>& data, BankFile& out) {
                 unsigned n = r.u8();
                 uint32_t colour = r.u32() & 0xFFFFFF;
                 if (r.ok) bank.pads[n % bank_pads].colour = colour;
+            }
+        } else if (name == "BSUB") {
+            unsigned routed = r.u8();
+            for (unsigned k = 0; k < routed && r.ok; ++k) {
+                unsigned n = r.u8(), out = r.u8();
+                if (r.ok && n < bank_pads && out <= 8) bank.pads[n].out = uint8_t(out);
             }
         } else if (name == "BSND") {
             unsigned sending = r.u8();

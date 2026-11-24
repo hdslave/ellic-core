@@ -24,13 +24,7 @@ void PrintTable::put(const PrintRecord& record) {
     else records.insert(at, record);
 }
 
-Mix print_mix(const Track& track) {
-    Mix m;
-    bool chain = false;
-    for (const auto& slot : track.fx.slots) chain |= slot.used();
-    if (chain) { m.level = track.mix.level; m.pan = track.mix.pan; }
-    return m;
-}
+Mix print_mix(const Track&) { return Mix {}; }
 
 void print_project(Project& project, PatternBank& bank, unsigned track, unsigned pattern) {
     const unsigned t = track % track_count, p = pattern % pattern_count;
@@ -40,7 +34,7 @@ void print_project(Project& project, PatternBank& bank, unsigned track, unsigned
     auto& kept = bank.at[t][p];
     kept.punches.clear();      // punches stay live
     kept.follow = PatternFollow {}; // the pattern plays on
-    kept.motion.erase(std::remove_if(kept.motion.begin(), kept.motion.end(), [](const MotionPoint& m) { return is_mix_lane(m.param); }),
+    kept.motion.erase(std::remove_if(kept.motion.begin(), kept.motion.end(), [](const MotionPoint& m) { return is_mix_lane(m.param) || is_strip_lane(m.param); }),
                       kept.motion.end());
 
     // The project as new, with only what one track's sound hears of it.
@@ -54,7 +48,8 @@ void print_project(Project& project, PatternBank& bank, unsigned track, unsigned
     tr = project.tracks[t];
     const Track plain {};
     tr.set_name("");
-    tr.mix = print_mix(project.tracks[t]); // unity and centred, or (effects on its chain) as it meets them live
+    tr.mix = print_mix(project.tracks[t]); // unity and centred
+    tr.strip = Strip {}; // the mixer's strip stays live on a frozen track (docs/MIXER_PLAN.md decision 1): never printed
     tr.pattern = uint8_t(p);
     tr.chain = {}; tr.chain_count = 0; tr.chain_at = 0;
     tr.in_scene = {}; tr.off = false; // which pattern it plays in each scene: not part of its sound
@@ -77,7 +72,7 @@ void print_project(Project& project, PatternBank& bank, unsigned track, unsigned
     for (unsigned m = 0; m < modulator_count; ++m) { // only targets on the track's own sound
         Modulator mod = project.modulators[m];
         for (auto& target : mod.targets)
-            if (target.used() && (target.track != t || is_mix_lane(target.param))) target = ModTarget {};
+            if (target.used() && (target.track != t || is_mix_lane(target.param) || is_strip_lane(target.param))) target = ModTarget {};
         if (mod.target_count()) out->modulators[m] = mod;
     }
     project = *out;

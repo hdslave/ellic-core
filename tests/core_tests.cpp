@@ -5,6 +5,7 @@
 // from melodee-sample's tests/melodee.cpp, which keeps the tests of
 // Melodee's screens and its MPC shell.
 #include "melodee/engine/effects.h"
+#include "melodee/engine/channel_strip.h"
 #include "melodee/model/slice_banks.h"
 #include "melodee/model/slice_hits.h"
 #include "melodee/engine/macros.h"
@@ -28,6 +29,7 @@
 #include "melodee/engine/exs.h"
 #include "melodee/engine/sf2.h"
 #include "melodee/engine/dspreset.h"
+#include "melodee/shell/stem_writer.h"
 #include "melodee/shell/expansion_install.h"
 #include "melodee/engine/stream_pager.h"
 #include "melodee/shell/sample_cache.h"
@@ -7630,10 +7632,20 @@ void exports_p4() {
         CHECK(peak(0) > 0.05f && peak(track_count) > 0.01f); // track 1, bus A
         bool rest_silent = peak(track_count + 1) == 0;
         for (unsigned s = 1; s < track_count; ++s) rest_silent = rest_silent && peak(s) == 0;
+        for (unsigned s = track_count + bus_count; s < StemRing::stem_count; ++s) rest_silent = rest_silent && peak(s) == 0; // the submixes
         CHECK(rest_silent);
         host->send({Command::Type::Return, 0, 0, 0, 0});
         play(40);
         CHECK(peak(track_count) == 0 && peak(0) > 0.05f);
+        // The mixer: sent to submix 4, the submix's stem has it too (the track's own as it leaves for it).
+        const unsigned sub4 = track_count + bus_count + 3;
+        CHECK(StemRing::stem_count == track_count + bus_count + sub_count);
+        host->send({Command::Type::TrackOut, 0, 0, 0, out_sub(3)});
+        play(40);
+        CHECK(peak(sub4) > 0.05f && std::fabs(peak(sub4) - peak(0)) < 0.01f && peak(sub4 - 1) == 0 && peak(sub4 + 1) == 0);
+        host->send({Command::Type::TrackOut, 0, 0, 0, out_master});
+        play(40);
+        CHECK(peak(sub4) == 0 && peak(0) > 0.05f);
         host->send({Command::Type::Mute, 0, 0, 0, 1});
         play(40);
         CHECK(peak(0) == 0);
@@ -8016,11 +8028,12 @@ void prints_f2a() {
         change(*p, *b);
         return hash(*p, *b) != h;
     };
-    // Freeze plan F2c: with effects on its chain the level and pan meet them first, as live (print_mix()): they count;
-    // with an empty chain the print is made at unity and centred and they do not. Sends never do.
+    // The mixer: a track's level and pan come after its chain and its strip, so a print is made at unity and centred
+    // with its strip flat, and none of those count, with effects on its chain or not (print_mix()). Sends never do.
     CHECK(project->tracks[0].fx.slots[0].used());
-    CHECK(changed([](Project& p, PatternBank&) { p.tracks[0].mix.level = 64; }) && changed([](Project& p, PatternBank&) { p.tracks[0].mix.pan = -30; }));
+    CHECK(!changed([](Project& p, PatternBank&) { p.tracks[0].mix.level = 64; }) && !changed([](Project& p, PatternBank&) { p.tracks[0].mix.pan = -30; }));
     CHECK(!changed([](Project& p, PatternBank&) { p.tracks[0].mix.sends[1] = 80; }));
+    CHECK(!changed([](Project& p, PatternBank&) { p.tracks[0].strip.eq[4] = 60; p.tracks[0].strip.comp_amount = 20; }));
     {
         auto plain = std::make_unique<Project>(*project);
         plain->tracks[0].fx = Chain {};
@@ -8256,8 +8269,9 @@ void freeze_f2b() {
         for (unsigned p : {0u, 1u}) { pack->owned.push_back(clip_of(from, p, tail, tap)); pack->clips[p] = pack->owned.back().get(); }
         return pack;
     };
-    // The project played, track 1 taken after its chain as the Track source takes it: A1 for two passes, then A2
-    // (launched in the second pass). Frozen on `pack` from the start when one is given. `each` before every block.
+    // The project played, track 1 taken as the Track source takes it (after its chain, strip, level and pan): A1 for
+    // two passes, then A2 (launched in the second pass). Frozen on `pack` from the start when one is given. `each`
+    // before every block.
     struct Run { std::vector<float> l, r; std::unique_ptr<EngineHost> host; };
     const uint64_t pass = uint64_t(std::llround(ticks * 44100.0 * 60 / 120 / ticks_per_quarter * rate / 44100));
     const unsigned blocks = unsigned((3 * pass + pass / 2) / 128);
@@ -8267,7 +8281,7 @@ void freeze_f2b() {
         auto& host = *out.host;
         host.load(from, *bank);
         CHECK(host.offer_sample(0, &tone));
-        host.set_print_tap(0, true);
+        host.send({Command::Type::RecordSource, uint8_t(InputSource::Track), 0, 0, 1});
         if (pack) { Command c {Command::Type::Freeze, 0}; c.freeze = pack; CHECK(host.send(c)); }
         host.send({Command::Type::Play});
         std::vector<int32_t> o(256);
@@ -8309,21 +8323,23 @@ void freeze_f2b() {
         auto frozen = run(*echoed, pack_of(*echoed, PrintTail::Loop, PrintTap::PreFx));
         CHECK(differ(heard, live, 1e-3f) > 0 && differ(heard, frozen) == 0);
     }
-    {   // Freeze plan F2c: Post FX with a Drive on the chain at level 60, panned: the print is made at that level and pan
-        // (print_mix()), as the Drive hears them live, so it sounds the same
+    {   // Post FX with a Drive on the chain at level 60, panned: the Drive never hears the level or pan (the mixer:
+        // they come after the chain and the strip), so the print is made at unity and centred (print_mix()) and the
+        // frozen track sounds the same; its strip stays live on the print
         auto driven = std::make_unique<Project>(*project);
         driven->tracks[0].fx.slots[0] = {uint8_t(EffectKind::Drive), false, {90, 60, 50, 50, 0, 0}};
         driven->tracks[0].mix.level = 60; driven->tracks[0].mix.pan = 15;
-        CHECK(print_mix(driven->tracks[0]).level == 60 && print_mix(driven->tracks[0]).pan == 15 && print_mix(project->tracks[0]).level == 100);
+        driven->tracks[0].strip.eq[3] = 60; driven->tracks[0].strip.comp_amount = 18;
+        CHECK(print_mix(driven->tracks[0]).level == 100 && print_mix(driven->tracks[0]).pan == 0);
         auto heard = run(*driven, nullptr);
-        auto* pack = pack_of(*driven, PrintTail::Loop, PrintTap::PostFx);
-        pack->level = 60; pack->pan = 15;
-        auto frozen = run(*driven, pack);
+        auto frozen = run(*driven, pack_of(*driven, PrintTail::Loop, PrintTap::PostFx));
         CHECK(differ(heard, frozen, 1e-5f) == 0);
+        auto flat = std::make_unique<Project>(*driven); // the strip flat: the print the same, the sound not
+        flat->tracks[0].strip = Strip {};
+        CHECK(differ(run(*flat, pack_of(*flat, PrintTail::Loop, PrintTap::PostFx)), frozen, 1e-3f) > 0);
         auto louder = std::make_unique<Project>(*driven); // the level turned up after the freeze: the print follows it
         louder->tracks[0].mix.level = 80;
         auto* again = pack_of(*driven, PrintTail::Loop, PrintTap::PostFx);
-        again->level = 60; again->pan = 15;
         auto up = run(*louder, again);
         CHECK(peak_of(up.l, 0, up.l.size()) > peak_of(frozen.l, 0, frozen.l.size()) * 1.5f);
     }
@@ -8774,6 +8790,149 @@ void pad_sends_freeze() {
         diff = std::max({diff, std::fabs(live.a[f] - frozen.a[f]), std::fabs(live.c[f] - frozen.c[f])});
     }
     CHECK(most > 0.05f && diff < 1e-3f);
+}
+
+// Pads sent to submixes (MPC 3's pad output): pad 3 into submix 3 leaves the kit's stem and plays in the submix's, at
+// the kit's level; soloing submix 3 keeps the kit heard; USB out's submix rows carry it; PSUB keeps it.
+void pad_outputs() {
+    auto project = std::make_unique<Project>();
+    auto bank = std::make_unique<PatternBank>();
+    tone_kit(*project, 0);
+    project->tracks[0].pads[2].out = 3;
+    auto saved = save_project(*project, *bank);
+    auto loaded = std::make_unique<Project>();
+    auto loaded_bank = std::make_unique<PatternBank>();
+    CHECK(load_project(saved, *loaded, *loaded_bank).empty() && loaded->tracks[0].pads[2].out == 3 && loaded->tracks[0].pads[0].out == 0);
+    CHECK(mixer_left_out(*project) == 1 && mixer_left_out(*project, true) == 0); // Live leaves it out, MPC 3 carries it
+    EngineHost host;
+    host.load(*project, *bank);
+    auto tone = tone_sample();
+    CHECK(host.offer_sample(0, &tone));
+    host.send({Command::Type::Level, 0, 0, 0, 80});
+    std::vector<float> rows(size_t(StemRing::stem_count) * 2 * EngineHost::block, 9.0f);
+    host.set_live_stems(rows.data());
+    std::vector<int32_t> out(256);
+    std::vector<float> usb(size_t(track_count) * EngineHost::block, 9.0f);
+    auto play = [&](unsigned blocks) { for (unsigned n = 0; n < blocks; ++n) host.render(out.data(), 128, 1, nullptr, usb.data()); };
+    auto peak = [&](unsigned stem) {
+        float most = 0;
+        for (unsigned side = 0; side < 2; ++side)
+            for (unsigned f = 0; f < EngineHost::block; ++f) most = std::max(most, std::fabs(rows[size_t(stem * 2 + side) * EngineHost::block + f]));
+        return most;
+    };
+    auto usb_peak = [&](unsigned row) {
+        float most = 0;
+        for (unsigned f = 0; f < EngineHost::block; ++f) most = std::max(most, std::fabs(usb[size_t(row) * EngineHost::block + f]));
+        return most;
+    };
+    const unsigned sub3 = track_count + bus_count + 2;
+    host.send({Command::Type::NoteOn, 0, 0, uint16_t(sampler_first_note + 2), 100});
+    play(30);
+    CHECK(peak(0) == 0.0f && peak(sub3) > 0.02f && peak(sub3 - 1) == 0.0f); // the kit's stem has none of it, submix 3 all
+    const float routed = peak(sub3);
+    host.send({Command::Type::NoteOn, 0, 0, uint16_t(sampler_first_note), 100});
+    play(30);
+    CHECK(peak(0) > 0.02f && std::fabs(peak(sub3) - routed) < 1e-4f); // pad 1 in the kit, pad 3 still in submix 3 only
+    // USB out: tracks' rows (the kit mono in row 0), then the submixes' pairs (submix 3 in rows 4 and 5).
+    CHECK(usb_peak(0) > 0.02f && usb_peak(4) == 0.0f);
+    host.set_usb_submixes(true);
+    play(4);
+    CHECK(usb_peak(4) > 0.02f && usb_peak(5) > 0.02f && usb_peak(0) == 0.0f && usb_peak(2) == 0.0f);
+    host.set_usb_submixes(false);
+    // The kit's level reaches it: at 40 it is quieter.
+    host.send({Command::Type::Level, 0, 0, 0, 40});
+    play(30);
+    CHECK(peak(sub3) < routed * 0.8f && peak(sub3) > 0.0f);
+    // Submix 3 soloed: the kit (whose pad is in it) is still heard; its stem too.
+    host.send({Command::Type::SubMix, 2, 0, Command::SubSolo, 1});
+    play(30);
+    CHECK(peak(sub3) > 0.0f && peak(0) > 0.0f);
+    host.set_live_stems(nullptr);
+}
+
+// StemWriter: each file whole and in order across chunks, a pad stem's silence first, a silent file's peak 0.
+void stem_writer() {
+    const auto dir = std::filesystem::temp_directory_path() / "melodee-stem-writer";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    StemWriter writer;
+    std::vector<std::string> paths {(dir / "a.wav").string(), (dir / "b.wav").string(), (dir / "quiet.wav").string()};
+    CHECK(writer.open(paths, 48000) && writer.files() == 3);
+    writer.add_silence(1, 100);
+    const unsigned total = 133000; // past two chunks, in blocks of 1000
+    CHECK(total > StemWriter::chunk_frames * 2);
+    std::vector<float> block(2 * 1000);
+    std::vector<float> zeros(2 * 1000, 0.0f);
+    for (unsigned at = 0; at < total; at += 1000) {
+        for (unsigned f = 0; f < 1000; ++f) { block[2 * f] = float((at + f) % 997) / 997.0f; block[2 * f + 1] = -block[2 * f]; }
+        CHECK(writer.add(0, block.data(), 1000) && writer.add(1, block.data(), 1000) && writer.add(2, zeros.data(), 1000));
+    }
+    writer.flush();
+    for (unsigned n = 0; n < 500 && !writer.done(); ++n) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    CHECK(writer.done() && writer.queued_bytes() == 0);
+    std::vector<float> loudest;
+    CHECK(writer.close(&loudest) && loudest.size() == 3 && loudest[0] > 0.99f && loudest[2] == 0.0f);
+    SampleData a, b;
+    CHECK(read_wav(paths[0], a).empty() && read_wav(paths[1], b).empty());
+    CHECK(a.frames == total && b.frames == total + 100);
+    bool same = true;
+    for (unsigned f = 0; f < total; f += 331) same = same && a.left[f] == float(f % 997) / 997.0f && a.right[f] == -a.left[f] && b.left[f + 100] == a.left[f];
+    CHECK(same && b.left[99] == 0.0f);
+    std::filesystem::remove_all(dir);
+}
+
+// Pad stems beside the stems: each kit pad apart, after its own chain, at the kit's level and pan; with no chain and a
+// flat strip on the kit they add up to its stem, frame for frame. A pad stem holds only its own pad's hits.
+void pad_stems() {
+    auto project = std::make_unique<Project>();
+    auto bank = std::make_unique<PatternBank>();
+    tone_kit(*project, 0);
+    EngineHost host;
+    host.load(*project, *bank);
+    auto tone = tone_sample();
+    CHECK(host.offer_sample(0, &tone));
+    host.send({Command::Type::Level, 0, 0, 0, 80});
+    auto ring = std::make_unique<StemRing>();
+    ring->arm(1u << 0, 2);
+    ring->set_pad(0, 0, 0); // pad stem 0: pad 1
+    ring->set_pad(1, 0, 2); // pad stem 1: pad 3
+    CHECK(ring->rows() == 3 && ring->row_stem(0) == 0 && ring->row_stem(2) == StemRing::stem_count + 1 && ring->pads() == 2);
+    CHECK(ring->pad_rows(0)[2] == 1 && ring->pad_rows(0)[1] == -1 && ring->pad_rows(1)[0] == -1);
+    host.set_stems(ring.get());
+    Command arm {Command::Type::BounceArm, 0, 0, 0, 0};
+    arm.position = ticks_per_quarter / 2;
+    host.send(arm);
+    host.send({Command::Type::Play, 0});
+    host.send({Command::Type::NoteOn, 0, 0, uint16_t(sampler_first_note), 100});
+    std::vector<int32_t> out(256);
+    for (unsigned n = 0; n < 20; ++n) host.render(out.data(), 128, 1);
+    host.send({Command::Type::NoteOn, 0, 0, uint16_t(sampler_first_note + 2), 60});
+    for (unsigned n = 0; n < 200; ++n) host.render(out.data(), 128, 1);
+    CHECK(host.bounce().state() == Bounce::State::Done && host.bounce().taken() > 20 * 128);
+    constexpr unsigned most = 65536;
+    std::vector<float> got(size_t(ring->rows()) * 2 * most);
+    unsigned frames = ring->pop_rows(got.data(), most);
+    CHECK(frames == host.bounce().taken() && !ring->failed());
+    auto at = [&](unsigned row, unsigned side, unsigned f) { return got[size_t(row) * 2 * most + 2 * f + side]; };
+    float kit = 0, worst = 0, first = 0, early_third = 0, third = 0;
+    for (unsigned f = 0; f < frames; ++f)
+        for (unsigned side = 0; side < 2; ++side) {
+            kit = std::max(kit, std::fabs(at(0, side, f)));
+            worst = std::max(worst, std::fabs(at(1, side, f) + at(2, side, f) - at(0, side, f)));
+            first = std::max(first, std::fabs(at(1, side, f)));
+            (f < 19 * 128 ? early_third : third) = std::max(f < 19 * 128 ? early_third : third, std::fabs(at(2, side, f)));
+        }
+    CHECK(kit > 0.05f && worst < 1e-5f && first > 0.02f && early_third == 0.0f && third > 0.01f);
+    host.set_stems(nullptr);
+    // The old layout still: pop() hands stem_count blocks, a pad stem in none of them.
+    ring->arm(1u << 3);
+    CHECK(ring->rows() == 1 && ring->pads() == 0 && ring->pad_rows(0)[0] == -1);
+    std::array<float, 4> one {0.5f, 0.25f, 0.5f, 0.25f};
+    std::array<const float*, StemRing::row_most> l {}, r {};
+    l[3] = one.data(); r[3] = one.data() + 1;
+    ring->write(l.data(), r.data(), 0, 1);
+    std::vector<float> old(size_t(StemRing::stem_count) * 2 * 4, 9.0f);
+    CHECK(ring->pop(old.data(), 4) == 1 && old[size_t(3) * 2 * 4] == 0.5f && old[size_t(3) * 2 * 4 + 1] == 0.25f && old[0] == 0.0f);
 }
 
 // Pad sends: each kit pad into buses A-D at its own send, after its own chain, eased; none from a pad at 0. In the
@@ -9394,6 +9553,561 @@ void slice_hit_notes() {
     CHECK(lay_slice_hits(*full, *full_bank, [&](unsigned) -> const Slices& { return chop; }) == 2 && full_bank->at[2][1].events.size() == 3);
 }
 
+// The mixer's model (melodee-sample docs/MIXER_PLAN.md, core step 1): every channel's strip, the tracks' outputs and
+// the eight submixes go into the file and come back; a project that leaves them as they come writes none of it, and
+// a file without them loads every strip flat and every track into the master.
+void mixer_strips() {
+    auto has = [](const std::vector<uint8_t>& bytes, const char* tag) {
+        return std::search(bytes.begin(), bytes.end(), tag, tag + 4) != bytes.end();
+    };
+    auto plain = std::make_unique<Project>();
+    auto bank = std::make_unique<PatternBank>();
+    CHECK(plain->strip(0).flat() && plain->strip(strip_sub(7)).flat() && plain->subs[3].plain());
+    auto bytes = save_project(*plain, *bank);
+    CHECK(!has(bytes, "STRP") && !has(bytes, "OUTS") && !has(bytes, "SUBM"));
+    // Strip numbers: tracks, buses and the master as their chains, then the input and the submixes.
+    CHECK(&plain->strip(3) == &plain->tracks[3].strip && &plain->strip(bus_chain(2)) == &plain->buses[2].strip);
+    CHECK(&plain->strip(master_chain) == &plain->master_strip && &plain->strip(strip_input) == &plain->input_strip);
+    CHECK(&plain->strip(strip_sub(5)) == &plain->subs[5].strip && strip_channels == strip_sub(sub_count - 1) + 1);
+    // Chain numbers: the submixes' after the Looper's (past chain_count), then the kit pads'.
+    CHECK(&plain->chain(sub_chain(3)) == &plain->subs[3].fx && sub_chain(0) == chain_count && pad_chain(0, 0) == mix_chain_count);
+    CHECK(&plain->chain(pad_chain(2, 5)) == &plain->tracks[2].pad_fx.at[5] && &plain->chain(loop_chain(1)) == &plain->loop_fx[1]);
+
+    auto project = std::make_unique<Project>();
+    auto& bass = project->tracks[2].strip;
+    bass.trim = 35; bass.width = 80; bass.eq = {40, 60, 20, -50, -30, 0, 20, 0, -40};
+    bass.comp_amount = 18; bass.comp_ratio = 40; bass.comp_speed = uint8_t(CompSpeed::Fast);
+    bass.comp_key = fx_key_track(0); bass.comp_mix = 70; bass.comp_gain = 20;
+    project->tracks[5].strip.eq_on = false; project->tracks[5].strip.eq[8] = 500; // past the range: read back at 12 dB
+    project->tracks[5].strip.comp_on = false;
+    project->tracks[1].mix.out = out_sub(1); project->tracks[3].mix.out = out_sub(1); project->tracks[0].mix.out = out_sub(0);
+    project->buses[0].strip.width = 150;
+    project->master_strip.eq[7] = 10;
+    project->input_strip.trim = 60;
+    auto& music = project->subs[1];
+    music.mix.level = 90; music.mix.pan = -10; music.mix.sends = {20, 0, 0, 5}; music.mix.mute = true;
+    std::snprintf(music.name, sizeof(music.name), "Music");
+    music.fx.slots[0].kind = uint8_t(EffectKind::Echo);
+    music.fx.slots[1].kind = uint8_t(EffectKind::Compressor); music.fx.slots[1].key = fx_key_sub(4); // keyed by another submix
+    project->tracks[4].fx.slots[0].kind = uint8_t(EffectKind::Gate); project->tracks[4].fx.slots[0].key = fx_key_sub(1);
+    project->tracks[6].strip.comp_amount = 10; project->tracks[6].strip.comp_key = fx_key_sub(7);
+    music.strip.comp_amount = 6;
+    project->subs[6].strip.trim = -20; // a submix whose strip alone is set
+    project->buses[2].mute = true; project->input_wet = true;
+    bytes = save_project(*project, *bank);
+    CHECK(has(bytes, "STRP") && has(bytes, "OUTS") && has(bytes, "SUBM"));
+    CHECK(mixer_left_out(*plain) == 0 && mixer_left_out(*project) > 0); // what an export cannot carry yet
+
+    auto back = std::make_unique<Project>();
+    auto back_bank = std::make_unique<PatternBank>();
+    CHECK(load_project(bytes, *back, *back_bank).empty());
+    const auto& b = back->tracks[2].strip;
+    CHECK(b.trim == 35 && b.width == 80 && b.eq_on && b.eq == bass.eq && b.comp_on);
+    CHECK(b.comp_amount == 18 && b.comp_ratio == 40 && b.comp_speed == uint8_t(CompSpeed::Fast) && b.comp_key == fx_key_track(0));
+    CHECK(b.comp_mix == 70 && b.comp_gain == 20 && !b.flat() && !b.eq_flat() && !b.comp_idle());
+    CHECK(!back->tracks[5].strip.eq_on && back->tracks[5].strip.eq[8] == eq_range && !back->tracks[5].strip.comp_on);
+    CHECK(back->tracks[0].strip.flat() && back->tracks[0].mix.out == out_sub(0));
+    CHECK(back->tracks[1].mix.out == out_sub(1) && back->tracks[3].mix.out == out_sub(1) && back->tracks[4].mix.out == out_master);
+    CHECK(back->buses[0].strip.width == 150 && back->master_strip.eq[7] == 10 && back->input_strip.trim == 60);
+    CHECK(back->buses[2].mute && !back->buses[1].mute && back->input_wet);
+    const auto& m = back->subs[1];
+    CHECK(!std::strcmp(m.name, "Music") && m.mix.level == 90 && m.mix.pan == -10 && m.mix.mute && !m.mix.solo);
+    CHECK(m.mix.sends[0] == 20 && m.mix.sends[3] == 5 && m.fx.count() == 2 && m.fx.slots[0].kind == uint8_t(EffectKind::Echo));
+    CHECK(m.fx.slots[1].key == fx_key_sub(4) && back->tracks[4].fx.slots[0].key == fx_key_sub(1) && back->tracks[6].strip.comp_key == fx_key_sub(7));
+    CHECK(m.strip.comp_amount == 6 && m.mix.out == out_master && !m.plain());
+    CHECK(back->subs[6].plain() && back->subs[6].strip.trim == -20 && back->subs[0].plain() && back->subs[0].strip.flat());
+
+    // A file from before the mixer: TRAK's mix alone. Loaded over a project that had strips, nothing of them is left.
+    CHECK(load_project(save_project(*plain, *bank), *back, *back_bank).empty());
+    for (unsigned n = 0; n < strip_channels; ++n) CHECK(back->strip(n).flat());
+    for (const auto& t : back->tracks) CHECK(t.mix.out == out_master);
+    for (const auto& s : back->subs) CHECK(s.plain());
+    for (const auto& b : back->buses) CHECK(!b.mute);
+    CHECK(!back->input_wet);
+}
+
+// The mixer's strip as it sounds (engine/channel_strip.h, core step 2): flat passes every sample untouched; a band
+// lifts or cuts its octave and leaves the others; trim and the compressor's gain are plain gains; the compressor
+// takes a loud tone down by its ratio over the threshold, hears its key in place of the channel when keyed, and does
+// nothing at mix 0 or off; width 0 is mono; a change glides; the bands sit at their frequencies at 96 kHz too.
+// The mixer, core step 3 (melodee-sample docs/MIXER_PLAN.md): a track's strip after its chain and before its level and
+// pan, set from the project or a value at a time (StripValue); each side's meter and the compressor's reduction; a
+// strip keyed by another track.
+// The mixer's EQ picture (melodee-sample docs/MIXER_PLAN.md step 5): the strip picked has its sound after its strip
+// copied into the spectrum ring each block; none picked, nothing is written. The ring wraps and reads oldest first.
+void mixer_spectrum() {
+    {
+        auto ring = std::make_unique<ScopeRing>();
+        std::vector<float> l(ScopeRing::size + 100), r(ScopeRing::size + 100);
+        for (unsigned f = 0; f < l.size(); ++f) { l[f] = float(f); r[f] = float(f) + 2; }
+        ring->put(l.data(), r.data(), unsigned(l.size()));
+        float last[3];
+        ring->latest(last, 3);
+        const float n = float(l.size());
+        CHECK(last[0] == n - 2 && last[1] == n - 1 && last[2] == n && ring->written() == l.size()); // (l + r) / 2: f + 1
+    }
+    auto project = std::make_unique<Project>();
+    auto bank = std::make_unique<PatternBank>();
+    tone_kit(*project, 0);
+    auto host = std::make_unique<EngineHost>();
+    host->load(*project, *bank);
+    SampleData tone = tone_sample(1000);
+    CHECK(host->offer_sample(0, &tone));
+    std::vector<int32_t> out(256);
+    auto play = [&](unsigned blocks) { for (unsigned n = 0; n < blocks; ++n) host->render(out.data(), 128, 1); };
+    host->set_spectrum_tap(0);
+    play(2);
+    host->send({Command::Type::NoteOn, 0, 0, uint16_t(sampler_first_note), 100});
+    play(20);
+    std::vector<float> seen(1024);
+    host->spectrum().latest(seen.data(), 1024);
+    float rms = 0;
+    unsigned crossings = 0;
+    for (unsigned f = 0; f < seen.size(); ++f) {
+        rms += seen[f] * seen[f];
+        if (f && (seen[f - 1] < 0) != (seen[f] < 0)) ++crossings;
+    }
+    rms = std::sqrt(rms / float(seen.size()));
+    const float expected = 2 * 1000.0f * 1024 / float(dsp::sample_rate()); // a 1 kHz tone crosses zero twice a cycle
+    CHECK(rms > 0.1f && std::fabs(float(crossings) - expected) <= 3);
+    host->set_spectrum_tap(-1);
+    const uint32_t before = host->spectrum().written();
+    play(5);
+    CHECK(host->spectrum().written() == before);
+    host->set_spectrum_tap(int(strip_channels)); // out of range: none
+    play(1);
+    CHECK(host->spectrum().written() == before);
+}
+
+void mixer_tracks() {
+    auto project = std::make_unique<Project>();
+    auto bank = std::make_unique<PatternBank>();
+    tone_kit(*project, 0); tone_kit(*project, 1);
+    project->tracks[1].strip.eq[2] = 30; project->tracks[1].strip.comp_ratio = 80;
+    auto host = std::make_unique<EngineHost>();
+    host->load(*project, *bank);
+    SampleData tone = tone_sample(1000);
+    CHECK(host->offer_sample(0, &tone));
+    CHECK(host->strip_values(1).eq[2] == 30 && host->strip_values(1).comp_ratio == 80 && host->strip_values(0).flat());
+    host->send({Command::Type::RecordSource, uint8_t(InputSource::Track), 0, 0, 1}); // track 1 as the mix takes it
+    std::vector<int32_t> out(256);
+    float most_l = 0, most_r = 0; // the Track source's peaks over the last play()
+    auto play = [&](unsigned blocks) {
+        most_l = most_r = 0;
+        for (unsigned n = 0; n < blocks; ++n) {
+            host->render(out.data(), 128, 1);
+            for (unsigned f = 0; f < 128; ++f) {
+                most_l = std::max(most_l, std::fabs(host->print_left()[f])); most_r = std::max(most_r, std::fabs(host->print_right()[f]));
+            }
+        }
+        return std::max(most_l, most_r);
+    };
+    auto set = [&](unsigned t, StripPart part, int value) {
+        CHECK(host->send({Command::Type::StripValue, uint8_t(t), 0, uint16_t(part), int16_t(value)}));
+    };
+    auto note = [&](unsigned t, bool on) {
+        host->send({on ? Command::Type::NoteOn : Command::Type::NoteOff, uint8_t(t), 0, uint16_t(sampler_first_note), 100});
+    };
+    play(2);
+    note(0, true);
+    const float flat = play(10);
+    CHECK(flat > 0.2f && host->strip_meter(0).left > 0.2f && host->strip_meter(0).right > 0.2f && host->strip_meter(0).reduction == 0);
+    // A band at 1 kHz lifted 12 dB (it glides there in 0.1 s): about four times as loud.
+    set(0, eq_part(4), 120);
+    play(30);
+    const float lifted = play(5);
+    CHECK(host->strip_values(0).eq[4] == 120 && lifted > flat * 3.5f && lifted < flat * 4.2f);
+    set(0, eq_part(4), 900); // out of range: held at +12 dB
+    CHECK(play(2) > 0 && host->strip_values(0).eq[4] == 120);
+    set(0, eq_part(4), 0);
+    play(30);
+    // The compressor, then the level after it: turned down, the sound drops and the reduction stays.
+    set(0, StripPart::Amount, 30);
+    const float pressed = (play(40), play(5));
+    const float reduced = host->strip_meter(0).reduction;
+    CHECK(reduced > 3 && pressed < flat * 0.8f);
+    host->send({Command::Type::Level, 0, 0, 0, 50}); // level_gain(50): a quarter
+    play(10);
+    const float quieter = play(5);
+    CHECK(std::fabs(host->strip_meter(0).reduction - reduced) < 0.5f && std::fabs(quieter / pressed - 0.25f) < 0.02f);
+    // The pan last of all: hard left, nothing on the right.
+    host->send({Command::Type::Pan, 0, 0, 0, -50});
+    play(4);
+    play(5);
+    CHECK(std::fabs(most_l / quieter - 1.4142f) < 0.05f && most_r == 0.0f); // a side at the centre: 0.71 of a hard pan
+    host->send({Command::Type::Pan, 0, 0, 0, 0});
+    host->send({Command::Type::Level, 0, 0, 0, 100});
+    // Keyed by track 2: it hears track 2, silent at first, then playing.
+    set(0, StripPart::Key, fx_key_track(1));
+    note(0, false); note(0, true); // the tone again from its start
+    play(200); // the release (Medium: about 43 dB a second at 4:1) from the 13 dB it took above
+    CHECK(host->strip_meter(0).reduction < 0.5f && play(5) > flat * 0.9f);
+    note(1, true);
+    play(20);
+    CHECK(host->strip_meter(0).reduction > 3 && play(5) < flat * 0.8f);
+    set(0, StripPart::CompOn, 0); // off: its values kept, the sound as it comes
+    play(20);
+    CHECK(host->strip_values(0).comp_amount == 30 && play(5) > flat * 0.9f);
+    std::puts("mixer tracks ok");
+}
+
+// The mixer, core step 4: submixes. A track sent to one plays through its chain, strip, level and pan into the master
+// (and as much as its sends into the buses); mute and solo (a submix's solo solos its tracks, and counts only with a
+// track in it); a track moved back to the master; a strip keyed by a submix.
+void mixer_submixes() {
+    auto project = std::make_unique<Project>();
+    auto bank = std::make_unique<PatternBank>();
+    tone_kit(*project, 0); tone_kit(*project, 1);
+    project->tracks[0].mix.out = out_sub(2);
+    project->subs[2].mix.level = 64; // level_gain: 0.4096
+    project->subs[5].mix.solo = true; // nothing in it: its solo does not count
+    auto host = std::make_unique<EngineHost>();
+    host->load(*project, *bank);
+    SampleData tone = tone_sample(1000);
+    CHECK(host->offer_sample(0, &tone));
+    std::vector<int32_t> out(256);
+    auto play = [&](unsigned blocks) { // the master's peak over the last blocks
+        float most = 0;
+        for (unsigned n = 0; n < blocks; ++n) {
+            host->render(out.data(), 128, 1);
+            for (auto v : out) most = std::max(most, std::fabs(v / 2147483648.0f));
+        }
+        return most;
+    };
+    auto sub = [&](unsigned n, uint16_t part, int value) { CHECK(host->send({Command::Type::SubMix, uint8_t(n), 0, part, int16_t(value)})); };
+    auto note = [&](unsigned t, bool on) {
+        host->send({on ? Command::Type::NoteOn : Command::Type::NoteOff, uint8_t(t), 0, uint16_t(sampler_first_note), 100});
+    };
+    auto mute = [&](unsigned t, bool on) { host->send({Command::Type::Mute, uint8_t(t), 0, 0, int16_t(on)}); };
+    play(2);
+    // Track 2 alone, straight to the master: the level a track plays at. Both notes are held from here on (the
+    // tone lasts a second); track 2 is muted to hear the submix alone.
+    note(1, true);
+    const float direct = play(10);
+    CHECK(direct > 0.2f && host->strip_meter(strip_sub(2)).left == 0);
+    mute(1, true);
+    // Track 1 through submix 3 at level 64.
+    note(0, true);
+    play(10);
+    const float through = play(10);
+    CHECK(std::fabs(through / direct - 0.4096f) < 0.01f && std::fabs(host->strip_meter(strip_sub(2)).left - through) < 0.01f && host->meter(0) > 0.2f);
+    // A send: bus B (no chain, its return at 70) takes half of it, in phase.
+    sub(2, Command::SubSend0 + 1, 50);
+    play(10);
+    CHECK(std::fabs(play(5) / through - 1.35f) < 0.02f);
+    sub(2, Command::SubSend0 + 1, 0);
+    // Muted: nothing of it, though the track still plays (its own meter).
+    sub(2, Command::SubMute, 1);
+    play(10);
+    CHECK(play(5) < 1e-6f && host->meter(0) > 0.2f);
+    sub(2, Command::SubMute, 0);
+    // Solo: submix 3's solos track 1 in it; track 2, straight to the master, is silenced (heard, the two would
+    // peak at 0.16 at least).
+    mute(1, false);
+    sub(2, Command::SubSolo, 1);
+    play(10);
+    CHECK(std::fabs(play(5) / through - 1) < 0.02f);
+    sub(2, Command::SubSolo, 0);
+    // Track 1's own solo: its submix plays it on, track 2 silenced.
+    host->send({Command::Type::Solo, 0, 0, 0, 1});
+    play(10);
+    CHECK(std::fabs(play(5) / through - 1) < 0.02f);
+    host->send({Command::Type::Solo, 0, 0, 0, 0});
+    play(10);
+    // Track 2's strip keyed by submix 3: ducked while track 1 plays through it.
+    host->send({Command::Type::StripValue, 1, 0, uint16_t(StripPart::Key), fx_key_sub(2)});
+    host->send({Command::Type::StripValue, 1, 0, uint16_t(StripPart::Amount), 40});
+    play(30);
+    CHECK(host->strip_meter(1).reduction > 3);
+    // Track 1 back to the master, crossing over in one block: at its own level again.
+    mute(1, true);
+    host->send({Command::Type::TrackOut, 0, 0, 0, out_master});
+    play(10);
+    CHECK(std::fabs(play(5) / direct - 1) < 0.02f && host->strip_meter(strip_sub(2)).left < through);
+    // Delay compensation: track 1 through a submix whose chain holds a plug-in 200 frames late, track 2 straight to
+    // the master, both from the same tick: each heard alone, both start on the same frame (track 2 waits).
+    auto first_heard = [&](unsigned silent) {
+        auto p = std::make_unique<Project>();
+        auto b = std::make_unique<PatternBank>();
+        tone_kit(*p, 0); tone_kit(*p, 1);
+        p->tracks[0].mix.out = out_sub(4);
+        p->subs[4].fx.slots[0] = {uint8_t(EffectKind::Plugin), false, {0, 0, 0, 0, 0, 0}};
+        p->tracks[silent].mix.mute = true;
+        put(b->at[0][0], 0, uint8_t(sampler_first_note), 100); put(b->at[1][0], 0, uint8_t(sampler_first_note), 100);
+        auto h = std::make_unique<EngineHost>();
+        h->load(*p, *b);
+        LatePlugin slow;
+        slow.instrument = false; slow.late = 200;
+        CHECK(h->offer_sample(0, &tone) && h->offer_plugin(0, &slow));
+        h->render(out.data(), 128, 1); // the plug-in taken in
+        h->send({Command::Type::Play});
+        for (unsigned n = 0; n < 40; ++n) {
+            h->render(out.data(), 128, 1);
+            for (unsigned f = 0; f < 128; ++f) if (out[2 * f] != 0) return int(n * 128 + f);
+        }
+        return -1;
+    };
+    const int via_sub = first_heard(1), direct_first = first_heard(0);
+    CHECK(via_sub > 200 && via_sub == direct_first);
+    std::puts("mixer submixes ok");
+}
+
+// The mixer, core step 5: a bus's strip after its chain, before its return, and its mute; the master's strip before
+// its chain, with no compressor of its own; the input's strip where Monitor hears it, and takes before it (dry) or
+// after it (wet). Their meters.
+void mixer_buses_input() {
+    auto project = std::make_unique<Project>();
+    auto bank = std::make_unique<PatternBank>();
+    tone_kit(*project, 0);
+    project->tracks[0].mix.sends[0] = 100; // into bus A (no chain, its return at 70)
+    project->buses[0].mute = true;
+    auto host = std::make_unique<EngineHost>();
+    host->load(*project, *bank);
+    SampleData tone = tone_sample(1000);
+    CHECK(host->offer_sample(0, &tone));
+    std::vector<int32_t> out(256), in(256);
+    const int32_t* input = nullptr;
+    auto play = [&](unsigned blocks) { // the master's peak over these blocks
+        float most = 0;
+        for (unsigned n = 0; n < blocks; ++n) {
+            host->render(out.data(), 128, 1, input);
+            for (auto v : out) most = std::max(most, std::fabs(v / 2147483648.0f));
+        }
+        return most;
+    };
+    auto set = [&](unsigned n, StripPart part, int value) {
+        CHECK(host->send({Command::Type::StripValue, uint8_t(n), 0, uint16_t(part), int16_t(value)}));
+    };
+    play(2);
+    host->send({Command::Type::NoteOn, 0, 0, uint16_t(sampler_first_note), 100});
+    play(10);
+    const float direct = play(5); // bus A muted (from the file)
+    CHECK(direct > 0.2f && host->strip_meter(bus_chain(0)).left < 1e-6f);
+    host->send({Command::Type::BusMute, 0, 0, 0, 0});
+    play(10);
+    CHECK(std::fabs(play(5) / direct - 1.7f) < 0.02f && std::fabs(host->strip_meter(bus_chain(0)).left / direct - 0.7f) < 0.02f);
+    set(bus_chain(0), StripPart::Trim, -60); // -6 dB on the bus, before its return
+    play(30);
+    CHECK(std::fabs(play(5) / direct - (1 + 0.7f * 0.501f)) < 0.02f);
+    host->send({Command::Type::BusMute, 0, 0, 0, 1});
+    // The master's strip: +6 dB. Its compressor is the Compressor: a value for it is not taken.
+    set(master_chain, StripPart::Trim, 60);
+    set(master_chain, StripPart::Amount, 30);
+    play(30);
+    const float master = play(5);
+    CHECK(std::fabs(master / direct - 1.995f) < 0.03f && host->strip_values(master_chain).comp_amount == 0);
+    CHECK(std::fabs(host->strip_meter(master_chain).left - master) < 0.01f);
+    set(master_chain, StripPart::Trim, 0);
+    host->send({Command::Type::Mute, 0, 0, 0, 1});
+    play(30);
+    // The input: the rear inputs at a quarter, monitored (a centred pad's pan law).
+    for (unsigned f = 0; f < 128; ++f) in[2 * f] = in[2 * f + 1] = int32_t(0.25f * std::sin(2 * 3.14159265f * 1000.0f * float(f) / 128.0f * 4) * 2147483647.0f);
+    input = in.data();
+    host->send({Command::Type::RecordSource, uint8_t(InputSource::Rear), 0, 0, 0});
+    host->send({Command::Type::Monitor, 0, 0, 0, 1});
+    play(20);
+    const float monitored = play(5);
+    CHECK(std::fabs(monitored - 0.25f * 0.7071f) < 0.01f && std::fabs(host->in_level(0) - 0.25f) < 0.01f);
+    set(strip_input, StripPart::Trim, 60); // +6 dB: Monitor hears it; recorded dry, the take (and the meter) do not
+    play(30);
+    CHECK(std::fabs(play(5) / monitored - 1.995f) < 0.03f && std::fabs(host->in_level(0) - 0.25f) < 0.01f);
+    CHECK(std::fabs(host->strip_meter(strip_input).left - 0.5f) < 0.02f);
+    host->send({Command::Type::InputWet, 0, 0, 0, 1}); // wet: they do
+    play(5);
+    CHECK(std::fabs(host->in_level(0) - 0.5f) < 0.02f);
+    std::puts("mixer buses input ok");
+}
+
+// The mixer, core step 6: Motion on a track's strip. A lane a value but the switches and the key; a lane stands where
+// the strip is set; a print leaves the lanes live; a file keeps them in MOTS (older builds skip it); played, a lane
+// moves the strip, and Stop puts it back as set (a value set meanwhile counting).
+void mixer_motion() {
+    CHECK(motion_strip_count == 16 && motion_strip_base == motion_mix_end && motion_strip(StripPart::Trim) == int(motion_strip_base));
+    CHECK(motion_strip(StripPart::Eq4) == int(motion_strip_base) + 6 && motion_strip(StripPart::Gain) == int(motion_strip_base) + 15);
+    CHECK(motion_strip(StripPart::EqOn) < 0 && motion_strip(StripPart::CompOn) < 0 && motion_strip(StripPart::Key) < 0);
+    CHECK(!is_strip_lane(motion_strip_base - 1) && !is_strip_lane(motion_strip_base + 16) && !is_mix_lane(motion_strip_base));
+    for (unsigned n = 0; n < motion_strip_count; ++n) CHECK(motion_strip(strip_lane_part(motion_strip_base + n)) == int(motion_strip_base + n));
+
+    auto project = std::make_unique<Project>();
+    auto bank = std::make_unique<PatternBank>();
+    tone_kit(*project, 0);
+    project->tracks[0].strip.eq[4] = -30; project->tracks[0].strip.comp_ratio = 60;
+    const unsigned eq_lane = unsigned(motion_strip(StripPart::Eq4)), ratio_lane = unsigned(motion_strip(StripPart::Ratio));
+    CHECK(lane_own(*project, 0, eq_lane, 0) == -30 && lane_own(*project, 0, ratio_lane, 0) == 60);
+    auto& pattern = bank->at[0][0];
+    put(pattern, 0, uint8_t(sampler_first_note), 100);
+    pattern.write_motion(point(0, eq_lane, 120));
+    pattern.write_motion(point(4, motion_level, 80));
+    pattern.write_motion(point(8, ratio_lane, 150));
+
+    // The file: the strip's points in MOTS, the rest in MOTK, together again on load.
+    auto has = [](const std::vector<uint8_t>& bytes, const char* tag) { return std::search(bytes.begin(), bytes.end(), tag, tag + 4) != bytes.end(); };
+    auto bytes = save_project(*project, *bank);
+    CHECK(has(bytes, "MOTS") && has(bytes, "MOTK"));
+    auto back = std::make_unique<Project>();
+    auto back_bank = std::make_unique<PatternBank>();
+    CHECK(load_project(bytes, *back, *back_bank).empty());
+    const auto& m = back_bank->at[0][0].motion;
+    CHECK(m.size() == 3 && m[0].param == eq_lane && m[0].value == 120 && m[1].param == motion_level && m[2].param == ratio_lane);
+    {
+        auto lone = std::make_unique<PatternBank>();
+        lone->at[2][5].write_motion(point(3, eq_lane, -60)); // a pattern with the strip's points alone
+        auto b = save_project(*project, *lone);
+        CHECK(has(b, "MOTS") && load_project(b, *back, *back_bank).empty() && back_bank->at[2][5].motion.size() == 1);
+    }
+    // A print: the strip's lanes stay live, as the mix's.
+    {
+        auto p = std::make_unique<Project>(*project);
+        auto b = std::make_unique<PatternBank>(*bank);
+        print_project(*p, *b, 0, 0);
+        CHECK(b->at[0][0].motion.empty());
+    }
+
+    // Played: the lanes move the strip; Stop puts it back as set.
+    auto host = std::make_unique<EngineHost>();
+    host->load(*project, *bank);
+    SampleData tone = tone_sample();
+    CHECK(host->offer_sample(0, &tone));
+    std::vector<int32_t> out(256);
+    auto play = [&](unsigned blocks) { for (unsigned n = 0; n < blocks; ++n) host->render(out.data(), 128, 1); };
+    play(2);
+    CHECK(host->strip_values(0).eq[4] == -30);
+    host->send({Command::Type::Play});
+    play(4);
+    CHECK(host->strip_values(0).eq[4] == 120 && host->strip_values(0).comp_ratio == 60);
+    play(unsigned(44100 / 128)); // past step 9 at 120 BPM
+    CHECK(host->strip_values(0).comp_ratio == 150);
+    host->send({Command::Type::StripValue, 0, 0, uint16_t(StripPart::Trim), 30}); // set while it plays: kept
+    host->send({Command::Type::Stop});
+    play(2);
+    const Strip& now = host->strip_values(0);
+    CHECK(now.eq[4] == -30 && now.comp_ratio == 60 && now.trim == 30);
+    std::puts("mixer motion ok");
+}
+
+void channel_strip_sound() {
+    const float rate_was = dsp::sample_rate();
+    constexpr unsigned block = 128;
+    // The strip on a sine at `hz` and `amp` (and the key on another at `key_amp`, when given) for `seconds`; the
+    // gain of the last quarter second against the sine's own, in dB.
+    auto run = [&](ChannelStrip& s, float hz, float amp, float seconds = 1.0f, float key_amp = -1) {
+        const float rate = dsp::sample_rate();
+        const unsigned total = unsigned(seconds * rate), from = total - unsigned(rate / 4);
+        std::vector<float> l(block), r(block), kl(block), kr(block);
+        double sum = 0;
+        unsigned counted = 0;
+        for (unsigned at = 0; at < total; at += block) {
+            for (unsigned f = 0; f < block; ++f) {
+                double t = double(at + f) / rate;
+                l[f] = r[f] = float(amp * std::sin(2 * M_PI * hz * t));
+                kl[f] = kr[f] = float(key_amp * std::sin(2 * M_PI * 1000 * t));
+            }
+            s.process(l.data(), r.data(), block, key_amp >= 0 ? kl.data() : nullptr, key_amp >= 0 ? kr.data() : nullptr);
+            for (unsigned f = 0; f < block; ++f) if (at + f >= from && at + f < total) { sum += double(l[f]) * l[f]; ++counted; }
+        }
+        double rms = std::sqrt(sum / std::max(counted, 1u));
+        return float(20 * std::log10(std::max(rms, 1e-9) / (amp / std::sqrt(2.0))));
+    };
+    auto made = [](const Strip& v) { auto s = std::make_unique<ChannelStrip>(); s->set(v); s->reset(); return s; };
+    for (float rate : {44100.0f, 96000.0f}) {
+        dsp::device_rate = rate;
+        // Flat: nothing done, every sample as it was.
+        {
+            ChannelStrip unset;
+            CHECK(unset.idle());
+            auto s = made(Strip {});
+            CHECK(s->idle());
+            std::vector<float> l(block), r(block);
+            for (unsigned f = 0; f < block; ++f) { l[f] = std::sin(f * 0.1f); r[f] = -l[f] * 0.5f; }
+            auto l0 = l, r0 = r;
+            s->process(l.data(), r.data(), block);
+            CHECK(l == l0 && r == r0 && s->reduction_db() == 0);
+        }
+        // A band: its octave lifted or cut, two octaves off nearly untouched, the far end untouched.
+        {
+            Strip v;
+            v.eq[4] = 60; // 1 kHz, +6 dB
+            auto s = made(v);
+            CHECK(std::fabs(run(*s, 1000, 0.25f) - 6) < 0.2f);
+            s = made(v);
+            CHECK(std::fabs(run(*s, 4000, 0.25f)) < 0.6f && std::fabs(run(*s, 63, 0.25f)) < 0.1f);
+            v.eq = {}; v.eq[1] = -120; // 125 Hz, -12 dB
+            s = made(v);
+            CHECK(std::fabs(run(*s, 125, 0.25f) + 12) < 0.3f);
+            // EQ off: the bands glide back to nothing, the strip goes idle, their gains kept.
+            v.eq_on = false;
+            s->set(v);
+            CHECK(std::fabs(run(*s, 125, 0.25f)) < 0.05f && s->idle() && s->values().eq[1] == -120);
+        }
+        // Trim and the compressor's gain (no compression at amount 0): plain gains; off, none.
+        {
+            Strip v;
+            v.trim = 60;
+            auto s = made(v);
+            CHECK(std::fabs(run(*s, 440, 0.1f) - 6) < 0.05f);
+            v = Strip {}; v.comp_gain = 60;
+            s = made(v);
+            CHECK(std::fabs(run(*s, 440, 0.1f) - 6) < 0.05f && s->reduction_db() == 0);
+            v.comp_on = false;
+            s->set(v);
+            CHECK(std::fabs(run(*s, 440, 0.1f)) < 0.05f && s->idle());
+        }
+        // The compressor: -6 dB peaks, threshold -20 dB, 4:1: the peaks come out at -16.5 dB, 10.5 dB down.
+        {
+            Strip v;
+            v.comp_amount = 20; v.comp_ratio = 40;
+            auto s = made(v);
+            float g = run(*s, 1000, 0.5f);
+            CHECK(std::fabs(g + 10.5f) < 1.0f && std::fabs(s->reduction_db() - 10.5f) < 1.0f);
+            s = made(v);
+            CHECK(std::fabs(run(*s, 1000, 0.05f)) < 0.05f); // -26 dB peaks: under the threshold
+            v.comp_mix = 0;
+            s = made(v);
+            CHECK(std::fabs(run(*s, 1000, 0.5f)) < 0.05f && s->reduction_db() == 0);
+            // Keyed: a quiet channel taken down by its loud key; a loud channel with a silent key left alone.
+            v.comp_mix = 100;
+            s = made(v);
+            CHECK(std::fabs(run(*s, 300, 0.05f, 1.0f, 0.5f) + 10.5f) < 1.0f);
+            s = made(v);
+            CHECK(std::fabs(run(*s, 300, 0.5f, 1.0f, 0.0f)) < 0.05f);
+            // Each speed comes to the same reduction on a steady tone.
+            for (unsigned speed = 0; speed < unsigned(CompSpeed::Count); ++speed) {
+                v.comp_speed = uint8_t(speed);
+                s = made(v);
+                CHECK(std::fabs(run(*s, 1000, 0.5f) + 10.5f) < 1.2f);
+            }
+        }
+        // Width: 0 is mono, 100 as it is.
+        {
+            Strip v;
+            v.width = 0;
+            auto s = made(v);
+            std::vector<float> l(block), r(block, 0.0f);
+            for (unsigned f = 0; f < block; ++f) l[f] = std::sin(f * 0.05f);
+            s->process(l.data(), r.data(), block);
+            bool mono = true;
+            for (unsigned f = 0; f < block; ++f) mono &= std::fabs(l[f] - r[f]) < 1e-6f;
+            CHECK(mono && std::fabs(l[40] - std::sin(40 * 0.05f) * 0.5f) < 1e-5f);
+        }
+        // A change glides: +12 dB on 1 kHz set at once has moved under 1 dB after one block, and is all there by 0.5 s.
+        {
+            auto s = made(Strip {});
+            Strip v;
+            v.eq[4] = 120;
+            s->set(v);
+            std::vector<float> l(block), r(block);
+            for (unsigned f = 0; f < block; ++f) l[f] = r[f] = 0.25f * float(std::sin(2 * M_PI * 1000 * f / rate));
+            auto l0 = l;
+            s->process(l.data(), r.data(), block);
+            double in = 0, out = 0;
+            for (unsigned f = 0; f < block; ++f) { in += double(l0[f]) * l0[f]; out += double(l[f]) * l[f]; }
+            CHECK(10 * std::log10(out / in) < 1.0);
+            CHECK(std::fabs(run(*s, 1000, 0.25f, 0.5f) - 12) < 0.3f);
+        }
+    }
+    dsp::device_rate = rate_was;
+}
+
 } // namespace
 
 // The Sidechain keyed by a plug-in's key port (melodee-hdslave): a drum machine's second output, its kick alone. While
@@ -9495,9 +10209,19 @@ void plugin_sidechain_key() {
 
 int main() {
     slice_hit_notes();
+    mixer_strips();
+    channel_strip_sound();
+    mixer_tracks();
+    mixer_spectrum();
+    mixer_submixes();
+    mixer_buses_input();
+    mixer_motion();
     track_names();
     midi_lookahead();
     pad_sends();
+    pad_stems();
+    pad_outputs();
+    stem_writer();
     pad_cloud();
     pad_sends_freeze();
     std::thread(ring_echo_paths).join();

@@ -3,6 +3,7 @@
 #pragma once
 #include "melodee/engine/spsc_queue.h"
 #include "melodee/engine/arp.h"
+#include "melodee/engine/channel_strip.h"
 #include "melodee/engine/note_repeat.h"
 #include "melodee/engine/command.h"
 #include "melodee/engine/compensation.h"
@@ -23,6 +24,7 @@
 #include "melodee/engine/midi_out.h"
 #include "melodee/model/input_config.h"
 #include "melodee/model/project.h"
+#include "melodee/engine/scope_ring.h"
 #include <array>
 #include <string>
 #include <atomic>
@@ -194,7 +196,7 @@ public:
     // keyed effect, 'q' quiet, counting towards its rest.
     std::string chains_map() const {
         std::string map;
-        for (unsigned c = 0; c < chain_count; ++c) if (fx[c][0].kind() != EffectKind::None) map += chain_rest[c].asleep ? 'z' : chain_rest[c].why;
+        for (unsigned c = 0; c < mix_chain_count; ++c) if (fx[c][0].kind() != EffectKind::None) map += chain_rest[c].asleep ? 'z' : chain_rest[c].why;
         return map;
     }
     static inline bool chain_rests = true;
@@ -210,17 +212,20 @@ public:
     // Roadmap P4: stems beside the next render (StemRing, the service thread's; nullptr: none), taken while it runs.
     void set_stems(StemRing* ring) { stem_ring.store(ring, std::memory_order_release); }
     // Live stems, every block (the Ableton Move's USB submixes): the same stems a render's StemRing gets, each
-    // track as it joins the mix (after its chain, level, pan and mute, eased as heard, its key pad with it) and
-    // each bus's return, written into `rows[(stem * 2 + side) * block + f]`: stems 0-15 the tracks, 16-19 buses
-    // A-D, side 0 left. A track with no engine is silent; a Park's fade is kept, as the stems have it. Audio
-    // thread, before render(), as often as it likes; nullptr (the default): none taken, nothing spent.
+    // track as it leaves for the master or its submix (after its chain, strip, level, pan and mute, eased as heard,
+    // its key pad with it), each bus's return and each submix, written into `rows[(stem * 2 + side) * block + f]`:
+    // stems 0-15 the tracks, 16-19 buses A-D, 20-27 the submixes, side 0 left (StemRing::stem_count rows). A track
+    // with no engine is silent; a Park's fade is kept, as the stems have it. Audio thread, before render(), as often
+    // as it likes; nullptr (the default): none taken, nothing spent.
     void set_live_stems(float* rows) { live_stems = rows; }
     const Bounce& bounce() const { return render_out; }
-    // A print host: track `track` taken each block as the Track input source does, after its chain (`post`) or as its
-    // engine left it; print_left() / print_right() hold the block just rendered.
     // Offline render thread only. Includes the instrument, its macros or pad delays, and the serial inserts at Post FX.
     double print_tail_seconds(unsigned track, bool post) const;
+    // A print host: track `track` taken each block after its chain (`post`), before its strip's level and pan (the
+    // mixer, docs/MIXER_PLAN.md: a print holds neither), or as its engine left it; print_left() / print_right() hold
+    // the block just rendered.
     void set_print_tap(unsigned track, bool post) {
+        print_host = true;
         source_track.store(track % track_count, std::memory_order_relaxed);
         source_post.store(post, std::memory_order_relaxed);
         source_now.store(unsigned(InputSource::Track), std::memory_order_relaxed);
@@ -246,6 +251,9 @@ public:
     // their effects (a MIDI track's AUDIO LEVEL, level and pan; Monitor's input gain at a centred pan; a loop's level
     // and pan), added up.
     void set_usb_direct(bool on) { usb_direct.store(on, std::memory_order_relaxed); }
+    // USB out: render()'s `stems` rows hold the submixes instead of the tracks: submix n's left in row 2n, its right
+    // in row 2n + 1, as it joins the master (the same as a render's submix stems).
+    void set_usb_submixes(bool on) { usb_submixes.store(on, std::memory_order_relaxed); }
     bool usb_heard() const { return usb_heard_now.load(std::memory_order_relaxed); }
     float usb_gain_left() const { return usb_gain_l.load(std::memory_order_relaxed); }
     float usb_gain_right() const { return usb_gain_r.load(std::memory_order_relaxed); }
@@ -282,6 +290,20 @@ public:
     bool song_playing() const { return in_song.load(std::memory_order_relaxed); }
     unsigned song_bar() const { return bar_now.load(std::memory_order_relaxed); }
     float meter(unsigned track) const { return meters[track % track_count].load(std::memory_order_relaxed); }
+    // A mixer channel's meter, by its strip number (model/project.h; tracks so far, docs/MIXER_PLAN.md core step 3):
+    // each side's peak after its strip, level, pan and mute, and its compressor's gain reduction in dB, each falling
+    // back as meter() does.
+    struct StripMeter { float left = 0, right = 0, reduction = 0; };
+    StripMeter strip_meter(unsigned n) const {
+        n %= strip_channels;
+        return {peak_l[n].load(std::memory_order_relaxed), peak_r[n].load(std::memory_order_relaxed), reductions[n].load(std::memory_order_relaxed)};
+    }
+    // What a channel's strip plays now (the values its commands set), by strip number.
+    const Strip& strip_values(unsigned n) const { return strips[n % strip_channels].values(); }
+    // The mixer's EQ picture (melodee-sample docs/MIXER_PLAN.md step 5): one channel, by strip number, has its sound
+    // after its strip (before level and pan) copied into spectrum() each block; -1 none, which costs nothing.
+    void set_spectrum_tap(int strip) { spectrum_tap.store(strip >= 0 && strip < int(strip_channels) ? strip : -1, std::memory_order_relaxed); }
+    const ScopeRing& spectrum() const { return scope; }
     // The voices of the track the screen watches (engine/voice_tap.h), as the last block left them; false while a
     // write was under way each time it looked. watch_taps(-1): none taken.
     void watch_taps(int track) { tap_track.store(track, std::memory_order_relaxed); }
@@ -446,6 +468,8 @@ private:
         Ease mix_l, mix_r, audible, knob_share;
         std::array<Ease, bus_count> sends_now {};
         uint8_t pattern = 0, queued = 255; // queued: launches on the next bar
+        uint8_t out = out_master;          // the mixer: where it plays, the master or a submix (Mix::out)
+        uint8_t out_was = out_master;      // where it played in the last block (a change crosses over in the next)
         uint32_t start = 0;                // the tick its pattern started on
         int clip = -1;                     // in the song: the clip playing
         bool silent = false;               // in the song: no clip here
@@ -464,6 +488,7 @@ private:
         int16_t mix_level = 100, mix_pan = 0;
         std::array<int16_t, bus_count> mix_sends {};
         bool mix_moved = false, master_moved = false;
+        bool strip_moved = false; // the mixer: Motion moved its strip (core step 6); Stop puts it back as set
         bool moved = false;                       // motion changed a value since Play
         // Issue 32: a kit's pad mutes as set (Mute + pad; a mute lane only borrows them), and whether a lane moved one.
         std::array<uint64_t, (sampler_pads + 63) / 64> pad_mutes {};
@@ -482,6 +507,10 @@ private:
         struct PadSendBuffers { float l[bus_count][block] {}, r[bus_count][block] {}; };
         std::unique_ptr<PadSendBuffers> pad_sends = std::make_unique<PadSendBuffers>(); // a kit's pad sends, each bus apart (heap: 4 kB a track)
         unsigned send_pad_fed = 0;                                                // a bit a bus: something there this block
+        struct PadSubBuffers { float l[sub_count][block] {}, r[sub_count][block] {}; };
+        std::unique_ptr<PadSubBuffers> pad_subs = std::make_unique<PadSubBuffers>(); // a kit's pads sent to submixes, each apart (8 kB)
+        unsigned sub_pad_fed = 0;                                                 // a bit a submix: something there this block
+        uint8_t pad_routes = 0;                                                   // this block: the submixes its pads are sent to
         std::array<PendingHit, 32> hits {}; // ratchets' hits to come, each on its frame (hits_waiting)
         // Trig conditions (model/trig.h): how the last weighed note went, on the track and on each key (a kit's
         // lanes), and whether one has been weighed since Play (none yet: counted as played, for NEI).
@@ -521,7 +550,6 @@ private:
         std::bitset<256> hand {};
         float* print_l = nullptr;
         float* print_r = nullptr;
-        Ease print_mix_l, print_mix_r;
         // Freeze plan F3: an AUDIO track's engine (its takes' voices), its patterns' takes, ones replaced whose voices
         // still fade, and the pattern tick it followed last (a jump when the next is not the one after).
         AudioTrackEngine audio;
@@ -597,6 +625,7 @@ private:
     std::array<FreezePack*, track_count> freeze_next {}; // waiting for the next bar
     static constexpr float sleep_floor = 3.16e-5f; // -90 dB: a frozen track's engine below it a second sleeps
     float pan_centre = 0.7071f;                    // set_pan()'s sides at the centre, as a print was made at
+    static constexpr float pan_balance = 1.4142f;  // a track's pan on the engine's picture: unity at the centre
     SpscQueue<64, FreezePack*> done_freezes;
     // Freeze plan F3: audio tracks.
     void set_audio(unsigned t, AudioPack* pack);
@@ -629,6 +658,11 @@ private:
     // back to the track's own (the master's as set).
     void move_mix(unsigned t, Slot& slot, unsigned param, int value);
     void restore_mix(Slot& slot, unsigned param);
+    // The mixer, core step 6: a track's strip on Motion's lanes (model/strip.h is_strip_lane()). strip_set_by: each
+    // track's strip as its commands set it, which Motion moves away from and Stop (or a lane's end) brings back.
+    void move_strip(unsigned t, unsigned param, int value);
+    void restore_strip(unsigned t, unsigned param);
+    std::array<Strip, track_count> strip_set_by {};
     // Roadmap P4, modulators (model/modulators.h): each as the shell last sent it, where its cycle is, its random
     // values, a follower's level, and each target's lane: where it stands (`center`: as set, or where Motion has it),
     // as set (`own`), and what was last written there. A lane set from elsewhere tells them (mod_note); the
@@ -818,6 +852,7 @@ private:
     RecallRing recall_ring; // Audio Recall: the source, always
     Bounce render_out;      // Resample and the song's mixdown
     Bounce audio_in;        // freeze plan F3: an audio track's take, from the input as Sample Record hears it
+    std::atomic<bool> usb_submixes {false}; // set_usb_submixes()
     std::atomic<StemRing*> stem_ring {nullptr}; // roadmap P4: stems beside it (each track as it joins the mix, the returns)
     float* live_stems = nullptr;                // audio thread: set_live_stems()'s rows
     void take_stems(unsigned frames);
@@ -938,8 +973,9 @@ private:
     std::atomic<uint64_t> parallel_blocks {0};
     bool plugin_in_two_places() const;
     bool plugin_on_two_buses() const;
+    bool plugin_on_two_chains(unsigned first, unsigned count) const; // one plug-in in two of chains first.. first + count - 1
     DelayPool pool;
-    std::array<std::array<Effect, max_slots>, chain_count> fx;
+    std::array<std::array<Effect, max_slots>, mix_chain_count> fx;
     // Resting chains. A chain that has heard silence and given silence for
     // rest_after frames, every effect in it left by each of those blocks as Effect::rest() leaves it, is no longer
     // run: its effects only rest(). Silence is anything under Effect::rest_floor (-571 dB). It is run again from the first block that brings it sound, or in which
@@ -947,7 +983,7 @@ private:
     // block: by then nothing a line held can still be on its way out. Chains with a plug-in or a keyed effect
     // never rest (a plug-in has its own gate). Each chain's record is its thread's for the block, like its effects.
     struct ChainRest { uint32_t quiet = 0, stamp = 0; double quarter = 0; float rate = 0; bool asleep = false; char why = 'i'; uint8_t wait = 0; };
-    std::array<ChainRest, chain_count> chain_rest {};
+    std::array<ChainRest, mix_chain_count> chain_rest {};
     static constexpr uint32_t rest_after = 2 * DelayPool::half + block;
     static constexpr uint8_t rest_retry = 32; // blocks
     uint32_t chain_stamp(unsigned chain) const { uint32_t sum = 0; for (const auto& e : fx[chain]) sum += e.changes(); return sum; }
@@ -961,18 +997,57 @@ private:
     std::array<Ease, bus_count> returns_now {};
     Ease volume_now, monitor_now; // main volume and Monitor as the block plays them
     bool snap_mix = true;         // the next block's eases start at their targets (a project just loaded)
+    bool print_host = false;      // set_print_tap(): a print's tap, not the Track source's
     float bus_l[bus_count][block] {}, bus_r[bus_count][block] {}, master_l[block] {}, master_r[block] {};
     void run_chain(unsigned chain, float* left, float* right, unsigned frames);
     // Roadmap P4, keyed Compressors and Gates: each slot's key (model/project.h fx_key_*), and this block's plan of
     // where each key is heard: a track whose chain runs before (its output this block), else the block before (a bus
     // keying a track, a track keyed itself keying another, a loop track's chain). A track keyed by another track runs
     // its chain after the others (keyed_tracks). key_prev: each key source's output the block before.
-    std::array<std::array<uint8_t, max_slots>, chain_count> fx_key {};
+    std::array<std::array<uint8_t, max_slots>, mix_chain_count> fx_key {};
     std::array<bool, track_count> keyed_track {};   // this block: its chain waits for the tracks that key it
     uint32_t key_sources = 0;                       // a bit a track (0-15) or bus (16-19) some chain is keyed by
-    std::array<std::array<float, block>, track_count + bus_count> key_prev_l {}, key_prev_r {};
+    std::array<std::array<float, block>, track_count + bus_count + sub_count> key_prev_l {}, key_prev_r {}; // tracks, buses, submixes
     void plan_keys();
     void key_effect(unsigned chain, unsigned slot, Effect& effect);
+    // Where `key` (fx_key_*) is heard by chain `chain` this block, as key_effect() has it.
+    void key_buffers(unsigned chain, unsigned key, const float*& l, const float*& r);
+    // Mixer (docs/MIXER_PLAN.md): each channel's strip, by strip number (model/project.h), after its chain and before
+    // its level and pan. Tracks so far (core step 3).
+    std::array<ChannelStrip, strip_channels> strips {};
+    bool strip_keyed(unsigned n) const; // its compressor listens to another channel this block
+    // The submixes (core step 4) as the block plays them. A track whose output is a submix (Slot::out) is summed into
+    // its buffers in place of the master; then each submix runs its chain, its strip and its level and pan, and plays
+    // into the master and, as much as each send, the buses. sub_l / sub_r end the block holding what it played,
+    // before its mute (a key's sound, as a track's).
+    struct SubSlot {
+        float gain = 1, pan_left = 0.7071f, pan_right = 0.7071f;
+        int16_t level = 100, pan = 0;
+        bool mute = false, solo = false;
+        std::array<float, bus_count> sends {};
+        Ease mix_l, mix_r, audible;
+        std::array<Ease, bus_count> sends_now {};
+        uint16_t members = 0; // a bit a track with something to play going into it
+        bool fed = false;     // something went into it this block
+        bool live = false;    // run this block: fed, or its chain or strip still sounding
+    };
+    std::array<SubSlot, sub_count> submixes {};
+    float sub_l[sub_count][block] {}, sub_r[sub_count][block] {};
+    void run_submix(unsigned s, unsigned frames);
+    bool sub_soloing(unsigned s) const; // its solo counts: a track with something to play goes into it
+    // Soloed: its own solo, or its submix's (a submix's solo solos the tracks that play into it).
+    bool soloed(const Slot& slot) const {
+        if (slot.solo || (slot.out && submixes[(slot.out - 1) % sub_count].solo)) return true;
+        for (unsigned n = 0; n < sub_count; ++n) if (((slot.pad_routes >> n) & 1) && submixes[n].solo) return true; // a pad in it
+        return false;
+    }
+    bool solo_on() const; // any solo counts: a track's or a submix's (and the Looper's in render())
+    // Core step 5: each bus's return muted; the input heard by takes after its strip (input_wet) or before, the
+    // input after its strip as Monitor hears it (wet_l / wet_r, when it is not recorded wet).
+    std::array<bool, bus_count> bus_mute {};
+    bool input_wet = false;
+    float wet_l[block] {}, wet_r[block] {};
+    void strip_on_input(unsigned frames, const float*& heard_l, const float*& heard_r);
     void keep_keys(unsigned frames); // this block's key sources, for the next
     static inline const float silence_block[block] {}; // the key of a track with nothing on it
     // Roadmap P4, delay compensation: each block's plan (plan_compensation(), at its start) of how late each line
@@ -993,6 +1068,7 @@ private:
     std::array<std::atomic<unsigned>, bus_count> pdc_buses {};
     unsigned click_wait = 0; // frames the metronome's blip waits, as late as what it counts
     float knob_pad_sum_l[block] {}, knob_pad_sum_r[block] {}; // compensating: kits' pads into Knob FX, held back apart
+    float pad_sub_sum_l[sub_count][block] {}, pad_sub_sum_r[sub_count][block] {}; // compensating: kits' pads sent to submixes, held back apart
     float pad_send_sum_l[bus_count][block] {}, pad_send_sum_r[bus_count][block] {}; // compensating: kits' pad sends, held back apart
     // Knob FX (parity phase 7): one effect the chosen tracks and kit pads go
     // through on their way to the master (`knob_in`, its twin, on the input
@@ -1009,6 +1085,11 @@ private:
     uint32_t knob_quiet = 0, knob_rung = 0; // frames its tail has been quiet, and has rung, since it was last fed
     float knob_l[block] {}, knob_r[block] {};
     float key_l[block] {}, key_r[block] {}, aside_l[block] {}, aside_r[block] {};
+    // Pad stems (StemRing::pads()): each pad stem's left and right for this block, from the kit's lanes, then at its
+    // track's level, pan and mute; the ring this block writes them to, when it takes pad stems.
+    std::unique_ptr<float[]> pad_stem_rows = std::make_unique<float[]>(size_t(StemRing::pad_most) * 2 * block);
+    StemRing* pad_stem_ring = nullptr;
+    float* pad_stem_row(unsigned n, unsigned side) { return pad_stem_rows.get() + size_t(2 * n + side) * block; }
     // Sidechain: the key heard by the detector (key_l / key_r) and, aside, what joins the master after the ducking.
     // key_pad_l / key_pad_r: a key that leaves its track before the chain, one kit pad as the sampler left it, or
     // (melodee-hdslave) a plug-in's key port as it played it.
@@ -1069,6 +1150,12 @@ private:
     std::atomic<bool> in_song {false};
     std::atomic<unsigned> bar_now {0};
     std::array<std::atomic<float>, track_count> meters {};
+    std::array<std::atomic<float>, strip_channels> peak_l {}, peak_r {}, reductions {}; // strip_meter()
+    std::atomic<int> spectrum_tap {-1}; // set_spectrum_tap()
+    ScopeRing scope;
+    void spectrum_put(unsigned n, const float* l, const float* r, unsigned frames) {
+        if (int(n) == spectrum_tap.load(std::memory_order_relaxed)) scope.put(l, r, frames);
+    }
     std::atomic<int> tap_track {-1};
     TapBoard tap_board;
     std::atomic<float> output_peak {0};

@@ -22,7 +22,7 @@ public:
     // Sidechain's key track as it joins after the ducking and as the detector hears it; a kit's pads into Knob FX
     // and the Sidechain's key pad (both leave their track before its chain); kits' pad sends into each bus (the same).
     enum : unsigned { track0 = 0, loop0 = 16, bus0 = 20, knob = 24, direct = 25, aside = 26, key = 27, knob_pads = 28, key_pad = 29,
-                      pad_sends0 = 30, count = 34 };
+                      pad_sends0 = 30, pad_subs0 = 34, count = 42 };
 
     // `lines` false: none made (a print host's one track meets nothing): run() then passes the sound through.
     explicit CompensationLines(bool lines = true) : memory(lines ? new float[size_t(count) * 2 * most]() : nullptr) {}

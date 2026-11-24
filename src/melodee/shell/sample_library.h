@@ -12,6 +12,7 @@
 #include "melodee/model/looper.h"
 #include "melodee/model/sampler.h"
 #include "melodee/shell/load_pool.h"
+#include "melodee/shell/stem_writer.h"
 #include "melodee/shell/sample_cache.h"
 #include "melodee/shell/stems.h"
 #include "melodee/shell/stream_holds.h"
@@ -195,15 +196,24 @@ public:
     // song). `frames`: how long it should run, to make room up front.
     bool recall(unsigned slot, const RecallOptions& options) { return recalls.push({uint16_t(slot), options}); }
     // Roadmap P4: a mixdown's file as 32-bit float (bits 32) or integer PCM (24, 16: dithered); stems beside it (each
-    // track and bus the engine host's StemRing takes, as Melodee/Stems/<name>/NN <stem>.wav, the mix as Mix.wav).
+    // track and bus the engine host's StemRing takes, as Melodee/Stems/<name>/NN <stem>.wav, the mix as Mix.wav), and
+    // its pad stems (StemRing::pads()): pad stem n as Melodee/Stems/<name>/<pad_paths[n]>.wav, the kit's pads in a
+    // folder of their own. `more`: a later pass of the song for the pad stems the first could not take, into the last
+    // stems' folder, no mix; `pass` of `passes`. A silent pad stem's file is not kept.
     struct Render {
         bool to_file = false; uint16_t slot = 0; uint32_t frames = 0; char name[40] {};
         uint8_t bits = 32;
-        bool stems = false;
+        bool stems = false, more = false;
+        uint8_t pass = 1, passes = 1;
         std::array<std::array<char, 24>, StemRing::stem_count> stem_names {};
+        std::array<std::array<char, 72>, StemRing::pad_most> pad_paths {};
+        std::array<uint8_t, StemRing::pad_most> pad_tracks {}; // each pad stem's track (its delay: StemRing::pad_delay)
     };
     bool render(const Render& job) { return renders.push(job); }
-    StemRing* stem_ring(); // MIDI thread: made the first time stems are wanted (21 MB), kept after
+    StemRing* stem_ring(); // MIDI thread: made the first time stems are wanted, kept after
+    // Stems: 1 once a pass's files are all written and closed, -1 when it failed or was stopped, 0 meanwhile (a
+    // render popped). The MIDI thread starts the next pass on 1.
+    int stems_result() const { return stems_done_.load(std::memory_order_acquire); }
     std::string card() const; // the card's top folder; empty without one
 
     // Stems (shell/stems.h, shell/sample_library_stems.cpp). MIDI thread: slot `source`'s sample separated into its
@@ -449,10 +459,15 @@ private:
     std::unique_ptr<SampleData> render_data;
     WavStream render_file;
     std::unique_ptr<StemRing> stems_ring;                       // roadmap P4
-    std::array<WavStream, StemRing::stem_count> stem_files;
-    uint32_t stem_open = 0;                                     // the stems being written, a bit each
+    std::unique_ptr<StemWriter> stem_writer;                    // the stems' files, written on a thread of its own
+    std::string stems_folder;                                   // the last stems' folder: a later pass writes there
+    std::vector<std::string> stem_paths;                        // each file the writer has, by the ring's rows, then the mix
+    bool stems_open = false, stems_delayed = false, stems_closing = false, stems_cancelled = false, stems_failed = false;
+    std::atomic<int> stems_done_ {0};
     std::vector<float> stem_chunk;
-    void drain_stems(bool last);
+    bool open_stems(const std::string& folder);
+    void drain_stems();
+    void close_stems(); // once the writer is done: the files closed, silent pad stems gone, said
     std::string render_path;
     std::vector<float> render_chunk;
     std::vector<std::unique_ptr<SampleData>> owned; // service thread: every sample the audio thread may hold

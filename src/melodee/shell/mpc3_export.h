@@ -35,6 +35,7 @@ struct Mpc3Export {
     unsigned skipped_tracks = 0; // tracks not written: plug-in tracks with no prints
     unsigned skipped_pads = 0;   // pads, layers or zones not written: not a WAV file (an SF2's, a FLAC), past eight layers
     unsigned missing = 0;        // WAV files not where the project says
+    unsigned mixer = 0;          // the mixer's settings not carried (model/project.h mixer_left_out())
 };
 
 // Writes <folder>/<name>.xpj and <folder>/<name>_[ProjectData]/. Empty on success. Reads and copies files:

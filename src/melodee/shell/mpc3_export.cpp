@@ -590,6 +590,7 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
                                 const std::string& name, Mpc3Export& report, const PrintTable* prints, const std::string& prints_dir,
                                 const std::string& audio_dir) {
     report = Mpc3Export {};
+    report.mixer = mixer_left_out(project, true); // strips, a submix's name, sends and chain, bus mutes: not carried
     const juce::var doc = read_template();
     const auto& data = field(doc, "data");
     if (!data.isObject() || !field(doc, "keygroupTrack").isObject()) return "MPC 3 template unreadable";
@@ -782,8 +783,16 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
             std::vector<std::string> used;
             for (unsigned n = 0; n < mpc_pads; ++n) {
                 juce::var instrument = field(doc, "drumPad").clone();
+                // Into its program, as MPC 3's own kits' pads (destination 0; the template's pads, from an imported
+                // MPC Sample project, say 1, which MPC 3 reads as Submix 1, past the track's own channel).
+                const auto& route = field(field(instrument, "mixable"), "audioRoute");
+                put(route, "destination", whole(0));
                 if (n < sampler_pads && !plans[n].drum.empty() && fill_layers(instrument, plans[n].drum, false, files, used, report)) {
                     const auto& pad = track.pads[n];
+                    if (pad.out) { // sent to a submix: MPC 3's pad output (destination 1, the submix's index)
+                        put(route, "destination", whole(1));
+                        put(route, "audioRouteSubIndex", whole(int((pad.out - 1u) % sub_count)));
+                    }
                     fill_sound(instrument, pad, track.pad_muted(n), pad.pitch, pad.play == PadPlay::OneShot);
                     put(instrument, "triggerMode", whole(pad.play == PadPlay::OneShot ? 0 : 1));
                     const auto& first = plans[n].drum.front();
@@ -820,6 +829,34 @@ std::string export_mpc3_project(const Project& project, const PatternBank& patte
     }
     if (written.empty()) return "Nothing to export";
     for (const auto& w : written) report.tracks += w.pad < 0 && !w.audio && project.tracks[w.index].engine != EngineKind::Midi;
+
+    // The mixer (melodee-sample docs/MIXER_PLAN.md): a track sent to a submix goes to MPC 3's (its audioRoute
+    // destination 1, the submix's index; 2 is Out 1/2), and each submix a track plays into gets its level, pan, mute
+    // and solo, on its bus track and in the mixer's list, as MPC 3 keeps both.
+    std::array<bool, sub_count> sub_used {};
+    for (const auto& w : written) { // a kit's pads sent to submixes (put on their instruments above)
+        const auto& track = project.tracks[w.index];
+        if (w.pad >= 0 || w.audio || track.engine != EngineKind::Sampler) continue;
+        for (const auto& pad : track.pads) if (pad.used() && pad.out) sub_used[(pad.out - 1u) % sub_count] = true;
+    }
+    for (const auto& w : written) {
+        const auto& track = project.tracks[w.index];
+        if (!track.mix.out || track.engine == EngineKind::Midi) continue;
+        const unsigned s = (track.mix.out - 1u) % sub_count;
+        const auto& route = field(field(field(w.track, "program"), "mixable"), "audioRoute");
+        put(route, "destination", whole(1));
+        put(route, "audioRouteSubIndex", whole(int(s)));
+        sub_used[s] = true;
+    }
+    const auto* submix_list = field(field(data, "mixer"), "submixes").getArray();
+    for (unsigned s = 0; s < sub_count; ++s) {
+        if (!sub_used[s]) continue;
+        const auto& mix = project.subs[s].mix;
+        const std::string bus_name = "Submix " + std::to_string(s + 1);
+        for (auto& b : buses)
+            if (b.first == bus_name) { put(b.second, "mute", mix.mute); program_mix(field(b.second, "program"), mix); }
+        if (submix_list && int(s) < submix_list->size()) program_mix((*submix_list)[int(s)], mix);
+    }
 
     // Every name, as MPC 3 keys its clips: sorted, the buses among them.
     std::vector<std::string> names;
