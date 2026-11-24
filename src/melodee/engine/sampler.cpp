@@ -21,6 +21,21 @@ SamplerEngine::SamplerEngine() {
     for (unsigned n = 0; n < Count; ++n) set_param(int(n), info.params[n].initial);
 }
 
+void SamplerEngine::set_pad(unsigned pad, const PadSound& sound) {
+    if (pad >= sampler_pads) return;
+    const auto output = [](const PadSound& p) { return p.out <= sub_outs && p.used() ? unsigned(p.out) : 0u; };
+    const unsigned before = output(pads[pad]), after = output(sound);
+    if (before != after) {
+        if (before && --sub_members[before - 1] == 0) sub_routes &= uint8_t(~(1u << (before - 1)));
+        if (after) {
+            ++sub_members[after - 1];
+            sub_routes |= uint8_t(1u << (after - 1));
+        }
+    }
+    pads[pad] = base[pad] = sound;
+    mark(pad);
+}
+
 void SamplerEngine::set_param(int id, int value) {
     if (id < 0 || id >= Count) return;
     const auto& info = engine_info(EngineKind::Sampler).params[id];

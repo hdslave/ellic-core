@@ -1855,7 +1855,8 @@ void EngineHost::plan_compensation() {
         if (slot.freeze && slot.freeze->clips[slot.pattern % pattern_count]) own[t] = slot.freeze->tap == PrintTap::PostFx ? 0 : chain_latency(t);
         plan.tracks = std::max(plan.tracks, own[t] + through[t]);
         if (slot.engine == &slot.sampler) // its pads sent to a submix: that submix's chain late
-            for (unsigned n = 0; n < sub_count; ++n) if ((slot.sampler.routes() >> n) & 1) plan.tracks = std::max(plan.tracks, chain_latency(sub_chain(n)));
+            for (unsigned routes = slot.sampler.routes(); routes; routes &= routes - 1)
+                plan.tracks = std::max(plan.tracks, chain_latency(sub_chain(unsigned(__builtin_ctz(routes)))));
     }
     std::array<unsigned, loop_tracks> loop_own {};
     if (loops.on())
@@ -3271,8 +3272,11 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
         for (unsigned b = 0; b < bus_count; ++b) // pad sends: only what the last block wrote needs clearing
             if ((slot.send_pad_fed >> b) & 1) { std::fill(slot.pad_sends->l[b], slot.pad_sends->l[b] + block, 0.0f); std::fill(slot.pad_sends->r[b], slot.pad_sends->r[b] + block, 0.0f); }
         slot.send_pad_fed = 0;
-        for (unsigned n = 0; n < sub_count; ++n) // pads sent to submixes: as the sends
-            if ((slot.sub_pad_fed >> n) & 1) { std::fill(slot.pad_subs->l[n], slot.pad_subs->l[n] + block, 0.0f); std::fill(slot.pad_subs->r[n], slot.pad_subs->r[n] + block, 0.0f); }
+        for (unsigned fed = slot.sub_pad_fed; fed; fed &= fed - 1) { // pads sent to submixes: as the sends
+            const unsigned n = unsigned(__builtin_ctz(fed));
+            std::fill(slot.pad_subs->l[n], slot.pad_subs->l[n] + block, 0.0f);
+            std::fill(slot.pad_subs->r[n], slot.pad_subs->r[n] + block, 0.0f);
+        }
         slot.sub_pad_fed = 0;
         slot.pad_routes = slot.engine == &slot.sampler ? slot.sampler.routes() : 0;
         slot.print_fed = false; // freeze plan F2b: this block's print, from the first run a voice sounds in
@@ -3416,7 +3420,8 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
     for (unsigned t = 0; t < track_count; ++t)
         if (slots[t].kind != EngineKind::None) {
             if (slots[t].out) submixes[(slots[t].out - 1) % sub_count].members |= uint16_t(1u << t);
-            for (unsigned n = 0; n < sub_count; ++n) if ((slots[t].pad_routes >> n) & 1) submixes[n].members |= uint16_t(1u << t); // a pad of it
+            for (unsigned routes = slots[t].pad_routes; routes; routes &= routes - 1)
+                submixes[unsigned(__builtin_ctz(routes))].members |= uint16_t(1u << t); // a pad of it
         }
     std::fill(knob_l, knob_l + frames, 0.0f); std::fill(knob_r, knob_r + frames, 0.0f);
     if (pdc.on) { std::fill(knob_pad_sum_l, knob_pad_sum_l + frames, 0.0f); std::fill(knob_pad_sum_r, knob_pad_sum_r + frames, 0.0f); }
@@ -3652,8 +3657,8 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
                 }
                 // A kit's pads sent to submixes: each after its own chain, at the track's level and pan, muted with it, into
                 // its submix (compensating: held back apart, below); they left before the track's chain and strip.
-                for (unsigned n = 0; n < sub_count; ++n) {
-                    if (!((slot.sub_pad_fed >> n) & 1)) continue;
+                for (unsigned fed = slot.sub_pad_fed; fed; fed &= fed - 1) {
+                    const unsigned n = unsigned(__builtin_ctz(fed));
                     float* to_l = pdc.on ? pad_sub_sum_l[n] : sub_l[n];
                     float* to_r = pdc.on ? pad_sub_sum_r[n] : sub_r[n];
                     for (unsigned f = 0; f < frames; ++f) {
@@ -3692,8 +3697,8 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
     if (pdc.on) { // roadmap P4: kits' pads sent to submixes as late as the tracks there, then into their submixes
         uint8_t routed = 0;
         for (const auto& slot : slots) routed |= slot.pad_routes;
-        for (unsigned n = 0; n < sub_count; ++n) {
-            if (!((routed >> n) & 1)) continue;
+        for (unsigned routes = routed; routes; routes &= routes - 1) {
+            const unsigned n = unsigned(__builtin_ctz(routes));
             compensate(CompensationLines::pad_subs0 + n, pad_sub_sum_l[n], pad_sub_sum_r[n], frames);
             for (unsigned f = 0; f < frames; ++f) { sub_l[n][f] += pad_sub_sum_l[n][f]; sub_r[n][f] += pad_sub_sum_r[n][f]; }
             submixes[n].fed = true;

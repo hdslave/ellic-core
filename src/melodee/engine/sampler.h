@@ -60,7 +60,7 @@ public:
     void set_pager(StreamPager* streams) { pager = streams; } // nullptr: instruments' frames are all safe to read (tests)
     // A pad's sound. What the pad plays now hears it too (at the next render, gliding there: refresh), while it
     // plays the same sample: its level, pan, tune, envelopes, filter, speed, play mode, region and loop.
-    void set_pad(unsigned pad, const PadSound& sound) { if (pad < sampler_pads) { pads[pad] = base[pad] = sound; mark(pad); } }
+    void set_pad(unsigned pad, const PadSound& sound);
     bool pad_used(unsigned pad) const { return pad < sampler_pads && pads[pad].used(); } // a sample on it
     // Round 3 "instrument C": the track's zone trims (model/sampler.h), as a whole or one; a zone of pad `pad`
     // at UINT32_MAX lets every trim of the pad go. A zone sounding hears its trim at once.
@@ -159,11 +159,7 @@ public:
     static constexpr unsigned sub_outs = 8;
     void set_sub_out(unsigned n, float* l, float* r) { if (n < sub_outs) { sub_l[n] = l; sub_r[n] = r; } }
     unsigned subs_fed() const { return sub_used; } // a bit a submix: the last render put something there
-    uint8_t routes() const {                          // a bit a submix a pad with a sound is sent to
-        uint8_t bits = 0;
-        for (const auto& pad : pads) if (pad.out && pad.out <= sub_outs && pad.used()) bits |= uint8_t(1u << (pad.out - 1));
-        return bits;
-    }
+    uint8_t routes() const { return sub_routes; } // a bit a submix a pad with a sound is sent to
     // Knob FX (parity phase 7): the voices of these pads (a bit a pad) play
     // into the host's l / r instead, after their own chain and punch, added to
     // what is there, for the host to put through Knob FX. No bits: none. Like
@@ -418,6 +414,8 @@ private:
     float* sub_l[sub_outs] {};
     float* sub_r[sub_outs] {};
     unsigned sub_used = 0;
+    std::array<unsigned, sub_outs> sub_members {}; // only set_pad changes a pad's sample or output
+    uint8_t sub_routes = 0;
     int routed(int pad) const { // the submix the pad plays into, or -1: the kit
         if (pad < 0 || pad >= int(sampler_pads)) return -1;
         const unsigned out = pads[size_t(pad)].out;
