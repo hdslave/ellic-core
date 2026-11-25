@@ -630,6 +630,8 @@ private:
     void stop_track(unsigned t); // a follow action's STOP, or off: what it holds lets go, and it is silent
     FollowDice dice;
     uint16_t scene_tempo = 0; // a scene's tempo waiting for the bar its patterns launch on (0 none)
+    uint16_t scene_mute_set = 0, scene_mute_on = 0; // a scene's mutes waiting for that bar: the tracks, those muted
+    void scene_mutes_now(); // and now
     // Roadmap P5: the song's tempo lane where the song plays now (0: none, or not the song), worked out each tick.
     uint16_t lane_tempo = 0;
     void follow_lane();

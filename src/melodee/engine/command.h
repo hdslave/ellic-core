@@ -33,6 +33,7 @@ struct Command {
         Chained,     // roadmap P5: track, value = it plays a pattern chain (its patterns' follow actions wait)
         EditLoop,    // track, position = first tick, index | value << 16 = ticks (0: the whole pattern): an editor's loop
         SceneTempo,  // roadmap P5: value = a scene's tempo (tenths of a BPM), taking over on the bar its patterns launch
+        SceneMutes,  // index = the tracks a scene sets the mute of, value = those it mutes (a bit a track), on that bar too
         SongTempo,   // roadmap P5: the song's tempo lane, point `index`: position = its bar, value = tempo, pattern = ramp
         SongTempoCount, // value = the lane's points in use
         Tempo,       // value = tenths of a BPM

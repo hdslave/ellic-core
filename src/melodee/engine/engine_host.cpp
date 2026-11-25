@@ -996,7 +996,11 @@ void EngineHost::apply(const Command& c) {
         slot.sends[c.index % bus_count] = std::clamp<int>(c.value, 0, 100) / 100.0f;
         if (mods_on) mod_note(c.track % track_count, motion_send(c.index), 0, slot.mix_sends[c.index % bus_count], true);
         break;
-    case Type::Mute: slot.mute = c.value != 0; midi_silenced(); break; // Mute Notes: heard on, its notes ring (issue 27)
+    case Type::Mute: // Mute Notes: heard on, its notes ring (issue 27)
+        slot.mute = c.value != 0;
+        scene_mute_set = uint16_t(scene_mute_set & ~(1u << (c.track % track_count))); // by hand after a scene's: the hand's
+        midi_silenced();
+        break;
     case Type::Solo: slot.solo = c.value != 0; midi_silenced(); break;
     case Type::PatternData:
         if (c.data) {
@@ -1062,6 +1066,13 @@ void EngineHost::apply(const Command& c) {
         if (running && !song_mode) scene_tempo = uint16_t(std::clamp<int>(c.value, 300, 3000));
         else { global_tempo = uint16_t(std::clamp<int>(c.value, 300, 3000)); scene_tempo = 0; follow_tempo(); }
         break;
+    case Type::SceneMutes: { // the mutes a scene keeps: on the bar its patterns launch on; stopped, at once
+        const uint16_t tracks = uint16_t(c.index & ((1u << track_count) - 1));
+        scene_mute_set = uint16_t(scene_mute_set | tracks);
+        scene_mute_on = uint16_t((scene_mute_on & ~tracks) | (uint16_t(c.value) & tracks));
+        if (!running || song_mode) scene_mutes_now();
+        break;
+    }
     case Type::Play:
         if (running) break;
         mtc_off(); // MTC in places it right after (MtcIn locate)
@@ -1114,6 +1125,7 @@ void EngineHost::apply(const Command& c) {
         song_mode = false;
         in_song.store(false, std::memory_order_relaxed);
         if (scene_tempo) { global_tempo = scene_tempo; scene_tempo = 0; } // roadmap P5: a scene's, still waiting for its bar: with its patterns, below
+        scene_mutes_now(); // and its mutes
         follow_lane(); // roadmap P5: the project's tempo again
         for (unsigned t = 0; t < track_count; ++t) {
             positions_now[t].store(-1, std::memory_order_relaxed);
@@ -2050,6 +2062,7 @@ void EngineHost::bar_start() {
             plan_follow(t);
         }
         if (scene_tempo) { global_tempo = scene_tempo; scene_tempo = 0; } // roadmap P5: a scene's, with its patterns
+        scene_mutes_now(); // and its mutes
         follow_tempo(); // BPM per pattern: the one launched last leads
         return;
     }
@@ -2380,6 +2393,15 @@ bool EngineHost::solo_on() const {
     for (const auto& slot : slots) if (slot.soloing()) return true;
     for (unsigned s = 0; s < sub_count; ++s) if (sub_soloing(s)) return true;
     return false;
+}
+
+// A scene's mutes, kept for its bar (Type::SceneMutes), set now.
+void EngineHost::scene_mutes_now() {
+    if (!scene_mute_set) return;
+    for (unsigned t = 0; t < track_count; ++t)
+        if (scene_mute_set >> t & 1) slots[t].mute = (scene_mute_on >> t & 1) != 0;
+    scene_mute_set = scene_mute_on = 0;
+    midi_silenced();
 }
 
 void EngineHost::midi_silenced() {
@@ -2981,7 +3003,7 @@ void EngineHost::play_ahead(unsigned t, Slot& slot, bool seq) {
     slot.ahead_bar = slot.ahead_bar != UINT32_MAX && slot.ahead_bar <= tick_now ? UINT32_MAX : slot.ahead_bar;
     const uint32_t next_bar = (tick_now / bar + 1) * bar;
     uint32_t last = tick_now + lead;
-    if (song_mode || slot.chained || slot.off_queued) last = std::min(last, next_bar - 1); // off: nothing past its bar
+    if (song_mode || slot.chained || slot.off_queued || (scene_mute_set >> t & 1)) last = std::min(last, next_bar - 1); // off, or a scene's mute: nothing past its bar
     if (slot.follow_do && slot.follow_at > tick_now) last = std::min(last, slot.follow_at - 1);
     int64_t to = 0; // frames from this tick to `tk`
     for (uint32_t tk = tick_now; tk <= last; to += int64_t(std::lround(tick_samples(tk))), ++tk) {

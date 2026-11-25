@@ -752,7 +752,7 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
     }
     { // sequence links (model/scene_links.h): the scene in hand, the tracks off, each track's pattern in each scene
         at = w.begin("SEQL");
-        w.u8(1); // the section's version
+        w.u8(2); // the section's version: 2 adds the mutes kept in each scene
         w.u8(project.scene);
         uint16_t off = 0;
         unsigned listed = 0;
@@ -770,6 +770,17 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
             if (!any) continue;
             w.u8(uint8_t(t));
             for (auto v : track.in_scene) w.u8(v);
+        }
+        unsigned muted = 0; // version 2: each track's mutes, a bit a scene (Track::scene_mutes)
+        for (const auto& track : project.tracks) for (auto bits : track.scene_mutes) if (bits) { ++muted; break; }
+        w.u8(uint8_t(muted));
+        for (unsigned t = 0; t < track_count; ++t) {
+            const auto& track = project.tracks[t];
+            bool any = false;
+            for (auto bits : track.scene_mutes) any |= bits != 0;
+            if (!any) continue;
+            w.u8(uint8_t(t));
+            for (auto bits : track.scene_mutes) for (unsigned k = 0; k < 8; ++k) w.u8(uint8_t(bits >> (8 * k)));
         }
         w.end(at);
     }
@@ -891,6 +902,7 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
     unsigned file_version = 0;
     bool keygroups_known = false; // KGVR: saved since keygroup tracks
     bool links_known = false;     // SEQL: saved since sequence links
+    bool mutes_known = false;     // SEQL version 2: saved since scenes keep mutes
     std::array<std::bitset<pattern_count>, track_count> played_on; // KEPT: patterns whose punches may reach past their end
     if (data.size() < 8 || std::memcmp(data.data(), magic, 8)) return "not a Melodee project";
     auto project = std::make_unique<Project>();
@@ -1385,7 +1397,8 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
             if (!r.done()) scene.colour = uint8_t(std::min(r.u8(), 16u)); // older files end here: none
             if (r.ok && n < pattern_count) project->scenes[n] = scene;
         } else if (name == "SEQL") { // sequence links (model/scene_links.h); without it the scenes are columns (keep_columns)
-            if (r.u8() < 1) continue; // a later version would add after these
+            const unsigned seql = r.u8();
+            if (seql < 1) continue; // a later version would add after these
             links_known = true;
             project->scene = uint8_t(r.u8() % pattern_count);
             unsigned off = r.u16(), listed = r.u8();
@@ -1395,6 +1408,16 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
                 std::array<uint8_t, pattern_count> values {};
                 for (auto& v : values) { v = uint8_t(r.u8()); if (v != scene_off && v > pattern_count) v = 0; }
                 if (r.ok && t < track_count) project->tracks[t].in_scene = values;
+            }
+            if (seql >= 2 && r.ok && !r.done()) { // the mutes kept in each scene; before, the mutes as saved (mutes_from_mix)
+                mutes_known = true;
+                const unsigned muted = r.u8();
+                for (unsigned k = 0; k < muted && r.ok; ++k) {
+                    unsigned t = r.u8();
+                    decltype(Track::scene_mutes) bits {};
+                    for (auto& b : bits) for (unsigned n = 0; n < 8; ++n) b |= uint64_t(r.u8()) << (8 * n);
+                    if (r.ok && t < track_count) project->tracks[t].scene_mutes = bits;
+                }
             }
         } else if (name == "PROG") { // the Prog layout's progression; without it none
             unsigned t = r.u8(), version = r.u8();
@@ -1695,6 +1718,7 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
     if (!keygroups_known) migrate_instrument_pads(*project, *patterns);
     // From before sequence links: each scene with notes, a name, tempo or colour plays its column, as it did.
     if (!links_known) keep_columns(*project, *patterns);
+    if (!mutes_known) mutes_from_mix(*project); // from before scenes kept mutes: each keeps the mute as saved
     for (unsigned t = 0; t < track_count; ++t) // freeze plan F3: takes only on audio tracks' patterns
         if (project->tracks[t].engine != EngineKind::Audio) for (auto& p : patterns->at[t]) p.audio = AudioRegion {};
     target = *project;
