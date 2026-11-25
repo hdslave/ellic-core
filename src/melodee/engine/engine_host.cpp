@@ -1080,6 +1080,7 @@ void EngineHost::apply(const Command& c) {
         drop_hits();
         for (auto& s : slots) { s.weighed = s.went = false; s.keys_weighed = {}; s.keys_went = {}; } // PRE and NEI start afresh
         tick_now = c.value == 1 ? 0 : c.position;
+        restart_ahead();
         arp_ticks = 0; until_arp = 0; // the repeats line up with the bar, so their swing falls with the sequencer's
         arp_origin = tick_now;         // and Seq Record writes each where it fell (roadmap P1)
         song_mode = c.value == 1; song_bar_now = c.index;
@@ -1164,6 +1165,7 @@ void EngineHost::apply(const Command& c) {
         if (!running || song_mode) break;
         sync_stop(frame_now); // the clocks go on from the new place: Song Position and Continue
         tick_now = c.position; until_tick = 0; // the new place plays at once
+        restart_ahead();
         arp_ticks = 0; until_arp = 0; arp_origin = tick_now; // the repeats from it
         loop_restart = true;
         for (auto& s : slots) { s.start = 0; for (auto& skip : s.skips) skip.key = -1; }
@@ -2194,6 +2196,7 @@ void EngineHost::mtc_place(double seconds) {
         for (unsigned t = 0; t < track_count; ++t) fit_kept(t); // pad-fx C: as Locate
     }
     tick_count.store(tick_now, std::memory_order_relaxed);
+    restart_ahead();
     mtc_on = running; mtc_at = seconds; mtc_error = 0; speed = 1; mtc_misses = 0;
     mtc_now.store(mtc_on, std::memory_order_relaxed);
     mtc_placed.fetch_add(1, std::memory_order_relaxed);
@@ -2986,6 +2989,16 @@ int64_t EngineHost::midi_early(unsigned t) const {
     if (!is_midi(t)) return 0;
     int ms = slots[t % track_count].base[midi_track::Delay];
     return ms < 0 ? int64_t(std::lround(-ms * dsp::sample_rate() / 1000.0)) : 0;
+}
+
+// Where the read-ahead had got to is the old place's: from a new one (Play from the top, Locate, MTC) it starts again
+// at tick_now. Else, with the pattern's start the same (0), a track stopped further on skipped every tick until the
+// playhead got back there: its notes came bars late after Play (issue 59).
+void EngineHost::restart_ahead() {
+    for (auto& s : slots) {
+        s.ahead_next = 0; s.ahead_start = s.ahead_bar = UINT32_MAX;
+        s.ahead_pattern = s.ahead_queued = 255;
+    }
 }
 
 void EngineHost::play_ahead(unsigned t, Slot& slot, bool seq) {

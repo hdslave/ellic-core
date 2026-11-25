@@ -592,6 +592,7 @@ private:
     void tick();       // plays whatever falls on this clock tick, then moves on
     void play_tick_notes(unsigned t, Slot& slot, uint32_t at_tick, unsigned pattern_index, uint32_t start, bool seq);
     void play_ahead(unsigned t, Slot& slot, bool seq);
+    void restart_ahead(); // a new place (Play, Locate, MTC): every MIDI track's read-ahead from it (issue 59)
     int64_t midi_early(unsigned t) const; // a MIDI track's negative DELAY, frames
     int64_t midi_shift = 0;               // frames this tick's MIDI goes from its frame (play_ahead())
     uint64_t seq_frame() const { return uint64_t(std::max<int64_t>(0, int64_t(frame_now + block_at) + midi_shift)); }
