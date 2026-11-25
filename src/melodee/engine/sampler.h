@@ -90,7 +90,7 @@ public:
     bool pad_muted(unsigned pad) const { return pad < sampler_pads && ((muted[pad / 64] >> (pad % 64)) & 1); }
     // A region of a sample on no pad, for Chop's audition (plays one shot). With kit pad `pad` holding the sample, at
     // that pad's speed and pitch (Warp, Semi, Fine) as its slice's pad plays it; -1 as the file is.
-    void audition(uint16_t sample, uint32_t start, uint32_t end, int velocity, int pad = -1);
+    void audition(uint16_t sample, uint32_t start, uint32_t end, int velocity, int pad = -1, bool reverse = false);
     // A sample is about to change: whatever plays it stops now.
     void sample_gone(uint16_t sample);
     // A kit pad shifted by `semitones`, its filter at `cutoff` (0..100; -1 its

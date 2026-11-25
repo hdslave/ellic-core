@@ -9235,6 +9235,67 @@ void slice_hit_notes() {
     CHECK(render(whole, pad_note(key, 0, -1, 1)) == render(whole, key));
     chops[7] = &chop;
 
+    // A slice's own Reverse (Chop's Shift + Loop): that slice alone plays backwards; on a reversed pad it plays forwards.
+    {
+        PadSound back_pad = slice_sound(whole, 10000, 20000, 0);
+        back_pad.reverse = true;
+        const auto backwards = render(back_pad, key);
+        CHECK(loudest(backwards) > 0.05f && backwards != hit);
+        chop.reverse[1] = true;
+        CHECK(render(whole, pad_note(key, 0, -1, 1)) == backwards && render(whole, 0, 1) == backwards);
+        CHECK(render(whole, pad_note(key, 0, -1, 0)) == render(slice_sound(whole, 0, 10000, 0), key)); // the others as the pad
+        PadSound reversed_pad = whole;
+        reversed_pad.reverse = true;
+        CHECK(render(reversed_pad, pad_note(key, 0, -1, 1)) == hit); // the pad's Reverse turned round again
+        CHECK(chop_slice_sound(reversed_pad, chop, 0, 0).reverse && !chop_slice_sound(reversed_pad, chop, 1, 0).reverse);
+        auto& kit_track = project->tracks[2];
+        const uint8_t last_was = kit_track.last_pad;
+        kit_track.last_pad = 4;
+        CHECK(chop_kit_pad(kit_track, 7) == 4 && chop_kit_pad(kit_track, 9) == -1);
+        CHECK(slice_heard_reversed(kit_track, 7, chop, 1) && !slice_heard_reversed(kit_track, 7, chop, 0));
+        kit_track.pads[4].reverse = true;
+        CHECK(!slice_heard_reversed(kit_track, 7, chop, 1) && slice_heard_reversed(kit_track, 7, chop, 0));
+        kit_track.pads[4].reverse = false;
+        kit_track.last_pad = 0; // A01 holds another sample: the first pad holding it
+        CHECK(chop_kit_pad(kit_track, 7) == 4);
+        kit_track.last_pad = last_was;
+        chop.reverse[1] = false;
+        // Chop's audition with no kit pad (as the file is) backwards too.
+        auto heard = [&](bool reverse) {
+            SamplerEngine e;
+            e.set_samples(&table);
+            e.audition(7, 10000, 20000, 100, -1, reverse);
+            std::vector<float> out, l(128), r(128);
+            for (unsigned block = 0; block < 40; ++block) {
+                std::fill(l.begin(), l.end(), 0.0f); std::fill(r.begin(), r.end(), 0.0f);
+                e.render_stereo(l.data(), r.data(), 128);
+                out.insert(out.end(), l.begin(), l.end());
+            }
+            return out;
+        };
+        CHECK(loudest(heard(true)) > 0.05f && heard(true) != heard(false));
+        // The flag goes with its slice through a cut, a merge and a new chop; a cut in a reversed slice is reversed too.
+        Slices s;
+        s.whole(0, 40000);
+        CHECK(s.add(10000, 40000) && s.add(20000, 40000) && !s.any_reversed());
+        s.reverse[1] = true;
+        Slices was = s;
+        CHECK(!was.same(Slices {}) && s.same(was));
+        was.reverse[1] = false;
+        CHECK(!s.same(was));
+        CHECK(s.add(15000, 40000) && s.count == 4 && !s.reversed(0) && s.reversed(1) && s.reversed(2) && !s.reversed(3));
+        CHECK(s.add(5000, 40000) && s.reversed(2) && s.reversed(3) && !s.reversed(4)); // the slices after it move up
+        s.remove(2); // slice 3 into slice 2 (not reversed): it keeps its own
+        CHECK(s.count == 4 && !s.reversed(1) && s.reversed(2) && !s.reversed(3) && !s.reverse[4]);
+        Slices again;
+        again.whole(0, 40000);
+        CHECK(again.add(15200, 40000) && again.add(30000, 40000));
+        again.keep_reverse(s, hand_reach); // 15200 is 200 frames from the reversed slice's 15000
+        CHECK(!again.reversed(0) && again.reversed(1) && !again.reversed(2));
+        s.whole(0, 0);
+        CHECK(!s.any_reversed());
+    }
+
     // The host: the chop the project keeps, loaded; its pattern's slice hit as TO PADS' pad playing a plain note.
     project->chops.edit(7).slices = chop;
     project->chops.edit(7).to = 44100;
@@ -9279,6 +9340,15 @@ void slice_hit_notes() {
     const auto& laid = export_project->tracks[2].pads;
     CHECK(laid[5].start == 0 && laid[5].end == 10000 && laid[5].sample == 7);  // slice 1, hit first
     CHECK(laid[6].start == 20000 && laid[6].end == 0 && !laid[7].used());      // slice 3; slice 9 is past three: dropped
+    CHECK(!laid[5].reverse && !laid[6].reverse);
+    {
+        auto back_project = std::make_unique<Project>(*project);
+        auto back_bank = std::make_unique<PatternBank>(*bank);
+        Slices backwards = chop;
+        backwards.reverse[2] = true; // slice 3 reversed on its own: laid as a reversed pad
+        CHECK(lay_slice_hits(*back_project, *back_bank, [&](unsigned) -> const Slices& { return backwards; }) == 0);
+        CHECK(!back_project->tracks[2].pads[5].reverse && back_project->tracks[2].pads[6].reverse);
+    }
     CHECK(moved[0].key == key && moved[1].key == key + 1 && moved[2].key == key + 2 && moved[2].velocity == 50);
     // No pad free: the hits play their pad's whole region, counted.
     auto full = std::make_unique<Project>(*project);

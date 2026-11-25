@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #pragma once
+#include "melodee/model/chop_slices.h"
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -212,6 +213,12 @@ inline PadSound slice_sound(const PadSound& parent, uint32_t start, uint32_t end
         if (const uint16_t tempo = beats_tempo(parent.beats, region)) one.own_tempo = tempo;
     }
     one.beats = 0;
+    return one;
+}
+// Slice n of `chop` as a pad of its own (slice_sound), its own Reverse turning it round from the pad's.
+inline PadSound chop_slice_sound(const PadSound& parent, const Slices& chop, unsigned n, uint32_t region) {
+    PadSound one = slice_sound(parent, chop.start[n % max_slices], chop.stop[n % max_slices], region);
+    if (chop.reversed(n)) one.reverse = !one.reverse;
     return one;
 }
 // Chop's audition of the slice [start, end) at `parent`'s speed and pitch (Warp, the tempo it was played at, Semi

@@ -912,7 +912,7 @@ void EngineHost::apply(const Command& c) {
         if (slot.engine == &slot.sampler) {
             EngineCall call;
             call.op = EngineCall::Op::Audition; call.a = c.pad.sample; call.b = int32_t(c.pad.start); call.c = int32_t(c.pad.end);
-            call.d = (c.value & 0xff) | int(c.index & 0xff) << 8; // velocity; the kit pad + 1 whose speed it takes (0: none)
+            call.d = (c.value & 0xff) | int(c.index & 0xff) << 8 | int(c.pad.reverse) << 16; // velocity; the kit pad + 1 whose speed it takes (0: none); backwards
             if (!keep_call(slot, call)) make_call(c.track % track_count, slot, call);
         }
         break;
@@ -1354,7 +1354,7 @@ void EngineHost::make_call(unsigned t, Slot& slot, const EngineCall& c) {
     case Op::Control: e->control(c.a, c.b); break;
     case Op::Mod: e->set_mod(unsigned(c.a), ModRoute {uint8_t(c.b), uint8_t(c.c), int8_t(c.d)}); break;
     case Op::PlayPad: if (e == &slot.sampler) slot.sampler.play_pad(unsigned(c.a & 0xffff), c.b, c.c, c.d, ((c.a >> 16) & 0xff) - 1); break;
-    case Op::Audition: if (e == &slot.sampler) slot.sampler.audition(uint16_t(c.a), uint32_t(c.b), uint32_t(c.c), c.d & 0xff, ((c.d >> 8) & 0xff) - 1); break;
+    case Op::Audition: if (e == &slot.sampler) slot.sampler.audition(uint16_t(c.a), uint32_t(c.b), uint32_t(c.c), c.d & 0xff, ((c.d >> 8) & 0xff) - 1, (c.d >> 16) & 1); break;
     case Op::MovePad: slot.sampler.move_pad(unsigned(c.a), PadParam(c.b), c.c); break;
     case Op::RestorePad: slot.sampler.restore_pad(unsigned(c.a), PadParam(c.b)); break;
     case Op::RestorePads: slot.sampler.restore_pads(); break;

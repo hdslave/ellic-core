@@ -407,7 +407,7 @@ void SamplerEngine::refresh(Voice& v) {
     if (v.slice >= 0) { // a slice hit (issue 24): the pad's sound now over its slice as the chop has it now
         const Slices* chop = chops && own.used() && own.sample < sample_slots ? (*chops)[own.sample] : nullptr;
         if (!chop || unsigned(v.slice) >= chop->count) return; // its slice gone: it plays on as it was
-        layered = slice_sound(own, chop->start[size_t(v.slice)], chop->stop[size_t(v.slice)], region_frames(own, model_frames(own.sample)));
+        layered = chop_slice_sound(own, *chop, unsigned(v.slice), region_frames(own, model_frames(own.sample))); // its own Reverse too
         sound = &layered;
     }
     if (!sound->used() || sound->sample != v.slot) return;
@@ -650,14 +650,14 @@ void SamplerEngine::play(const PadSound& sound, int pad, int velocity, int semit
 void SamplerEngine::hit(int pad, int velocity, int semitones, int cutoff, int slice) {
     if (pad < 0 || pad >= int(sampler_pads) || pad_muted(unsigned(pad))) return;
     const auto& sound = pads[size_t(pad)];
-    // Issue 24, a slice hit: the pad's sound over that slice of its sample's chop (as TO PADS lays a slice, POLY), no
-    // linked pad; past the chop's end nothing. A sample with no chop plays the pad's own region.
+    // Issue 24, a slice hit: the pad's sound over that slice of its sample's chop (as TO PADS lays a slice, POLY: the
+    // slice's own Reverse with it), no linked pad; past the chop's end nothing. A sample with no chop plays the pad's
+    // own region.
     const Slices* chop = slice >= 0 && chops && sound.used() && sound.sample < sample_slots ? (*chops)[sound.sample] : nullptr;
     if (chop && chop->count) {
         if (unsigned(slice) >= chop->count) return;
         Voice& v = free_voice();
-        start(v, slice_sound(sound, chop->start[size_t(slice)], chop->stop[size_t(slice)], region_frames(sound, model_frames(sound.sample))),
-              pad, velocity, semitones, cutoff, -1);
+        start(v, chop_slice_sound(sound, *chop, unsigned(slice), region_frames(sound, model_frames(sound.sample))), pad, velocity, semitones, cutoff, -1);
         if (v.pad >= 0) v.slice = int8_t(slice);
         return;
     }
@@ -803,11 +803,12 @@ uint32_t SamplerEngine::model_frames(uint16_t slot) const {
     return data && !data->multi ? data->model_frames() : 0;
 }
 
-void SamplerEngine::audition(uint16_t sample, uint32_t from, uint32_t to, int velocity, int pad) {
+void SamplerEngine::audition(uint16_t sample, uint32_t from, uint32_t to, int velocity, int pad, bool reverse) {
     PadSound sound;
     const bool as_pad = pad >= 0 && pad < int(sampler_pads) && pads[size_t(pad)].used() && pads[size_t(pad)].sample == sample;
     if (as_pad) sound = slice_heard(pads[size_t(pad)], from, to, region_frames(pads[size_t(pad)], model_frames(sample)));
     sound.sample = sample; sound.start = from; sound.end = to;
+    sound.reverse = reverse; // a reversed slice heard on Chop with no kit pad to play it
     for (auto& v : voices) if (v.pad == int(sampler_pads)) v.choked = true; // one audition at a time
     if (sample == no_sample) return; // only that: the audition stops
     Voice& v = free_voice();
