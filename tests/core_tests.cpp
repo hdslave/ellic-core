@@ -8465,6 +8465,35 @@ void freeze_f2b() {
         CHECK(load_project(save_project(*project, *bank), *back, *back_bank, nullptr, nullptr, &read).empty() && !read.freeze[3].frozen());
     }
 
+    // A replacement print and its live path trade gain at the first frame and at Unfreeze. The
+    // same signal on both stays at unity throughout, including blocks picked up mid-fade.
+    {
+        PrintClip clip;
+        clip.hold_whole(std::vector<float>(2 * 384, 0.25f), uint32_t(rate), 384, PrintTail::Loop);
+        clip.replaces_live = true;
+        PrintPlayer player;
+        auto render = [&] {
+            std::array<float, 128> left {}, right {}, coverage {};
+            player.render(left.data(), right.data(), left.size(), nullptr, nullptr, coverage.data());
+            for (size_t n = 0; n < left.size(); ++n) {
+                CHECK(left[n] == 0.25f * coverage[n] && right[n] == left[n]);
+                CHECK(left[n] + 0.25f * (1.0f - coverage[n]) == 0.25f);
+            }
+            return coverage;
+        };
+        player.follow(&clip, 0, 0, 1024, rate);
+        const auto entering = render();
+        CHECK(entering.front() > 0 && entering.back() > entering.front() && entering.back() < 1);
+        render();
+        CHECK(render().front() == 1);
+        CHECK(player.position() == clip.frames); // exercise Unfreeze exactly at the loop seam
+        player.fade_all(rate);
+        const auto leaving = render();
+        CHECK(leaving.front() < 1 && leaving.back() < leaving.front() && leaving.back() > 0);
+        render();
+        CHECK(render().front() == 0 && !player.sounding());
+    }
+
     // A print's file: its frames on a page's boundary (a JUNK chunk before them), read back as written.
     {
         char name[] = "/tmp/melodee-print-XXXXXX";
