@@ -35,6 +35,7 @@ struct PrintClip {
     uint32_t rate = 0;      // the device's rate it was printed at
     PrintTail tail = PrintTail::Loop;
     bool resident = false;  // every frame in memory: read without the pager
+    bool replaces_live = false; // the live instrument and its chain stay running during this Post FX print
     struct Held { uint32_t from = 0, to = 0; }; // floats pinned while the clip lives, [from, to)
     std::vector<Held> held;
     std::vector<float> owned; // resident: the frames
@@ -58,6 +59,7 @@ struct FreezePack {
     // Freeze plan F2d: a deep freeze. Its plug-ins are let go once the engine sleeps, so nothing wakes it: hands
     // (pads, keys, the arp) play nothing and a pattern without a print stays silent.
     bool deep = false;
+    bool keep_live = false; // keep delivering notes and crossfade against the live Post FX path
     std::array<PrintClip*, pattern_count> clips {};
     std::vector<std::unique_ptr<PrintClip>> owned;
 };
@@ -84,7 +86,9 @@ public:
     uint32_t position() const { return voices[0].at; }
     // Adds `frames` of every voice into `left` / `right`; a print with pad sends adds them into `send_l` / `send_r`
     // [bus] (nullptr: not heard), and sends_fed() then has a bit for each bus it added to.
-    void render(float* left, float* right, unsigned frames, float* const* send_l = nullptr, float* const* send_r = nullptr);
+    // Replacement voices write their maximum audible gain per frame to coverage, when supplied.
+    void render(float* left, float* right, unsigned frames, float* const* send_l = nullptr, float* const* send_r = nullptr,
+                float* coverage = nullptr);
     unsigned sends_fed() const { return fed; }
     uint32_t underruns = 0; // runs that met a frame the pager had not pinned yet
     uint32_t waits = 0;     // the same just after a jump to where nothing is held (counted apart: not late, not yet)
@@ -95,6 +99,7 @@ private:
         uint32_t at = 0;
         int stream = -1;
         bool seeking = false, leaving = false;
+        bool ring_tail = false; // additive after the next pattern starts
         float gain = 1, step = 0; // a fade: step a frame
     };
     std::array<Voice, voice_count> voices {}; // [0] the main voice

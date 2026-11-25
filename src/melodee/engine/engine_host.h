@@ -542,6 +542,8 @@ private:
         std::bitset<256> hand {};
         float* print_l = nullptr;
         float* print_r = nullptr;
+        float print_coverage[block];
+        bool print_replaces_live = false;
         // Freeze plan F3: an AUDIO track's engine (its takes' voices), its patterns' takes, ones replaced whose voices
         // still fade, and the pattern tick it followed last (a jump when the next is not the one after).
         AudioTrackEngine audio;
