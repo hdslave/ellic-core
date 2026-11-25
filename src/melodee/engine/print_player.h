@@ -26,6 +26,7 @@ struct PrintVoice {
     uint32_t at = 0;
     int stream = -1;
     bool seeking = false, leaving = false;
+    bool ring_tail = false; // rings alongside the next pattern without replacing its live audio
     float gain = 1, step = 0;
 };
 

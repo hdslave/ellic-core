@@ -137,6 +137,7 @@ bool PrintPlayer::open_voice(Voice& voice, PrintClip& clip, uint32_t frame, bool
 void PrintPlayer::retire_main(bool ring, float rate) {
     auto& m = voices[0];
     if (!m.clip) return;
+    m.ring_tail = ring;
     if (ring && m.clip->spare && m.at >= m.clip->tail_from()) {
         auto* t = m.clip->spare;
         m.clip->spare = t->next;
@@ -260,7 +261,7 @@ void PrintPlayer::render(float* left, float* right, unsigned frames, float* cons
             if (ready) v.seeking = false;
             const float* d = c.data() + from;
             const float g0 = v.gain, st = v.step; // the fade as it runs here (the print's loop may end it)
-            float* replaced = c.replaces_live ? coverage : nullptr;
+            float* replaced = c.replaces_live && !v.ring_tail ? coverage : nullptr;
             if (v.step == 0 && v.gain == 1) {
                 for (unsigned k = 0; k < ready; ++k) { left[f + k] += d[s * k]; right[f + k] += d[s * k + 1]; }
                 if (replaced) std::fill_n(replaced + f, ready, 1.0f);

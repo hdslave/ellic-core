@@ -8494,6 +8494,26 @@ void freeze_f2b() {
         CHECK(render().front() == 0 && !player.sounding());
     }
 
+    // After launching a live pattern, a replacement print's Ring tail still sounds at full
+    // gain but leaves the live signal at unity. Test the fixed voice pool and the extra tail pool.
+    for (unsigned tail_frames : {128u, 2048u}) {
+        constexpr unsigned pass = 384;
+        PrintClip clip;
+        clip.hold_whole(std::vector<float>(2 * (pass + tail_frames), 0.25f), uint32_t(rate), pass, PrintTail::Ring);
+        clip.replaces_live = true;
+        CHECK(bool(clip.spare) == (tail_frames > pass));
+        PrintPlayer player;
+        player.follow(&clip, 0, 0, 1024, rate);
+        std::array<float, pass> left {}, right {}, coverage {};
+        player.render(left.data(), right.data(), pass, nullptr, nullptr, coverage.data());
+        CHECK(coverage.back() == 1);
+        player.follow(nullptr, 0, 0, 1024, rate);
+        left.fill(0); right.fill(0); coverage.fill(0);
+        player.render(left.data(), right.data(), 128, nullptr, nullptr, coverage.data());
+        for (unsigned i = 0; i < 128; ++i)
+            CHECK(left[i] == 0.25f && right[i] == 0.25f && coverage[i] == 0);
+    }
+
     // A print's file: its frames on a page's boundary (a JUNK chunk before them), read back as written.
     {
         char name[] = "/tmp/melodee-print-XXXXXX";
