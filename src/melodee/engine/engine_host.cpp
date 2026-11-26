@@ -1270,7 +1270,25 @@ double EngineHost::pattern_frames(uint32_t ticks) const {
 void EngineHost::print_tick(unsigned, Slot& slot, uint32_t at, uint32_t length) {
     const float rate = dsp::sample_rate();
     PrintClip* clip = slot.freeze->clips[slot.pattern % pattern_count];
-    if (clip && (clip->rate != uint32_t(std::lround(rate)) || std::fabs(double(clip->pass) - pattern_frames(length)) > 64)) clip = nullptr;
+    if (clip) {
+        constexpr double fit_slack = 64;
+        double frames = pattern_frames(length), swing_shift = 0;
+        if (slot.freeze->keep_live && swing != 50) {
+            // The print was rendered from tick zero. Check both the pass length at its live swing phase
+            // and the peak shift within it, since opposite swing phases can have the same total length.
+            constexpr uint32_t pair = 2 * sixteenth_ticks;
+            const uint32_t phase = (tick_now % pair + pair - at % pair) % pair;
+            if (phase) {
+                const double start = pattern_frames(phase);
+                frames = pattern_frames(phase + length) - start;
+                // The shift peaks at the end of the first interval in which one clock gains on the other.
+                const uint32_t peak = std::min(length, phase <= sixteenth_ticks ? sixteenth_ticks : pair - phase);
+                swing_shift = std::fabs(pattern_frames(peak) + start - pattern_frames(phase + peak));
+            }
+        }
+        if (clip->rate != uint32_t(std::lround(rate)) || std::fabs(double(clip->pass) - frames) > fit_slack ||
+            swing_shift > fit_slack) clip = nullptr;
+    }
     slot.print_on = clip != nullptr;
     if (!clip && !slot.freeze->deep) wake(slot); // freeze plan F2d: a deep freeze stays asleep (its plug-ins are gone)
     slot.print.follow(clip, at, pattern_frames(at), tick_samples(tick_now), rate, slot.freeze->keep_live);

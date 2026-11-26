@@ -8829,6 +8829,70 @@ void freeze_rapid_ring_repeats() {
     dsp::device_rate.store(saved_rate);
 }
 
+void freeze_short_swing() {
+    const unsigned rate = unsigned(dsp::sample_rate());
+    const unsigned fade = unsigned(std::ceil(PrintPlayer::fade_seconds * rate));
+    auto project = std::make_unique<Project>();
+    auto bank = std::make_unique<PatternBank>();
+    project->tempo = 3000; project->swing = 75;
+    synth(project->tracks[0], 0);
+    put(bank->at[0][0], 0, 60, 100);
+    bank->at[0][0].length = 2;
+    FreezeRig rig(*project, *bank);
+    const unsigned pass = unsigned(rig.host->tick_frame(2));
+    const unsigned short_half = unsigned(rig.host->tick_frame(sixteenth_ticks));
+    const unsigned long_half = unsigned(rig.host->tick_frame(2 * sixteenth_ticks));
+    auto* pack = new FreezePack;
+    pack->keep_live = true;
+    auto clip = std::make_unique<PrintClip>();
+    clip->hold_whole(std::vector<float>(2 * pass, 0.375f), rate, pass, PrintTail::Loop);
+    pack->clips[0] = clip.get();
+    pack->owned.push_back(std::move(clip));
+    rig.freeze(pack);
+    rig.send({Command::Type::Play});
+    CHECK(rig.play(short_half).back()[0] == 0.375f && rig.host->printing_tracks() == 1);
+    const auto handoff = rig.play(fade * 2);
+    CHECK(rig.host->printing_tracks() == 0 && rig.host->sleeping_tracks() == 0);
+    CHECK(handoff.front()[0] > 0.37f && handoff.back()[0] == 0.25f);
+    CHECK(rig.play(long_half - short_half - fade * 2).back()[0] == 0.25f);
+    const auto resume = rig.play(fade * 2);
+    CHECK(rig.host->printing_tracks() == 1 && resume.front()[0] < 0.255f && resume.back()[0] == 0.375f);
+    CHECK(rig.host->print_waits() == 0 && rig.host->print_underruns() == 0);
+}
+
+void freeze_swing_phase() {
+    const unsigned rate = unsigned(dsp::sample_rate());
+    auto project = std::make_unique<Project>();
+    auto bank = std::make_unique<PatternBank>();
+    project->tempo = 3000; project->swing = 75;
+    const auto sig = std::find_if(std::begin(time_signatures), std::end(time_signatures),
+                                  [](const auto& t) { return t.beats == 5 && t.unit == 16; });
+    CHECK(sig != std::end(time_signatures));
+    project->signature = uint8_t(sig - std::begin(time_signatures));
+    synth(project->tracks[0], 0);
+    for (unsigned p : {0u, 1u}) put(bank->at[0][p], 0, 60, 100);
+    bank->at[0][1].length = 2 * sixteenth_ticks; // the same total length in either swing phase
+    FreezeRig rig(*project, *bank);
+    const unsigned pass = unsigned(rig.host->tick_frame(2 * sixteenth_ticks));
+    const unsigned bar = project->bar_ticks();
+    const unsigned first = unsigned(rig.host->tick_frame(bar)), second = unsigned(rig.host->tick_frame(2 * bar));
+    auto* pack = new FreezePack;
+    pack->keep_live = true;
+    auto clip = std::make_unique<PrintClip>();
+    clip->hold_whole(std::vector<float>(2 * pass, 0.375f), rate, pass, PrintTail::Loop);
+    pack->clips[1] = clip.get();
+    pack->owned.push_back(std::move(clip));
+    rig.freeze(pack);
+    rig.send({Command::Type::Play});
+    CHECK(rig.play(512).back()[0] == 0.25f);
+    rig.send({Command::Type::Pattern, 0, 0, 0, 1});
+    CHECK(rig.play(first - 512).back()[0] == 0.25f);
+    CHECK(rig.play(512).back()[0] == 0.25f && rig.host->pattern_of(0) == 1 && rig.host->printing_tracks() == 0);
+    rig.send({Command::Type::Pattern, 0, 0, 0, 1}); // restart on the matching half of the swing pair
+    CHECK(rig.play(second - first - 512).back()[0] == 0.25f);
+    CHECK(rig.play(512).back()[0] == 0.375f && rig.host->printing_tracks() == 1);
+}
+
 void freeze_strip_unfreeze() {
     const float saved_rate = dsp::sample_rate();
     for (unsigned rate : {44100u, 48000u}) {
@@ -10258,6 +10322,8 @@ int main() {
     freeze_keep_live();
     freeze_launch_seams();
     freeze_rapid_ring_repeats();
+    freeze_short_swing();
+    freeze_swing_phase();
     freeze_strip_unfreeze();
     audio_track_playback();
     audio_warp();
