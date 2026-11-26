@@ -605,6 +605,7 @@ private:
     void tick();       // plays whatever falls on this clock tick, then moves on
     void play_tick_notes(unsigned t, Slot& slot, uint32_t at_tick, unsigned pattern_index, uint32_t start, bool seq);
     void play_ahead(unsigned t, Slot& slot, bool seq);
+    void restart_ahead(); // a new place (Play, Locate, MTC): every MIDI track's read-ahead from it (issue 59)
     int64_t midi_early(unsigned t) const; // a MIDI track's negative DELAY, frames
     int64_t midi_shift = 0;               // frames this tick's MIDI goes from its frame (play_ahead())
     uint64_t seq_frame() const { return uint64_t(std::max<int64_t>(0, int64_t(frame_now + block_at) + midi_shift)); }
@@ -649,6 +650,8 @@ private:
     void stop_track(unsigned t); // a follow action's STOP, or off: what it holds lets go, and it is silent
     FollowDice dice;
     uint16_t scene_tempo = 0; // a scene's tempo waiting for the bar its patterns launch on (0 none)
+    uint16_t scene_mute_set = 0, scene_mute_on = 0; // a scene's mutes waiting for that bar: the tracks, those muted
+    void scene_mutes_now(); // and now
     // Roadmap P5: the song's tempo lane where the song plays now (0: none, or not the song), worked out each tick.
     uint16_t lane_tempo = 0;
     void follow_lane();
