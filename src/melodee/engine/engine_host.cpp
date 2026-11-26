@@ -1798,9 +1798,11 @@ void EngineHost::plan_compensation() {
         unsigned engine_own = slot.engine == &slot.plugin && slot.plugin.attached() ? slot.plugin.attached()->latency() : 0;
         pdc_engines[t].store(engine_own, std::memory_order_relaxed);
         own[t] = chain_latency(t) + engine_own;
-        // Freeze plan F2b: a print starts on its pattern's first tick, its track's latency taken out; at Pre FX the
-        // chain after it is still late by its own.
-        if (slot.freeze && slot.freeze->clips[slot.pattern % pattern_count]) own[t] = slot.freeze->tap == PrintTap::PostFx ? 0 : chain_latency(t);
+        // A replacement can go live even while the pattern still has a print. Use the last tick's
+        // playback mode for this block, so a rejected print keeps its live plug-in/chain latency.
+        // Ordinary Pre FX prints still pass through the chain, which adds its own latency.
+        if (slot.freeze && (slot.freeze->keep_live ? slot.print_on : slot.freeze->clips[slot.pattern % pattern_count] != nullptr))
+            own[t] = slot.freeze->tap == PrintTap::PostFx ? 0 : chain_latency(t);
         plan.tracks = std::max(plan.tracks, own[t] + through[t]);
         if (slot.engine == &slot.sampler) // its pads sent to a submix: that submix's chain late
             for (unsigned n = 0; n < sub_count; ++n) if ((slot.sampler.routes() >> n) & 1) plan.tracks = std::max(plan.tracks, chain_latency(sub_chain(n)));

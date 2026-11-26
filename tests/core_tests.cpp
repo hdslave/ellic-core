@@ -8836,9 +8836,14 @@ void freeze_short_swing() {
     auto bank = std::make_unique<PatternBank>();
     project->tempo = 3000; project->swing = 75;
     synth(project->tracks[0], 0);
+    project->tracks[0].fx.slots[0] = {uint8_t(EffectKind::Plugin), false, {1, 0, 0, 0, 0, 0}};
+    LatePlugin delay;
+    delay.instrument = false;
+    delay.late = 96;
     put(bank->at[0][0], 0, 60, 100);
     bank->at[0][0].length = 2;
     FreezeRig rig(*project, *bank);
+    CHECK(rig.host->offer_plugin(1, &delay));
     const unsigned pass = unsigned(rig.host->tick_frame(2));
     const unsigned short_half = unsigned(rig.host->tick_frame(sixteenth_ticks));
     const unsigned long_half = unsigned(rig.host->tick_frame(2 * sixteenth_ticks));
@@ -8851,12 +8856,15 @@ void freeze_short_swing() {
     rig.freeze(pack);
     rig.send({Command::Type::Play});
     CHECK(rig.play(short_half).back()[0] == 0.375f && rig.host->printing_tracks() == 1);
+    CHECK(rig.host->track_latency(0) == 0); // the Post FX print already had its latency trimmed
     const auto handoff = rig.play(fade * 2);
     CHECK(rig.host->printing_tracks() == 0 && rig.host->sleeping_tracks() == 0);
+    CHECK(rig.host->track_latency(0) == delay.late); // the live chain is back in the compensation plan
     CHECK(handoff.front()[0] > 0.37f && handoff.back()[0] == 0.25f);
     CHECK(rig.play(long_half - short_half - fade * 2).back()[0] == 0.25f);
     const auto resume = rig.play(fade * 2);
     CHECK(rig.host->printing_tracks() == 1 && resume.front()[0] < 0.255f && resume.back()[0] == 0.375f);
+    CHECK(rig.host->track_latency(0) == 0);
     CHECK(rig.host->print_waits() == 0 && rig.host->print_underruns() == 0);
 }
 
