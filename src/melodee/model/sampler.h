@@ -121,6 +121,9 @@ struct PadSound {
     // The colour the pad lights and is drawn in, 0xRRGGBB; 0: the track's. Stage's COLOUR sets it, an MPC kit brings
     // its own (shell/mpc_project.h mpc_pad_colours()); kept in PCOL.
     uint32_t colour = 0;
+    // The colour its MPC kit brought, 0xRRGGBB; 0 none. COLOUR's list ends on it, so a pad given another colour can
+    // have its kit's back. Kept in PKCL.
+    uint32_t kit_colour = 0;
     // The pad's own send into each bus A-D, 0..100 (kept in PSND): taken after its Pad FX, its volume and pan, before
     // the track's chain, at the track's level, pan and mute. The track's sends (Mix::sends) still send the whole kit.
     std::array<uint8_t, 4> sends {};

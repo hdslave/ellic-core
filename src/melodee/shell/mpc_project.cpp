@@ -649,7 +649,7 @@ std::string import_mpc_project(const std::vector<uint8_t>& file, const std::stri
             if (slot < 0) { ++report.over_limit; continue; }
             report.missing += missing;
             read_pad(instrument, layer, unsigned(slot), layered ? 1.0 : samples.to_model(unsigned(slot)), track.pads[size_t(n)], layered);
-            track.pads[size_t(n)].colour = colours[size_t(n)];
+            track.pads[size_t(n)].colour = track.pads[size_t(n)].kit_colour = colours[size_t(n)];
             ++report.pads;
         }
 

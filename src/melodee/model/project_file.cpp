@@ -652,6 +652,16 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
         for (unsigned n = 0; n < sampler_pads; ++n) if (tr.pads[n].used() && tr.pads[n].colour) { w.u8(n); w.u32(tr.pads[n].colour); }
         w.end(at);
     }
+    for (unsigned t = 0; t < track_count; ++t) { // the colours kit pads' MPC kits brought (COLOUR's Kit): pad, 0xRRGGBB
+        const auto& tr = project.tracks[t];
+        unsigned kept = 0;
+        for (const auto& pad : tr.pads) kept += pad.used() && pad.kit_colour;
+        if (!kept) continue;
+        at = w.begin("PKCL");
+        w.u8(t); w.u8(kept);
+        for (unsigned n = 0; n < sampler_pads; ++n) if (tr.pads[n].used() && tr.pads[n].kit_colour) { w.u8(n); w.u32(tr.pads[n].kit_colour); }
+        w.end(at);
+    }
     for (unsigned t = 0; t < track_count; ++t) { // kit pads' own sends into buses A-D: pad, four sends
         const auto& tr = project.tracks[t];
         unsigned used = 0;
@@ -1107,6 +1117,15 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
                 unsigned n = r.u8();
                 uint32_t colour = r.u32() & 0xFFFFFF;
                 if (r.ok) project->tracks[t].pads[n % sampler_pads].colour = colour;
+            }
+        } else if (name == "PKCL") { // the colours kit pads' MPC kits brought; without it COLOUR's Kit is the pad's colour while it is one of a kit
+            unsigned t = r.u8();
+            if (t >= track_count) continue;
+            unsigned kept = r.u8();
+            for (unsigned k = 0; k < kept && r.ok; ++k) {
+                unsigned n = r.u8();
+                uint32_t colour = r.u32() & 0xFFFFFF;
+                if (r.ok) project->tracks[t].pads[n % sampler_pads].kit_colour = colour;
             }
         } else if (name == "PSND") { // kit pads' own sends; without it no pad sends on its own
             unsigned t = r.u8();
@@ -1916,6 +1935,14 @@ std::vector<uint8_t> save_bank(const BankFile& bank) {
         for (unsigned k = 0; k < bank_pads; ++k) if (bank.pads[k].used() && bank.pads[k].colour) { w.u8(k); w.u32(bank.pads[k].colour); }
         w.end(at);
     }
+    unsigned kept = 0; // the colours their MPC kits brought, as PKCL: pad, 0xRRGGBB
+    for (const auto& pad : bank.pads) kept += pad.used() && pad.kit_colour;
+    if (kept) {
+        at = w.begin("BKCL");
+        w.u8(kept);
+        for (unsigned k = 0; k < bank_pads; ++k) if (bank.pads[k].used() && bank.pads[k].kit_colour) { w.u8(k); w.u32(bank.pads[k].kit_colour); }
+        w.end(at);
+    }
     unsigned sending = 0; // the pads' own sends, as PSND: pad, four sends
     for (const auto& pad : bank.pads) sending += pad.used() && pad.sending();
     if (sending) {
@@ -1993,6 +2020,13 @@ bool load_bank(const std::vector<uint8_t>& data, BankFile& out) {
                 unsigned n = r.u8();
                 uint32_t colour = r.u32() & 0xFFFFFF;
                 if (r.ok) bank.pads[n % bank_pads].colour = colour;
+            }
+        } else if (name == "BKCL") {
+            unsigned kept = r.u8();
+            for (unsigned k = 0; k < kept && r.ok; ++k) {
+                unsigned n = r.u8();
+                uint32_t colour = r.u32() & 0xFFFFFF;
+                if (r.ok) bank.pads[n % bank_pads].kit_colour = colour;
             }
         } else if (name == "BSUB") {
             unsigned routed = r.u8();
