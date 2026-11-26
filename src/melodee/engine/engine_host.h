@@ -441,7 +441,6 @@ private:
         // track kept soloed would silence every other track with nothing to show why.
         bool soloing() const { return solo && kind != EngineKind::None; }
         bool knob_pad_fed = false; // some sub-block of this block put something in knob_pad_l / knob_pad_r
-        bool print_fed = false;    // this block's print is in print_l / print_r (freeze plan F2b, below)
         Engine* engine = nullptr;
         unsigned hits_waiting = 0;                   // ratchets' hits (`hits`) still to come
         int32_t repeat_late = -1, repeat_length = 0; // a swung step of Note Repeat: frames to it, and its notes' length
@@ -532,17 +531,20 @@ private:
         // Freeze plan F2b: the track's prints (none: it plays live), and ones unfrozen whose voices still fade; the
         // voices (`print`, at the top); whether the print plays the pattern now (its notes then sequence nothing on
         // the engine), the engine awake (hand notes or a live pattern; asleep its render and, after the print, its
-        // chain are skipped), the frames it has been quiet, keys held by hand; this block's print (print_l / print_r:
-        // its rows of EngineHost::print_frames, on the heap, so a host on a test's stack stays as small as it was;
-        // `print_fed`, at the top) and its level and pan.
+        // chain are skipped), the frames it has been quiet and keys held by hand.
         FreezePack* freeze = nullptr;
         FreezePack* freeze_leaving = nullptr;
         bool print_on = false, awake = true, print_post = true; // print_post: its prints' tap (kept for a fade's end)
         uint32_t quiet = 0;
         std::bitset<256> hand {};
-        float* print_l = nullptr;
-        float* print_r = nullptr;
-        float print_coverage[block];
+        // A queued pack can change the print's tap at a bar line inside the block.
+        // Keep each tap's frames apart until they join the track on its side of the FX.
+        struct PrintMix {
+            float* left = nullptr;
+            float* right = nullptr;
+            bool fed = false;
+        } pre_print, post_print;
+        float print_coverage[block] {};
         bool print_replaces_live = false;
         // Freeze plan F3: an AUDIO track's engine (its takes' voices), its patterns' takes, ones replaced whose voices
         // still fade, and the pattern tick it followed last (a jump when the next is not the one after).
@@ -609,7 +611,7 @@ private:
     void freeze_at_bar();
     void wake(Slot& slot) { slot.awake = true; slot.quiet = 0; }
     void print_tick(unsigned t, Slot& slot, uint32_t at, uint32_t length);
-    std::unique_ptr<std::array<float, 2 * block * track_count>> print_frames;
+    std::unique_ptr<std::array<float, 4 * block * track_count>> print_frames;
     std::array<FreezePack*, track_count> freeze_next {}; // waiting for the next bar
     static constexpr float sleep_floor = 3.16e-5f; // -90 dB: a frozen track's engine below it a second sleeps
     float pan_centre = 0.7071f;                    // set_pan()'s sides at the centre, as a print was made at

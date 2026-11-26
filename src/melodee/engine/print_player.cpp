@@ -61,11 +61,12 @@ bool PrintPlayer::sounding() const {
     return false;
 }
 
-void PrintPlayer::begin(PrintClip* clip, uint32_t frame, bool fade_in, float rate) {
+void PrintPlayer::begin(PrintClip* clip, uint32_t frame, bool fade_in, float rate, bool replaces_live) {
     auto& m = voices[0];
     if (m.clip) close(m);
     if (!clip || frame >= clip->frames) return;
     m.clip = clip;
+    m.replaces_live = replaces_live;
     m.at = frame;
     m.gain = fade_in ? 0.0f : 1.0f;
     m.step = fade_in ? 1.0f / (fade_seconds * rate) : 0.0f;
@@ -98,6 +99,15 @@ void PrintPlayer::release(float rate) {
     auto& m = voices[0];
     if (!m.clip) return;
     const PrintClip& c = *m.clip;
+    if (m.replaces_live) {
+        // The warm chain already has this pattern's tail. Trade gain with it, and take any
+        // printed tails from earlier passes down with the main voice.
+        const float step = -1.0f / (fade_seconds * rate);
+        for (auto& v : voices)
+            if (v.clip && v.replaces_live && v.ring_tail) v.step = std::min(v.step, step);
+        retire_main(false, rate);
+        return;
+    }
     // A Loop or Cut print let go where its pass ends (a launch on the bar it ends on): it stops there. Past that
     // seam a Loop print holds the pattern's own top again, its first hit with it.
     if (c.tail != PrintTail::Ring && (m.at <= slack || m.at + slack >= c.frames)) { close(m); return; }
@@ -105,31 +115,31 @@ void PrintPlayer::release(float rate) {
     retire_main(ring, rate);
 }
 
-void PrintPlayer::follow(PrintClip* clip, uint32_t at, double start, double tick, float rate) {
+void PrintPlayer::follow(PrintClip* clip, uint32_t at, double start, double tick, float rate, bool replaces_live) {
     auto& m = voices[0];
     if (!clip) { release(rate); return; }
     if (m.clip != clip) { // a launch, a follow action, a song clip, Play, or the freeze itself
-        const bool crossfade = clip->replaces_live && !(m.clip && m.clip->replaces_live);
         release(rate);
         const uint64_t frame = at ? uint64_t(std::max(0.0, std::ceil(start - 1e-6))) : 0;
-        begin(clip, uint32_t(std::min<uint64_t>(frame, UINT32_MAX)), (crossfade || at != 0), rate);
+        begin(clip, uint32_t(std::min<uint64_t>(frame, UINT32_MAX)), replaces_live || at != 0, rate, replaces_live);
         expect = frame;
         carry = start - double(frame);
     } else if (at == 0) { // the pattern comes round
         if (clip->tail == PrintTail::Loop) {
             // The print wraps itself as the pass ends; a tick a frame or two off leaves it where it is.
             bool near_top = m.at <= slack, near_end = m.at + slack >= clip->frames;
-            if (near_end && !near_top) { begin(clip, 0, false, rate); } // the last few frames of the pass skipped
-            else if (!near_top) { retire_main(false, rate); begin(clip, 0, false, rate); } // started again from the top
+            if (near_end && !near_top) { begin(clip, 0, false, rate, replaces_live); } // the last few frames of the pass skipped
+            else if (!near_top) { retire_main(false, rate); begin(clip, 0, replaces_live, rate, replaces_live); } // started again from the top
         } else { // Ring rings its tail on in another voice; Cut has none
-            retire_main(clip->tail == PrintTail::Ring && m.at + slack >= clip->pass, rate);
-            begin(clip, 0, false, rate);
+            const bool ring = clip->tail == PrintTail::Ring && m.at + slack >= clip->pass;
+            retire_main(ring, rate);
+            begin(clip, 0, replaces_live && !ring, rate, replaces_live);
         }
         expect = 0;
         carry = 0;
     } else if (m.at + slack < expect || m.at > expect + slack) { // off its place (a Locate, MIDI clock in): moved there
         retire_main(false, rate);
-        begin(clip, uint32_t(std::min<uint64_t>(expect, UINT32_MAX)), true, rate);
+        begin(clip, uint32_t(std::min<uint64_t>(expect, UINT32_MAX)), true, rate, replaces_live);
     }
     carry += tick; // as render() places the next tick: the frames up to it, rounded up
     double run = std::ceil(carry);
@@ -151,9 +161,10 @@ void PrintPlayer::render(float* left, float* right, unsigned frames, float* cons
         uint32_t limit = c.resident ? c.part.total : pager->limit(v.stream);
         bool late = false, waited = false;
         unsigned f = 0;
+        float* replaced = v.replaces_live && !v.ring_tail ? coverage : nullptr;
         while (f < frames) {
             if (v.at >= c.frames) {
-                if (n == 0 && c.tail == PrintTail::Loop && (!v.leaving || c.replaces_live)) { // a Loop print wraps on itself
+                if (n == 0 && c.tail == PrintTail::Loop && !v.leaving) { // a playing Loop print wraps on itself
                     v.at = 0;
                     if (!c.resident) {
                         uint32_t safe = c.safe_from(0);
@@ -162,6 +173,17 @@ void PrintPlayer::render(float* left, float* right, unsigned frames, float* cons
                         limit = pager->limit(v.stream);
                     }
                 } else {
+                    // At the seam a retiring Loop must not replay its first hit, and a Cut has no tail.
+                    // Fade the last available sample into the live path when there is no more printed audio.
+                    if (v.replaces_live && !v.ring_tail && v.have_last) {
+                        if (v.step >= 0) v.step = -1.0f / (fade_seconds * c.rate);
+                        for (; f < frames && v.gain > 0; ++f) {
+                            v.gain = std::max(0.0f, v.gain + v.step);
+                            left[f] += v.last_l * v.gain; right[f] += v.last_r * v.gain;
+                            if (replaced) replaced[f] = std::min(1.0f, replaced[f] + v.gain);
+                        }
+                        if (v.gain > 0) break;
+                    }
                     close(v);
                     break;
                 }
@@ -173,7 +195,12 @@ void PrintPlayer::render(float* left, float* right, unsigned frames, float* cons
             if (ready) v.seeking = false;
             const float* d = c.data() + from;
             const float g0 = v.gain, st = v.step; // the fade as it runs here (the print's loop may end it)
-            float* replaced = c.replaces_live && !v.ring_tail ? coverage : nullptr;
+            if (v.replaces_live) {
+                v.have_last = ready == run;
+                if (v.have_last) {
+                    v.last_l = d[s * (ready - 1)]; v.last_r = d[s * (ready - 1) + 1];
+                }
+            }
             if (v.step == 0 && v.gain == 1) {
                 for (unsigned k = 0; k < ready; ++k) { left[f + k] += d[s * k]; right[f + k] += d[s * k + 1]; }
                 if (replaced) std::fill_n(replaced + f, ready, 1.0f);
@@ -182,7 +209,7 @@ void PrintPlayer::render(float* left, float* right, unsigned frames, float* cons
                     v.gain = std::clamp(v.gain + v.step, 0.0f, 1.0f);
                     if (k < ready) {
                         left[f + k] += d[s * k] * v.gain; right[f + k] += d[s * k + 1] * v.gain;
-                        if (replaced) replaced[f + k] = std::max(replaced[f + k], v.gain);
+                        if (replaced) replaced[f + k] = std::min(1.0f, replaced[f + k] + v.gain);
                     }
                 }
                 if (v.step > 0 && v.gain >= 1) v.step = 0;

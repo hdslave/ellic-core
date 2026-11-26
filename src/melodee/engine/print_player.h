@@ -35,7 +35,6 @@ struct PrintClip {
     uint32_t rate = 0;      // the device's rate it was printed at
     PrintTail tail = PrintTail::Loop;
     bool resident = false;  // every frame in memory: read without the pager
-    bool replaces_live = false; // the live instrument and its chain stay running during this Post FX print
     struct Held { uint32_t from = 0, to = 0; }; // floats pinned while the clip lives, [from, to)
     std::vector<Held> held;
     std::vector<float> owned; // resident: the frames
@@ -59,7 +58,9 @@ struct FreezePack {
     // Freeze plan F2d: a deep freeze. Its plug-ins are let go once the engine sleeps, so nothing wakes it: hands
     // (pads, keys, the arp) play nothing and a pattern without a print stays silent.
     bool deep = false;
-    bool keep_live = false; // keep delivering notes and crossfade against the live Post FX path
+    // Shallow Post FX freezes on plug-in instrument tracks only. The live instrument and its track FX keep
+    // running alongside the print, including while it covers their output, so this mode does not save their CPU.
+    bool keep_live = false;
     std::array<PrintClip*, pattern_count> clips {};
     std::vector<std::unique_ptr<PrintClip>> owned;
 };
@@ -76,7 +77,7 @@ public:
     // On each tick of the track's pattern: `clip` the print of the pattern playing (nullptr: none, it plays live),
     // `at` the tick in the pattern, `start` the frames from the pattern's top to that tick as a print counts them
     // (unrounded), `tick` this tick's length in frames.
-    void follow(PrintClip* clip, uint32_t at, double start, double tick, float rate);
+    void follow(PrintClip* clip, uint32_t at, double start, double tick, float rate, bool replaces_live = false);
     void release(float rate);  // the pattern stopped or changed: a Ring print's tail rings on at its pass's end, else a fade
     void fade_all(float rate); // unfrozen: every voice fades out, marked as leaving
     void cut_all();            // every voice closed at once
@@ -86,7 +87,7 @@ public:
     uint32_t position() const { return voices[0].at; }
     // Adds `frames` of every voice into `left` / `right`; a print with pad sends adds them into `send_l` / `send_r`
     // [bus] (nullptr: not heard), and sends_fed() then has a bit for each bus it added to.
-    // Replacement voices write their maximum audible gain per frame to coverage, when supplied.
+    // Replacement voices write their combined audible gain per frame to coverage, when supplied.
     void render(float* left, float* right, unsigned frames, float* const* send_l = nullptr, float* const* send_r = nullptr,
                 float* coverage = nullptr);
     unsigned sends_fed() const { return fed; }
@@ -99,7 +100,10 @@ private:
         uint32_t at = 0;
         int stream = -1;
         bool seeking = false, leaving = false;
-        bool ring_tail = false; // additive after the next pattern starts
+        bool replaces_live = false;
+        bool ring_tail = false; // a printed tail additive to the next pass
+        bool have_last = false;
+        float last_l = 0, last_r = 0; // an exhausted replacement voice can fade from its last sample
         float gain = 1, step = 0; // a fade: step a frame
     };
     std::array<Voice, voice_count> voices {}; // [0] the main voice
@@ -107,7 +111,7 @@ private:
     double carry = 0;     // the next tick's place less `expect`, as render() counts ticks (-1..0]
     StreamPager* pager = nullptr;
     unsigned fed = 0;
-    void begin(PrintClip* clip, uint32_t frame, bool fade_in, float rate);
+    void begin(PrintClip* clip, uint32_t frame, bool fade_in, float rate, bool replaces_live);
     void close(Voice& v);
     void retire_main(bool ring, float rate); // the main voice to another, ringing on or fading
 };

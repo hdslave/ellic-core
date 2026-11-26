@@ -54,14 +54,15 @@ EngineHost::EngineHost(bool lean, unsigned delay_blocks)
     for (auto& t : patterns) for (auto& p : t) p = new Pattern;
     for (auto& s : positions_now) s.store(-1);
     pad_fx = std::make_unique<std::array<SamplerEngine::PadEffects, track_count>>();
-    print_frames = std::make_unique<std::array<float, 2 * block * track_count>>();
+    print_frames = std::make_unique<std::array<float, 4 * block * track_count>>();
     for (unsigned t = 0; t < track_count; ++t) {
         slots[t].sampler.set_pad_effects(&(*pad_fx)[t]); slots[t].sampler.set_pager(&pager);
         slots[t].print.set_pager(&pager); // freeze plan F2b
         slots[t].audio.player.set_pager(&pager); // freeze plan F3
         slots[t].plugin.set_pool(&pool);   // its performance knobs' echo and reverb (engine/macros.h)
-        slots[t].print_l = print_frames->data() + 2 * block * t;
-        slots[t].print_r = slots[t].print_l + block;
+        auto* print = print_frames->data() + 4 * block * t;
+        slots[t].pre_print = {print, print + block};
+        slots[t].post_print = {print + 2 * block, print + 3 * block};
     }
     // Build every engine's static tables now, not on the audio thread.
     for (unsigned k = 0; k < unsigned(EngineKind::Count); ++k) (void)engine_info(EngineKind(k));
@@ -532,7 +533,11 @@ void EngineHost::apply(const Command& c) {
                 slots[t].held = {};
             }
         break;
-    case Type::Engine: midi_all_off(c.track, frame_now); select_engine(slot, EngineKind(c.index)); break;
+    case Type::Engine:
+        midi_all_off(c.track, frame_now);
+        if (slot.freeze && slot.freeze->keep_live && EngineKind(c.index) != EngineKind::Plugin) set_freeze(c.track, nullptr);
+        select_engine(slot, EngineKind(c.index));
+        break;
     case Type::Sound:
         if (slot.kind == EngineKind::Midi) midi_all_off(c.track, frame_now); // its port or channel may change
         if (slot.engine) {
@@ -1226,10 +1231,19 @@ void EngineHost::retire_freeze(FreezePack* pack) {
 void EngineHost::set_freeze(unsigned t, FreezePack* pack) {
     auto& slot = slots[t % track_count];
     if (slot.freeze == pack) return;
+    // Only a plug-in's Post FX track output participates in the replacement crossfade.
+    // Kits have separate pad routes that don't pass through this mix.
+    if (pack && (pack->deep || pack->tap != PrintTap::PostFx || slot.kind != EngineKind::Plugin)) pack->keep_live = false;
     if (slot.freeze || slot.print.sounding()) {
         if (slot.freeze_leaving) { slot.print.cut_all(); retire_freeze(slot.freeze_leaving); slot.freeze_leaving = nullptr; }
-        slot.print.fade_all(dsp::sample_rate());
-        if (slot.freeze) slot.freeze_leaving = slot.freeze;
+        if (slot.freeze && pack && slot.freeze->keep_live != pack->keep_live) {
+            // A single track print mix cannot overlap voices with different routing policies.
+            slot.print.cut_all();
+            retire_freeze(slot.freeze);
+        } else {
+            slot.print.fade_all(dsp::sample_rate());
+            if (slot.freeze) slot.freeze_leaving = slot.freeze;
+        }
     }
     slot.freeze = pack;
     if (pack) slot.print_post = pack->tap == PrintTap::PostFx;
@@ -1257,7 +1271,7 @@ void EngineHost::print_tick(unsigned, Slot& slot, uint32_t at, uint32_t length) 
     if (clip && (clip->rate != uint32_t(std::lround(rate)) || std::fabs(double(clip->pass) - pattern_frames(length)) > 64)) clip = nullptr;
     slot.print_on = clip != nullptr;
     if (!clip && !slot.freeze->deep) wake(slot); // freeze plan F2d: a deep freeze stays asleep (its plug-ins are gone)
-    slot.print.follow(clip, at, pattern_frames(at), tick_samples(tick_now), rate);
+    slot.print.follow(clip, at, pattern_frames(at), tick_samples(tick_now), rate, slot.freeze->keep_live);
 }
 
 // --- Freeze plan F3: audio tracks' regions (engine/audio_player.h) ---
@@ -3147,9 +3161,10 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
     for (auto& slot : slots) {
         solo |= slot.soloing();
         slot.print_replaces_live = false;
+        slot.pre_print.fed = slot.post_print.fed = false;
         // An empty track (no engine, no print sounding) is read by nothing this block (every reader asks for its
         // engine first): its buffers are left as they are, and cleared again once it plays.
-        if (!slot.engine && !slot.print.sounding()) { slot.knob_pad_fed = false; slot.print_fed = false; continue; }
+        if (!slot.engine && !slot.print.sounding()) { slot.knob_pad_fed = false; continue; }
         std::fill(slot.buffer, slot.buffer + frames, 0.0f);
         std::fill(slot.left, slot.left + frames, 0.0f); std::fill(slot.right, slot.right + frames, 0.0f);
         slot.knob_pad_fed = false;
@@ -3160,7 +3175,6 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
             if ((slot.sub_pad_fed >> n) & 1) { std::fill(slot.pad_subs->l[n], slot.pad_subs->l[n] + block, 0.0f); std::fill(slot.pad_subs->r[n], slot.pad_subs->r[n] + block, 0.0f); }
         slot.sub_pad_fed = 0;
         slot.pad_routes = slot.engine == &slot.sampler ? slot.sampler.routes() : 0;
-        slot.print_fed = false; // freeze plan F2b: this block's print, from the first run a voice sounds in
         if (knob_heard && slot.engine == &slot.sampler) { // Knob FX on kit pads: they play apart, into the slot's knob_pad_l / knob_pad_r
             std::fill(slot.knob_pad_l, slot.knob_pad_l + frames, 0.0f); std::fill(slot.knob_pad_r, slot.knob_pad_r + frames, 0.0f);
         }
@@ -3249,23 +3263,25 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
         // Freeze plan F2b: frozen tracks' prints, each where its pattern is (memory the pager has pinned; a copy).
         for (auto& slot : slots) {
             if (!slot.print.sounding()) continue;
-            if (!slot.print_fed) {
-                std::fill(slot.print_l, slot.print_l + frames, 0.0f); std::fill(slot.print_r, slot.print_r + frames, 0.0f);
-                slot.print_fed = true;
+            auto& print = slot.print_post ? slot.post_print : slot.pre_print;
+            if (!print.fed) {
+                std::fill_n(print.left, frames, 0.0f); std::fill_n(print.right, frames, 0.0f);
+                print.fed = true;
             }
             // A kit's pad sends printed beside it go where its live pads' would (mixed at the track's level, pan, mute).
             float* to_l[bus_count];
             float* to_r[bus_count];
             for (unsigned b = 0; b < bus_count; ++b) { to_l[b] = slot.pad_sends->l[b] + done; to_r[b] = slot.pad_sends->r[b] + done; }
             float* coverage = nullptr;
-            if ((slot.freeze && slot.freeze->keep_live) || (slot.freeze_leaving && slot.freeze_leaving->keep_live)) {
+            if (slot.print_post && ((slot.freeze && slot.freeze->keep_live) ||
+                                    (slot.freeze_leaving && slot.freeze_leaving->keep_live))) {
                 if (!slot.print_replaces_live) {
                     std::fill_n(slot.print_coverage, frames, 0.0f);
                     slot.print_replaces_live = true;
                 }
                 coverage = slot.print_coverage + done;
             }
-            slot.print.render(slot.print_l + done, slot.print_r + done, n, to_l, to_r, coverage);
+            slot.print.render(print.left + done, print.right + done, n, to_l, to_r, coverage);
             slot.send_pad_fed |= slot.print.sends_fed();
         }
         for (auto& slot : slots) // freeze plan F3: audio tracks' regions, each where the song is (into the track's own buffers)
@@ -3347,20 +3363,20 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
         float awake_peak = 0; // what the engine (and at Post FX its chain) plays, for when it may sleep
         auto peak_of = [&] { for (unsigned f = 0; f < frames; ++f) awake_peak = std::max({awake_peak, std::fabs(slot.left[f]), std::fabs(slot.right[f])}); };
         if (may_sleep && !post) peak_of();
-        if (slot.print_fed && !post && !slot.print_replaces_live) { // as the engine would have played (the print has a mono engine on both sides)
+        if (slot.pre_print.fed) { // as the engine would have played (the print has a mono engine on both sides)
             const float u = slot.engine->stereo() ? 1.0f : pan_centre;
-            for (unsigned f = 0; f < frames; ++f) { slot.left[f] += slot.print_l[f] * u; slot.right[f] += slot.print_r[f] * u; }
+            for (unsigned f = 0; f < frames; ++f) { slot.left[f] += slot.pre_print.left[f] * u; slot.right[f] += slot.pre_print.right[f] * u; }
         }
         if (!(asleep && post)) run_chain(t, slot.left, slot.right, frames);
         if (may_sleep && post) peak_of();
         if (slot.print_replaces_live) {
             for (unsigned f = 0; f < frames; ++f) {
                 const float live = 1.0f - slot.print_coverage[f];
-                slot.left[f] = slot.left[f] * live + slot.print_l[f];
-                slot.right[f] = slot.right[f] * live + slot.print_r[f];
+                slot.left[f] = slot.left[f] * live + slot.post_print.left[f];
+                slot.right[f] = slot.right[f] * live + slot.post_print.right[f];
             }
-        } else if (slot.print_fed && post) { // the chain's sound as it was printed, at unity (prints hold no level or pan)
-            for (unsigned f = 0; f < frames; ++f) { slot.left[f] += slot.print_l[f]; slot.right[f] += slot.print_r[f]; }
+        } else if (slot.post_print.fed) { // the chain's sound as it was printed, at unity (prints hold no level or pan)
+            for (unsigned f = 0; f < frames; ++f) { slot.left[f] += slot.post_print.left[f]; slot.right[f] += slot.post_print.right[f]; }
         }
         if (may_sleep) { // asleep after a second below the floor, nothing held by hand and no pattern played live
             bool keep = !slot.freeze->deep && (slot.hand.any() || slot.arp.count || slot.repeat.count || (running && !slot.silent && !slot.print_on));
