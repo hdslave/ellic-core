@@ -40,6 +40,22 @@ inline Division legacy_division(unsigned value) {
 
 enum StepFlag : uint8_t { step_accent = 1, step_slide = 2, step_tie = 4, step_mute = 8 }; // step_mute: kept, not played (Roll)
 
+// Step PLAY (Step Edit's SOUND cards): the way a kit or keygroup pad's sample plays for a note, kept in its flags'
+// bits 4-5: as the pad plays it (its Reverse, a slice's own), forward, reversed, or one or the other at each hit.
+enum class StepPlay : uint8_t { Pad, Forward, Reverse, Random, Count };
+constexpr unsigned step_play_shift = 4;
+constexpr uint8_t step_play_bits = uint8_t(3u << step_play_shift);
+inline StepPlay step_play(uint8_t flags) { return StepPlay((flags & step_play_bits) >> step_play_shift); }
+inline uint8_t with_play(uint8_t flags, StepPlay play) {
+    return uint8_t((flags & ~step_play_bits) | (unsigned(play) & 3u) << step_play_shift);
+}
+inline const char* step_play_name(StepPlay play) {
+    static const char* const names[] {"PAD", "FWD", "REV", "RND"};
+    return names[unsigned(play) & 3u];
+}
+// Event::slice: a slice of the sample's chop at random each hit (Step Edit's SLICE RND).
+constexpr uint8_t slice_random = 255;
+
 // A ratchet (roadmap P1): a note played as so many hits spread evenly over its length.
 constexpr unsigned max_ratchet = 8;
 constexpr int max_pitch_ramp = 24; // semitones a kit pad's last hit sits from its first
@@ -59,13 +75,17 @@ struct Event {
     int8_t ramp = 0, pitch_ramp = 0;
     uint8_t condition = trig_always; // which passes it plays on, beside its chance (model/trig.h)
     uint8_t cutoff = 0; // roadmap P3, a kit pad's: 16 Levels Filter's cutoff + 1 it was played at (0: the pad's own)
-    // A kit pad's, played on Chop while Seq Record ran: the slice + 1 of the pad's sample's chop it plays, as the chop
-    // is now (0: the pad's own region). The kit keeps no pad for it (model/slice_hits.h).
+    // A kit pad's, played on Chop while Seq Record ran or set on Step Edit's SLICE: the slice + 1 of the chop of the
+    // sample it plays, as the chop is now (0: the pad's own region; slice_random: one at random each hit). The kit
+    // keeps no pad for it (model/slice_hits.h).
     uint8_t slice = 0;
+    // Step SOUND (Elektron's sample lock): the slot + 1 of Project::samples a kit or keygroup pad plays for this note
+    // in place of its own sample, through the pad (its tune, envelope, filter, Pad FX and sends); 0: the pad's own.
+    uint16_t sample = 0;
     bool operator==(const Event& o) const {
         return tick == o.tick && length == o.length && key == o.key && velocity == o.velocity && chance == o.chance && flags == o.flags &&
                pitch == o.pitch && ratchet == o.ratchet && ramp == o.ramp && pitch_ramp == o.pitch_ramp && condition == o.condition &&
-               cutoff == o.cutoff && slice == o.slice;
+               cutoff == o.cutoff && slice == o.slice && sample == o.sample;
     }
     bool operator!=(const Event& o) const { return !(*this == o); }
     unsigned hits() const { return std::clamp<unsigned>(ratchet, 1, max_ratchet); }
@@ -82,9 +102,11 @@ struct Event {
         double at = pitch_ramp * double(std::min(n, last)) / double(last);
         return int(at < 0 ? at - 0.5 : at + 0.5);
     }
-    // Copies what plays it besides where and which (chance, flags, the ratchet, the condition), for a note rewritten in place.
+    // Copies what plays it besides where and which (chance, flags, the ratchet, the condition, a sample of its own),
+    // for a note rewritten in place.
     void take_play(const Event& o) {
         chance = o.chance; flags = o.flags; ratchet = o.ratchet; ramp = o.ramp; pitch_ramp = o.pitch_ramp; condition = o.condition;
+        sample = o.sample;
     }
 };
 
@@ -297,16 +319,22 @@ constexpr uint16_t groove_of_legacy(uint16_t from) {
     return from ? groove_source((from - 1u) / legacy_patterns, (from - 1u) % legacy_patterns) : 0;
 }
 
-// A track's playback speed (roadmap P1): its patterns play at num / den of the tempo, the notes as written. The
-// audio thread plays them scaled (speed_pattern: ticks times den / num); the pages and the file keep them as written.
+// A track's playback speed (roadmap P1, Elektron's per track speed): its patterns play at num / den of the tempo, the
+// notes as written. The audio thread plays them scaled (speed_pattern: ticks times den / num); the pages and the file
+// keep them as written.
 struct Speed { uint8_t num, den; };
-constexpr unsigned speed_count = 5, speed_normal = 2;
-constexpr Speed speeds[speed_count] {{1, 2}, {3, 4}, {1, 1}, {3, 2}, {2, 1}};
+constexpr unsigned speed_count = 11, speed_normal = 7;
+constexpr Speed speeds[speed_count] {{1, 64}, {1, 32}, {1, 16}, {1, 8}, {1, 4}, {1, 2}, {3, 4}, {1, 1}, {3, 2}, {2, 1}, {4, 1}};
 inline Speed speed_of(unsigned speed) { return speeds[speed < speed_count ? speed : speed_normal]; }
 inline const char* speed_name(unsigned speed) {
-    static const char* names[] {"\xc3\x97\xc2\xbd", "\xc3\x97\xc2\xbe", "\xc3\x97" "1", "\xc3\x97" "1\xc2\xbd", "\xc3\x97" "2"}; // x1/2 .. x2
+    static const char* names[] {"\xc3\x97" "1/64", "\xc3\x97" "1/32", "\xc3\x97" "1/16", "\xc3\x97" "1/8", "\xc3\x97\xc2\xbc",
+                                "\xc3\x97\xc2\xbd", "\xc3\x97\xc2\xbe", "\xc3\x97" "1", "\xc3\x97" "1\xc2\xbd", "\xc3\x97" "2", "\xc3\x97" "4"}; // x1/64 .. x4
     return names[speed < speed_count ? speed : speed_normal];
 }
+// Files and builds from before x1/64 .. x4 numbered five speeds, x1/2, x3/4, x1, x3/2 and x2 (TSPD): one of those to
+// today's, and today's to the nearest an older build plays (x1 for one it does not have).
+inline unsigned speed_of_legacy(unsigned legacy) { return legacy < 5 ? legacy + 5 : speed_normal; }
+inline unsigned legacy_speed(unsigned speed) { return speed >= 5 && speed <= 9 ? speed - 5 : 2; }
 // A place in a pattern as written, in the transport's ticks of a track at `speed` (to the nearest, as speed_pattern()
 // scales), and back (as the audio thread publishes a track's place, EngineHost::position_of()).
 inline uint64_t played_ticks(uint64_t written, unsigned speed) { Speed s = speed_of(speed); return (written * s.den + s.num / 2) / s.num; }

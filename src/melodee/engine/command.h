@@ -176,7 +176,9 @@ struct Command {
         // The mixer: index = bus, value 1: its return muted.
         BusMute,
         // The mixer: value 1: takes, Audio Recall and the input meter hear the input after its strip (else before).
-        InputWet
+        InputWet,
+        // Elektron's per track direction: track, value = its PlayDirection (model/step_order.h).
+        TrackDirection
 
     };
     enum SubPart : uint16_t { SubLevel, SubPan, SubMute, SubSolo, SubSend0 }; // SubMix's index; SubSend0 + bus

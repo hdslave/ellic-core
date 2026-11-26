@@ -46,7 +46,7 @@ inline unsigned slice_hits(const Project& project, const PatternBank& patterns, 
         if (track.engine != EngineKind::Sampler) continue;
         for (const auto& pattern : patterns.at[t])
             for (const auto& e : pattern.events) {
-                if (!e.slice || unsigned(e.slice - 1) < from) continue;
+                if (!e.slice || unsigned(e.slice - 1) < from) continue; // SLICE RND counts: any slice may change under it
                 const int pad = kit_pad_of(e);
                 if (pad >= 0 && track.pads[size_t(pad)].used() && track.pads[size_t(pad)].sample == sample) ++count;
             }
@@ -96,7 +96,7 @@ inline unsigned lay_slice_hits(Project& project, PatternBank& patterns, const Ch
                 const int pad = kit_pad_of(e), slice = e.slice - 1;
                 e.slice = 0;
                 changed = true;
-                if (pad < 0) continue;
+                if (pad < 0 || slice == int(slice_random) - 1) continue; // SLICE RND: the pad's region
                 auto at = laid.find({pad, slice});
                 if (at == laid.end()) {
                     int to = -2;

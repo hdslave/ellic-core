@@ -56,8 +56,10 @@ void print_project(Project& project, PatternBank& bank, unsigned track, unsigned
     tr.fader_target = plain.fader_target; tr.fader_on = plain.fader_on; tr.fader_learned = plain.fader_learned; tr.fader_pin = plain.fader_pin;
     tr.wheel = 0; tr.bend = 0;
     tr.midi_channel = 0;
+    std::vector<bool> locked(sample_slots, false); // step SOUND: the samples its notes play of their own
+    for (const auto& e : kept.events) if (e.sample && e.sample <= sample_slots) locked[e.sample - 1u] = true;
     for (unsigned n = 0; n < sample_slots; ++n) {
-        bool used = false;
+        bool used = locked[n];
         for (const auto& pad : tr.pads) used |= pad.plays(uint16_t(n));
         if (!used) continue;
         out->samples.edit(n) = project.samples[n];

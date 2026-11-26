@@ -380,7 +380,10 @@ bool EngineHost::place_at(unsigned track, uint64_t frame, int& position, uint32_
         }
         if (tick_head.load(std::memory_order_acquire) != head && attempt < 3) continue; // a tick came meanwhile
         Speed sp = speed_of(speeds_now[track % track_count].load(std::memory_order_relaxed)); // a track at a speed: ticks as written
-        position = now - int(std::lround(double(back - (next ? 1 : 0)) * sp.num / sp.den));
+        const int moved = int(std::lround(double(back - (next ? 1 : 0)) * sp.num / sp.den));
+        // A track played backward was further on as written that long ago (shuffled, its step's place: near enough).
+        const bool reverse = direction_of(directions_now[track % track_count].load(std::memory_order_relaxed)) == PlayDirection::Reverse;
+        position = reverse ? now + moved : now - moved;
         ticks = uint32_t(e >> 32) + (next ? 2 : 1); // as ticks() reads just after that tick played
         return true;
     }
@@ -410,6 +413,7 @@ void EngineHost::load_track(unsigned t, const Track& track) {
     midi_all_off(t, frame_now); // what this track sent ends before it changes
     slot.plugin_entry = track.plugin;
     speeds_now[t % track_count].store(uint8_t(track.speed < speed_count ? track.speed : speed_normal), std::memory_order_relaxed);
+    directions_now[t % track_count].store(uint8_t(direction_of(track.direction)), std::memory_order_relaxed);
     select_engine(slot, track.engine);
     const auto& info = engine_info(track.engine);
     slot.base = track.params;
@@ -1194,6 +1198,7 @@ void EngineHost::apply(const Command& c) {
         midi_silenced();
         break;
     case Type::TrackSpeed: speeds_now[c.track % track_count].store(uint8_t(std::clamp<int>(c.value, 0, int(speed_count) - 1)), std::memory_order_relaxed); break;
+    case Type::TrackDirection: directions_now[c.track % track_count].store(uint8_t(direction_of(unsigned(std::max<int>(0, c.value)))), std::memory_order_relaxed); break;
     case Type::AudioRegions: // freeze plan F3
         if (c.track >= track_count) retire_audio(c.audio);
         else set_audio(c.track, c.audio);
@@ -1342,6 +1347,7 @@ void EngineHost::make_call(unsigned t, Slot& slot, const EngineCall& c) {
     switch (c.op) {
     case Op::NoteOn:
         if (c.flag) e->set_accent(c.x);
+        if ((c.c || c.d) && e == &slot.sampler) slot.sampler.step_hit(c.c - 1, unsigned(c.d) & 0xff, unsigned(c.d) >> 8); // step SOUND, PLAY
         e->note_on(c.a, c.b);
         if (c.flag) e->set_accent(1);
         break;
@@ -1364,10 +1370,11 @@ void EngineHost::make_call(unsigned t, Slot& slot, const EngineCall& c) {
 }
 
 // accent < 0: none set around it (a note by hand); else the sequencer's, back to 1 after.
-void EngineHost::engine_note_on(Slot& slot, int key, int velocity, float accent) {
+void EngineHost::engine_note_on(Slot& slot, int key, int velocity, float accent, const StepSound& step) {
     if (slot.mute && mutes_notes(slot)) return; // Mute Notes (issue 27): a muted track starts nothing new
     EngineCall call;
     call.op = EngineCall::Op::NoteOn; call.a = key; call.b = velocity; call.flag = accent >= 0; call.x = accent;
+    if (!step.own() || step.pick) { call.c = step.sample + 1; call.d = int32_t(step.play | unsigned(step.pick) << 8); } // step SOUND, PLAY
     if (!keep_call(slot, call)) make_call(unsigned(&slot - slots.data()), slot, call);
 }
 
@@ -1888,8 +1895,9 @@ void EngineHost::restore(Slot& slot) {
 // tick resolution): each lane starts the pattern at the track's own value,
 // then follows its points; a lock holds for its ticks, then its lane goes
 // back to what it holds as recorded there (else the track's own value).
-void EngineHost::play_motion(unsigned t, Slot& slot, const Pattern& pattern, uint32_t at) {
-    if (at == 0) restore(slot);
+void EngineHost::play_motion(unsigned t, Slot& slot, const Pattern& pattern, uint32_t from, uint32_t to, bool top) {
+    const uint32_t at = from; // a tick of a directed track plays [from, to) of its pattern (directed())
+    if (top) restore(slot);
     if (slot.locks_on)
         for (auto& l : slot.locks) {
             if (l.param < 0 || --l.left > 0) continue;
@@ -1900,7 +1908,7 @@ void EngineHost::play_motion(unsigned t, Slot& slot, const Pattern& pattern, uin
             if (value == none) restore_lane(t, slot, param, pad);
             else move_lane(t, slot, param, pad, value);
         }
-    for (size_t n = pattern.motion_lower(at); n < pattern.motion.size() && pattern.motion[n].tick == at; ++n) {
+    for (size_t n = pattern.motion_lower(from); n < pattern.motion.size() && pattern.motion[n].tick < to; ++n) {
         const auto& m = pattern.motion[n];
         move_lane(t, slot, m.param, m.pad, m.value);
         if (!m.lock()) continue;
@@ -2253,9 +2261,11 @@ void EngineHost::arp_write(unsigned t, Slot& slot, int key, int velocity, unsign
     const int64_t elapsed = int32_t(arp_origin + arp_ticks * arp_tick_ticks - slot.start); // the arp's clock in the sequencer's ticks
     auto in = [&](uint32_t loop) { int64_t n = elapsed % int64_t(loop); return uint32_t(n < 0 ? n + int64_t(loop) : n); };
     const uint32_t length = std::max<uint32_t>(p.length, 1), lane = p.lane_length(unsigned(key) & 0xff);
-    uint32_t at = in(length), from = 0, span = 0;
-    if (edit_loop(t, length, from, span)) at = from + in(span);
-    if (lane && lane < length) at = in(lane);
+    uint32_t at = in(length), from = 0, span = 0, loop = length, end = length, base = 0;
+    unsigned lane_key = 0;
+    if (edit_loop(t, length, from, span)) { at = from + in(span); loop = span; end = from + span; base = slot.loop_from; }
+    if (lane && lane < length) { at = in(lane); loop = end = lane; base = 0; lane_key = (unsigned(key) & 0xff) + 1; }
+    at = directed(t, p, at, end, base, elapsed >= 0 ? uint32_t(elapsed / loop) : 0, lane_key).from; // where a direction plays it
     ArpWritten w;
     w.track = uint8_t(t); w.pattern = slot.pattern; w.key = uint16_t(key); w.cutoff = uint8_t(key >> 16); w.velocity = uint8_t(std::clamp(velocity, 1, 127));
     Speed sp = speed_of(speeds_now[t].load(std::memory_order_relaxed)); // its pattern plays scaled: written as it reads
@@ -2323,7 +2333,7 @@ void EngineHost::run_hits(unsigned t, Slot& slot, unsigned frames) {
 
 void EngineHost::play_hit(unsigned t, Slot& slot, const PendingHit& hit, uint64_t at) {
     if (slot.engine && hit.sound) { // a frozen track's sequenced hits sound in its print (freeze plan F2b)
-        engine_note_on(slot, hit.key, hit.velocity, hit.accent ? accent_gain : 1.0f);
+        engine_note_on(slot, hit.key, hit.velocity, hit.accent ? accent_gain : 1.0f, hit.step);
         schedule_off(slot, hit.key, hit.length);
     }
     if (hit.midi >= 0) midi_note(t, hit.midi, hit.velocity, uint64_t(std::max<int64_t>(0, int64_t(at) + hit.shift)), hit.length);
@@ -2797,6 +2807,33 @@ bool EngineHost::hand_punch() const {
     return false;
 }
 
+DirectedTick EngineHost::directed(unsigned t, const Pattern& pattern, uint32_t at, uint32_t end, uint32_t base, uint32_t pass, unsigned lane) const {
+    const auto direction = direction_of(directions_now[t % track_count].load(std::memory_order_relaxed));
+    if (direction == PlayDirection::Forward || slots[t % track_count].kind == EngineKind::Audio) return {at, at + 1, 0};
+    StepClock clock;
+    clock.base = base;
+    clock.q = std::max(1u, pattern.q());
+    clock.speed = speed_of(speeds_now[t % track_count].load(std::memory_order_relaxed));
+    return directed_tick(at, end, clock, direction, direction_seed(t, pass, lane));
+}
+
+// A kit or keygroup note's own sound (step SOUND and PLAY): its sample in place of the pad's, its way, and a draw for
+// SLICE RND. RND (PLAY or SLICE) draws from where the note is, its pass and track: the same each time from the top.
+StepSound EngineHost::step_sound(unsigned t, const Slot& slot, const Event& e, uint32_t pass) const {
+    StepSound out;
+    if (slot.kind != EngineKind::Sampler && slot.kind != EngineKind::Keygroup) return out;
+    if (e.sample && e.sample <= sample_slots) out.sample = int32_t(e.sample) - 1;
+    const uint32_t draw = step_hash(e.tick * 0x9e3779b9u ^ uint32_t(e.key) << 24 ^ direction_seed(t, pass, 0x5a17));
+    switch (step_play(e.flags)) {
+    case StepPlay::Forward: out.play = uint8_t(StepPlay::Forward); break;
+    case StepPlay::Reverse: out.play = uint8_t(StepPlay::Reverse); break;
+    case StepPlay::Random: out.play = uint8_t(draw & 1 ? StepPlay::Reverse : StepPlay::Forward); break;
+    default: break;
+    }
+    if (e.slice == slice_random) out.pick = uint16_t(draw >> 8);
+    return out;
+}
+
 // One note of a track's pattern on its tick: `at` where it starts in a loop of `loop` ticks (the pattern's, or its
 // kit lane's own), on pass `pass` of that loop (trig conditions).
 void EngineHost::play_event(unsigned t, Slot& slot, const Pattern& pattern, size_t n, uint32_t at, uint32_t loop, uint32_t pass, bool sound,
@@ -2809,8 +2846,9 @@ void EngineHost::play_event(unsigned t, Slot& slot, const Pattern& pattern, size
     if (skipped(slot, unsigned(played), at)) return;
     // Roadmap P3: a kit pad's note kept with 16 Levels' cutoff plays at it (the sampler reads it above the semitones).
     const int cutoff = slot.kind == EngineKind::Sampler && e.cutoff ? e.cutoff - 1 : -1;
-    const int slice = slot.kind == EngineKind::Sampler && e.slice ? e.slice - 1 : -1; // issue 24: a slice hit's slice
+    const int slice = slot.kind == EngineKind::Sampler && e.slice ? e.slice - 1 : -1; // issue 24: a slice hit's slice (SLICE RND: 254)
     const int sounded = cutoff >= 0 || slice >= 0 ? pad_note(e.key, e.pitch, cutoff, slice) : played;
+    const StepSound step = step_sound(t, slot, e, pass); // step SOUND and PLAY
     bool go = trig_plays(t, slot, e, pass);
     if (trig_weighed(e.condition, e.chance)) { // how it went, for PRE and NEI after it
         slot.weighed = true; slot.went = go;
@@ -2846,7 +2884,7 @@ void EngineHost::play_event(unsigned t, Slot& slot, const Pattern& pattern, size
             engine_slide(slot, from.key, played, velocity, from.glide, gain);
             if (from.key != played) cancel_off(slot, from.key);
         } else {
-            engine_note_on(slot, sounded, velocity, gain);
+            engine_note_on(slot, sounded, velocity, gain, step);
         }
         schedule_off(slot, played, samples);
     }
@@ -2865,6 +2903,7 @@ void EngineHost::play_event(unsigned t, Slot& slot, const Pattern& pattern, size
         hit.samples = std::max<int32_t>(1, int32_t(std::lround(k * each * tick_length())));
         hit.length = samples;
         hit.shift = int32_t(midi_shift); // a MIDI track ahead (play_ahead()): its MIDI that far from where the hit falls
+        hit.step = step;
         for (auto& h : slot.hits)
             if (h.key < 0) { h = hit; ++slot.hits_waiting; break; }
     }
@@ -2934,10 +2973,11 @@ void EngineHost::tick() {
         uint32_t elapsed = tick_now - slot.start;
         uint32_t at = elapsed % length, end = length; // where its loop ends
         uint32_t pass = elapsed / length; // trig conditions count the pattern's passes from where it began
-        uint32_t from = 0, span = 0;
-        if (edit_loop(t, length, from, span)) { at = from + elapsed % span; pass = elapsed / span; end = from + span; } // its bars over and over
+        uint32_t from = 0, span = 0, base = 0;
+        if (edit_loop(t, length, from, span)) { at = from + elapsed % span; pass = elapsed / span; end = from + span; base = slot.loop_from; } // its bars over and over
         Speed sp = speed_of(speeds_now[t].load(std::memory_order_relaxed)); // published as written (its pattern plays scaled)
-        positions_now[t].store(int(uint64_t(at) * sp.num / sp.den), std::memory_order_relaxed);
+        const uint32_t heard = directed(t, pattern, at, end, base, pass).from; // the step it plays, backward or shuffled
+        positions_now[t].store(int(uint64_t(heard) * sp.num / sp.den), std::memory_order_relaxed);
         if (!pattern.punches.empty()) play_pattern_punches(t, pattern, at, end); // pad-fx C: punches kept with it
         passes_now[t].store(pass, std::memory_order_relaxed);
         if (at == 0 && int(t) == cue_track) { take.go(block_at); cue_track = -1; } // Rec length Seq: the take starts with the pattern
@@ -2973,21 +3013,24 @@ void EngineHost::play_tick_notes(unsigned t, Slot& slot, uint32_t at_tick, unsig
     const auto& pattern = *patterns[t][pattern_index % pattern_count];
     uint32_t length = std::max<uint32_t>(pattern.length, 1);
     uint32_t elapsed = at_tick - start;
-    uint32_t at = elapsed % length, pass = elapsed / length;
+    uint32_t at = elapsed % length, pass = elapsed / length, end = length, base = 0;
     uint32_t from = 0, span = 0;
-    if (edit_loop(t, length, from, span)) { at = from + elapsed % span; pass = elapsed / span; } // its bars over and over
-    if (slot.engine && (at == 0 || !pattern.motion.empty() || slot.locks_on)) play_motion(t, slot, pattern, at);
+    if (edit_loop(t, length, from, span)) { at = from + elapsed % span; pass = elapsed / span; end = from + span; base = slot.loop_from; } // its bars over and over
+    // The ticks this one plays: itself, or with a direction (model/step_order.h) its place in the step the order puts here.
+    const DirectedTick here = directed(t, pattern, at, end, base, pass);
+    if (slot.engine && (at == 0 || !pattern.motion.empty() || slot.locks_on)) play_motion(t, slot, pattern, here.from, here.to, at == 0);
     const auto& events = pattern.events;
     Slot::Held holding; // this tick's own Slide or Tie, for the notes of a later one
     bool lanes = !pattern.lanes.empty();
-    for (size_t n = pattern.lower(at); n < events.size() && events[n].tick == at; ++n)
-        if (!lanes || !pattern.own_lane(events[n].key)) play_event(t, slot, pattern, n, at, length, pass, seq, holding);
+    for (size_t n = pattern.lower(here.from); n < events.size() && events[n].tick < here.to; ++n)
+        if (!lanes || !pattern.own_lane(events[n].key)) play_event(t, slot, pattern, n, events[n].tick, length, pass, seq, holding);
     for (const auto& l : pattern.lanes) { // kit lanes of their own length (roadmap P1): each loops, and counts its passes, alone
         uint32_t loop = std::max<uint32_t>(std::min(l.length, pattern.length), 1); // lane_length(l.key), without looking l up again
         if (loop >= length) continue;
-        uint32_t lane_at = elapsed % loop;
-        for (size_t n = pattern.lower(lane_at); n < events.size() && events[n].tick == lane_at; ++n)
-            if (events[n].key == l.key) play_event(t, slot, pattern, n, lane_at, loop, elapsed / loop, seq, holding);
+        const uint32_t lane_pass = elapsed / loop;
+        const DirectedTick lane = directed(t, pattern, elapsed % loop, loop, 0, lane_pass, l.key + 1u);
+        for (size_t n = pattern.lower(lane.from); n < events.size() && events[n].tick < lane.to; ++n)
+            if (events[n].key == l.key) play_event(t, slot, pattern, n, events[n].tick, loop, lane_pass, seq, holding);
     }
     if (holding.key >= 0) slot.held = holding;
 }

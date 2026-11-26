@@ -67,6 +67,7 @@
 #include "melodee/shell/midi_route.h"
 #include "melodee/shell/mtc_in.h"
 #include "melodee/engine/midi_out.h"
+#include "melodee/model/step_order.h"
 #include "melodee/engine/midi_engine.h"
 #include "melodee/model/fader.h"
 #include "melodee/engine/effect_info.h"
@@ -1252,9 +1253,9 @@ void kept_punches() {
         Pattern p;
         p.length = 384;
         p.punches = {{96, 48, 4, 255, 100, 2, 1}, {300, 24, 8, 255, 100, 2, 1}};
-        auto fast = speed_pattern(p, 4); // x2: half the ticks
+        auto fast = speed_pattern(p, 9); // x2: half the ticks
         CHECK(fast.length == 192 && fast.punches[0].tick == 48 && fast.punches[0].length == 24 && fast.punches[1].tick == 150 && fast.punches[1].length == 12);
-        auto slow = speed_pattern(p, 0); // x1/2: twice
+        auto slow = speed_pattern(p, 5); // x1/2: twice
         CHECK(slow.punches[1].tick == 600 && slow.punches[1].length == 48);
         Pattern twice = p;
         CHECK(double_pattern(twice, 4 * 384) && twice.punches.size() == 4 && twice.punches[2].tick == 96 + 384 && twice.punches[3].tick == 300 + 384);
@@ -1277,7 +1278,7 @@ void kept_punches() {
         CHECK(stretched.punches.size() == 1 && stretched.punches[0].tick == 300 && stretched.punches[0].length == 84);
         Pattern shorter = p; // a shorter length: the punch past the end is not played at another speed either
         shorter.length = 192;
-        auto shorter_fast = speed_pattern(shorter, 4);
+        auto shorter_fast = speed_pattern(shorter, 9);
         CHECK(shorter_fast.punches.size() == 1 && shorter_fast.punches[0].tick == 48);
         // A file from before: a punch across the loop point as it was heard, in two parts; one longer than its
         // pattern ends with it; one past the end stays there.
@@ -8145,7 +8146,7 @@ void prints_f2a() {
     CHECK(changed([](Project& p, PatternBank&) { p.tracks[0].pads[0].pitch = 3; }));                          // its sound
     CHECK(changed([](Project& p, PatternBank&) { p.tracks[0].fx.slots[0].params[1] = 77; }));                 // its chain
     CHECK(changed([](Project& p, PatternBank&) { p.tempo = 1200; }));
-    CHECK(changed([](Project& p, PatternBank&) { p.tracks[0].speed = 3; }));
+    CHECK(changed([](Project& p, PatternBank&) { p.tracks[0].speed = 8; }));
     CHECK(changed([](Project& p, PatternBank&) { std::snprintf(p.samples.edit(0).path, sizeof(SampleRef::path), "/media/card/Other.wav"); }));
     CHECK(hash(*project, *bank, PrintTap::PreFx) != h && hash(*project, *bank, PrintTap::PostFx, PrintTail::Ring) != h);
     CHECK(hash(*project, *bank, PrintTap::PostFx, PrintTail::Loop, 44100) != h); // printed at another rate
@@ -10036,7 +10037,183 @@ void channel_strip_sound() {
 
 } // namespace
 
+
+// Elektron's sequencing: per track speed x1/64 .. x4, per track direction (FWD, REV, RND), per step PLAY (the way
+// the sample plays), SOUND (a sample of its own) and SLICE RND.
+void elektron_sequencing() {
+    // Speeds in order, x1 in the middle; the five a file before kept read as they were, today's as the nearest.
+    CHECK(speed_count == 11 && speed_of(speed_normal).num == 1 && speed_of(speed_normal).den == 1);
+    CHECK(speed_of(0).den == 64 && speed_of(speed_count - 1).num == 4);
+    for (unsigned s = 1; s < speed_count; ++s)
+        CHECK(double(speed_of(s).num) / speed_of(s).den > double(speed_of(s - 1).num) / speed_of(s - 1).den);
+    CHECK(speed_of_legacy(0) == 5 && speed_of_legacy(2) == speed_normal && speed_of_legacy(4) == 9 && speed_of_legacy(7) == speed_normal);
+    for (unsigned legacy = 0; legacy < 5; ++legacy) CHECK(legacy_speed(speed_of_legacy(legacy)) == legacy);
+    CHECK(legacy_speed(0) == 2 && legacy_speed(10) == 2);
+    { // x1/64: a note longer than any pattern as written still plays its whole length
+        Pattern p;
+        p.length = 4 * 16 * sixteenth_ticks;
+        put(p, 0, 60, 100, 64);
+        const Pattern slow = speed_pattern(p, 0);
+        CHECK(slow.length == p.length * 64 && slow.events[0].length == p.events[0].length * 64);
+    }
+    // The order of a pass's steps: every step once, another order for another seed.
+    for (uint32_t count : {1u, 2u, 3u, 7u, 16u, 100u, 8192u}) {
+        std::vector<int> seen(count, 0);
+        for (uint32_t k = 0; k < count; ++k) ++seen[shuffled_step(k, count, 1234)];
+        for (int n : seen) CHECK(n == 1);
+    }
+    {
+        bool other = false;
+        for (uint32_t k = 0; k < 16; ++k) other |= shuffled_step(k, 16, direction_seed(0, 0)) != shuffled_step(k, 16, direction_seed(0, 1));
+        CHECK(other && direction_seed(0, 3) == direction_seed(0, 3) && direction_seed(0, 3) != direction_seed(1, 3));
+    }
+    // A directed loop's ticks: REV plays the last step first, a note keeping its place in its step; over a pass every
+    // tick of the pattern is played once, at any speed, Q and length (a part step at the end included).
+    {
+        StepClock clock;
+        const uint32_t end = 16 * sixteenth_ticks;
+        auto first = directed_tick(0, end, clock, PlayDirection::Reverse, 0);
+        CHECK(first.from == 15 * sixteenth_ticks && first.to == first.from + 1 && first.step == 15);
+        auto later = directed_tick(sixteenth_ticks + 7, end, clock, PlayDirection::Reverse, 0);
+        CHECK(later.from == 14 * sixteenth_ticks + 7 && later.step == 14);
+        auto last = directed_tick(end - 1, end, clock, PlayDirection::Reverse, 0);
+        CHECK(last.from == sixteenth_ticks - 1 && last.to == sixteenth_ticks);
+        auto fwd = directed_tick(123, end, clock, PlayDirection::Forward, 0);
+        CHECK(fwd.from == 123 && fwd.to == 124);
+    }
+    for (unsigned speed : {0u, 4u, 6u, 7u, 8u, 10u})
+        for (Division q : {Division::Sixteenth, Division::SixteenthTriplet, Division::Quarter})
+            for (uint32_t written : {16u * sixteenth_ticks, 1000u, 3u * sixteenth_ticks + 50u})
+                for (PlayDirection d : {PlayDirection::Reverse, PlayDirection::Random}) {
+                    StepClock clock;
+                    clock.q = division_ticks(q);
+                    clock.speed = speed_of(speed);
+                    const uint32_t end = uint32_t(played_ticks(written, speed));
+                    std::vector<uint8_t> heard(end, 0);
+                    for (uint32_t at = 0; at < end; ++at) {
+                        auto here = directed_tick(at, end, clock, d, 99);
+                        CHECK(here.from <= here.to && here.to <= end);
+                        for (uint32_t k = here.from; k < here.to; ++k) ++heard[k];
+                    }
+                    for (auto n : heard) CHECK(n == 1);
+                }
+    // The engine: a MIDI track's four notes, backward, then shuffled (each once a pass), then forward again.
+    {
+        auto project = std::make_unique<Project>();
+        auto bank = std::make_unique<PatternBank>();
+        load_sound(project->tracks[0], EngineKind::Midi, 0);
+        project->tracks[0].params[midi_track::Port] = midi_track::UsbC; project->tracks[0].params[midi_track::Channel] = 1;
+        project->tracks[0].direction = uint8_t(PlayDirection::Reverse);
+        project->tempo = 1200;
+        auto& p = bank->at[0][0];
+        p.length = 4 * sixteenth_ticks;
+        for (unsigned s = 0; s < 4; ++s) put(p, s, uint8_t(60 + s), 100);
+        EngineHost host;
+        host.load(*project, *bank);
+        host.set_audio_format(44100, 384);
+        host.send({Command::Type::Play});
+        std::vector<int32_t> out(256);
+        auto keys = [&](unsigned blocks) {
+            std::vector<uint8_t> on;
+            for (unsigned n = 0; n < blocks; ++n) {
+                host.render(out.data(), 128, 1);
+                MidiOutEvent e;
+                while (host.take_midi(e)) if (e.kind == MidiOutEvent::Kind::NoteOn) on.push_back(e.a);
+            }
+            return on;
+        };
+        auto pass = keys(172); // four steps of 5512.5 frames: 22050
+        CHECK(pass.size() >= 4 && pass[0] == 63 && pass[1] == 62 && pass[2] == 61 && pass[3] == 60);
+        host.send({Command::Type::TrackDirection, 0, 0, 0, int16_t(PlayDirection::Random)});
+        auto shuffled = keys(172 * 4);
+        CHECK(shuffled.size() >= 12);
+        for (size_t from = 4; from + 4 <= 12; from += 4) { // whole passes after the one under way: each key once
+            std::vector<uint8_t> one(shuffled.begin() + long(from), shuffled.begin() + long(from + 4));
+            std::sort(one.begin(), one.end());
+            CHECK(one == (std::vector<uint8_t> {60, 61, 62, 63}));
+        }
+        CHECK(host.dropped() == 0);
+    }
+    // Step PLAY, SOUND and SLICE in the file: PLAY in the flags' bits 4-5, SOUND in ESMP, SLICE RND in SLCE.
+    {
+        auto project = std::make_unique<Project>();
+        auto bank = std::make_unique<PatternBank>();
+        tone_kit(*project, 0);
+        project->tracks[0].speed = 0; project->tracks[1].speed = 9;
+        project->tracks[0].direction = uint8_t(PlayDirection::Random);
+        auto& p = bank->at[0][3];
+        put(p, 0, uint8_t(sampler_first_note), 100);
+        p.events[0].flags = with_play(p.events[0].flags | step_accent, StepPlay::Reverse);
+        p.events[0].sample = 13;
+        p.events[0].slice = slice_random;
+        CHECK(step_play(p.events[0].flags) == StepPlay::Reverse && (p.events[0].flags & step_accent));
+        CHECK(step_play(with_play(p.events[0].flags, StepPlay::Pad)) == StepPlay::Pad);
+        Step st = p.step(0); // Step Edit's rewrite keeps the note's sample and slice
+        st.notes[0].velocity = 90;
+        p.set_step(0, st);
+        CHECK(p.events[0].sample == 13 && p.events[0].slice == slice_random && step_play(p.events[0].flags) == StepPlay::Reverse);
+        auto data = save_project(*project, *bank);
+        const std::string tags(data.begin(), data.end());
+        CHECK(tags.find("ESMP") != std::string::npos && tags.find("TSP2") != std::string::npos && tags.find("TDIR") != std::string::npos);
+        auto back = std::make_unique<Project>();
+        auto back_bank = std::make_unique<PatternBank>();
+        CHECK(load_project(data, *back, *back_bank).empty() && back_bank->at[0][3] == bank->at[0][3]);
+        CHECK(back->tracks[0].speed == 0 && back->tracks[1].speed == 9 && back->tracks[0].direction == uint8_t(PlayDirection::Random));
+    }
+    // The sampler: a step's sample through the pad (its whole sample), its way over the pad's, SLICE RND's draw.
+    {
+        auto noise = [](uint32_t seed) {
+            SampleData d;
+            d.frames = 30000; d.left.resize(d.frames); d.right.resize(d.frames);
+            for (unsigned n = 0; n < d.frames; ++n) {
+                seed = seed * 1664525u + 1013904223u;
+                d.left[n] = d.right[n] = float(int32_t(seed) >> 8) / float(1 << 23) * 0.5f * (1.0f - float(n) / d.frames);
+            }
+            return d;
+        };
+        SampleData a = noise(3), b = noise(77);
+        SamplerEngine::Table table {};
+        table[7] = &a; table[8] = &b;
+        Slices chop;
+        chop.count = 3;
+        chop.start[0] = 0; chop.start[1] = 10000; chop.start[2] = 20000;
+        chop.stop[0] = 10000; chop.stop[1] = 20000; chop.stop[2] = 0;
+        SamplerEngine::Chops chops {};
+        chops[8] = &chop;
+        PadSound pad;
+        pad.sample = 7; pad.start = 500; pad.end = 25000; pad.play = PadPlay::OneShot;
+        const int key = int(sampler_first_note) + 4;
+        auto render = [&](const PadSound& sound, int note, int sample, unsigned play, unsigned pick) {
+            SamplerEngine e;
+            e.set_samples(&table);
+            e.set_chops(&chops);
+            e.set_pad(4, sound);
+            if (sample >= 0 || play || pick) e.step_hit(sample, play, pick);
+            e.note_on(note, 100);
+            std::vector<float> out, l(128), r(128);
+            for (unsigned block = 0; block < 250; ++block) {
+                std::fill(l.begin(), l.end(), 0.0f); std::fill(r.begin(), r.end(), 0.0f);
+                e.render_stereo(l.data(), r.data(), 128);
+                out.insert(out.end(), l.begin(), l.end());
+            }
+            return out;
+        };
+        PadSound whole_b = pad; whole_b.sample = 8; whole_b.start = whole_b.end = 0;
+        const auto locked = render(pad, key, 8, 0, 0);
+        CHECK(peak_of(locked) > 0.05f && locked == render(whole_b, key, -1, 0, 0) && locked != render(pad, key, -1, 0, 0));
+        PadSound back_pad = pad; back_pad.reverse = true;
+        CHECK(render(pad, key, -1, unsigned(StepPlay::Reverse), 0) == render(back_pad, key, -1, 0, 0));
+        CHECK(render(back_pad, key, -1, unsigned(StepPlay::Forward), 0) == render(pad, key, -1, 0, 0));
+        // SLICE RND: slice draw % count of the step's sample's chop.
+        const int random_slice = pad_note(key, 0, -1, int(slice_random) - 1);
+        CHECK(render(pad, random_slice, 8, 0, 4) == render(whole_b, pad_note(key, 0, -1, 1), -1, 0, 0));
+        CHECK(render(pad, random_slice, -1, 0, 4) == render(pad, key, -1, 0, 0)); // no chop on its sample: the region
+    }
+    std::puts("elektron sequencing ok");
+}
+
 int main() {
+    elektron_sequencing();
     clock_960();
     slice_hit_notes();
     mixer_strips();

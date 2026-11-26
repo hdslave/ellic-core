@@ -65,7 +65,7 @@ void Pattern::set_step(unsigned s, const Step& value) {
         for (unsigned k = 0; k < count; ++k) // the note it was keeps its pitch, and its ratchet while the step's is unchanged
             if (was[k].key == n.key && was[k].velocity) {
                 e.pitch = was[k].pitch; e.pitch_ramp = was[k].pitch_ramp;
-                e.slice = was[k].slice; // a slice hit stays its slice
+                e.slice = was[k].slice; e.sample = was[k].sample; // a slice hit stays its slice, a step's sample its own
                 if (same_ratchet) { e.ratchet = was[k].ratchet; e.ramp = was[k].ramp; }
                 if (same_condition) e.condition = was[k].condition;
                 was[k].velocity = 0;
@@ -270,18 +270,21 @@ Pattern speed_pattern(const Pattern& p, unsigned speed) {
     auto scale = [&](uint64_t ticks) { return (ticks * s.den + s.num / 2) / s.num; }; // to the nearest tick
     Pattern out = p;
     out.length = uint32_t(std::max<uint64_t>(scale(p.length), 1));
+    // A note's length and a lock's hold as they play: at x1/64 longer than any pattern as written (note_ticks' cap).
+    const uint64_t longest = std::max<uint64_t>(max_pattern_ticks, out.length);
+    auto held = [&](uint64_t ticks) { return uint32_t(std::clamp<uint64_t>(scale(ticks), 1, longest)); };
     out.events.clear();
     for (auto e : p.events) {
         if (e.tick >= p.length) continue;
         e.tick = uint32_t(std::min<uint64_t>(scale(e.tick), out.length - 1));
-        e.length = note_ticks(scale(e.length));
+        e.length = held(e.length);
         out.add(e);
     }
     out.motion.clear();
     for (auto m : p.motion) {
         if (m.tick >= p.length) continue; // hidden past the end: not played on the last tick
         m.tick = uint32_t(std::min<uint64_t>(scale(m.tick), out.length - 1));
-        if (m.hold) m.hold = note_ticks(scale(m.hold));
+        if (m.hold) m.hold = held(m.hold);
         out.write_motion(m);
     }
     for (auto& l : out.lanes) l.length = uint32_t(std::max<uint64_t>(scale(l.length), 1));

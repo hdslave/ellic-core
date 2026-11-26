@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #include "melodee/engine/sampler.h"
+#include "melodee/model/pattern.h"
 #include "melodee/engine/engine_info.h"
 #include <algorithm>
 #include <climits>
@@ -105,7 +106,8 @@ void SamplerEngine::start(Voice& v, const PadSound& sound, int pad, int velocity
     if (v.end <= v.start + 1) { v.pad = -1; return; }
     v.l = part ? part->left : streamed ? streamed->left : data->left.data();
     v.r = part ? part->right : streamed ? streamed->right : data->right.data();
-    v.reverse = sound.reverse;
+    v.reverse = starting_play ? starting_play == uint8_t(StepPlay::Reverse) : sound.reverse; // step PLAY over the pad's way
+    v.play = starting_play;
     v.position = v.reverse ? v.end - 1 : v.start;
     v.total = total;
     if (zone) {
@@ -411,6 +413,11 @@ void SamplerEngine::refresh(Voice& v) {
         sound = &layered;
     }
     if (!sound->used() || sound->sample != v.slot) return;
+    if (v.play) { // step PLAY: its way over the pad's
+        if (sound != &layered) layered = *sound;
+        layered.reverse = v.play == uint8_t(StepPlay::Reverse);
+        sound = &layered;
+    }
     const SampleZone* zone = nullptr;
     Multisample* multi = nullptr;
     int key = v.key;
@@ -648,8 +655,32 @@ void SamplerEngine::play(const PadSound& sound, int pad, int velocity, int semit
 // on through the bank (roadmap P3), each pad once: a chain that comes back
 // round to a pad already played stops there.
 void SamplerEngine::hit(int pad, int velocity, int semitones, int cutoff, int slice) {
+    const int step_sample = next_sample;
+    const uint8_t step_play = next_play;
+    const uint16_t pick = next_pick;
+    next_sample = -1; next_play = 0; next_pick = 0; // step_hit()'s, for this hit alone
     if (pad < 0 || pad >= int(sampler_pads) || pad_muted(unsigned(pad))) return;
-    const auto& sound = pads[size_t(pad)];
+    PadSound locked; // step SOUND: the pad with another sample, the whole of it (the pad's region is its own sample's)
+    const bool lock = step_sample >= 0 && step_sample < int(sample_slots) && samples && (*samples)[size_t(step_sample)] && pads[size_t(pad)].used();
+    if (lock) {
+        locked = pads[size_t(pad)];
+        locked.sample = uint16_t(step_sample);
+        locked.start = locked.end = 0;
+        locked.layers = {};
+        locked.link = 0;
+        locked.loop_lock = true; locked.loop_start = 0;
+        locked.own_tempo = 0; locked.beats = 0; // its tempo unknown: Warp's Follow does not move it
+    }
+    const auto& sound = lock ? locked : pads[size_t(pad)];
+    if (slice == int(slice_random) - 1) { // SLICE RND: one of the chop's slices by the note's draw, else the region
+        const Slices* drawn = chops && sound.used() && sound.sample < sample_slots ? (*chops)[sound.sample] : nullptr;
+        slice = drawn && drawn->count ? int(pick % drawn->count) : -1;
+    }
+    struct Way { // step PLAY for the voices this hit starts
+        SamplerEngine& s;
+        Way(SamplerEngine& s, uint8_t play) : s(s) { s.starting_play = play; }
+        ~Way() { s.starting_play = 0; }
+    } way {*this, step_play};
     // Issue 24, a slice hit: the pad's sound over that slice of its sample's chop (as TO PADS lays a slice, POLY: the
     // slice's own Reverse with it), no linked pad; past the chop's end nothing. A sample with no chop plays the pad's
     // own region.
@@ -675,6 +706,7 @@ void SamplerEngine::hit(int pad, int velocity, int semitones, int cutoff, int sl
         const int linked = pad / 16 * 16 + (pads[size_t(at)].link - 1) % 16;
         if (played & (1u << (linked % 16))) break; // round to a pad already played
         played |= 1u << (linked % 16);
+        starting_play = 0; // a linked pad plays its own way
         if (!pad_muted(unsigned(linked))) play(pads[size_t(linked)], linked, velocity, 0, -1, pad); // a muted pad is silent but links on
         at = linked;
     }

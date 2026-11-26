@@ -21,6 +21,7 @@
 #include "melodee/engine/take_recorder.h"
 #include "melodee/engine/bounce.h"
 #include "melodee/engine/recall_ring.h"
+#include "melodee/model/step_order.h"
 #include "melodee/engine/midi_out.h"
 #include "melodee/model/input_config.h"
 #include "melodee/model/project.h"
@@ -89,6 +90,11 @@ struct TrackPack {
     Track value;
     PlayPatterns patterns {};
 };
+
+// A sequenced note's own sound (step SOUND and PLAY): the sample slot it plays in place of its pad's (-1 the pad's),
+// the way it plays (StepPlay: Forward or Reverse, Random already turned into one of them) and the slice a SLICE RND
+// takes (a draw, modulo the chop's slices).
+struct StepSound { int32_t sample = -1; uint8_t play = 0; uint16_t pick = 0; bool own() const { return sample < 0 && !play; } };
 
 class EngineHost {
 public:
@@ -418,7 +424,7 @@ private:
     struct PendingOn { int32_t key = -1; int16_t velocity = 0; int32_t from = -1; int32_t samples = 0, length = 0; }; // an arp note swung late
     // A ratchet's hit still to come (roadmap P1): `samples` frames on it plays `key` (as the engine plays it; a kit
     // pad's semitones over it) and `midi` out, for `length` frames.
-    struct PendingHit { int32_t key = -1; int16_t midi = -1; uint8_t velocity = 0; bool accent = false, sound = true; int32_t samples = 0, length = 0, shift = 0; };
+    struct PendingHit { int32_t key = -1; int16_t midi = -1; uint8_t velocity = 0; bool accent = false, sound = true; int32_t samples = 0, length = 0, shift = 0; StepSound step; };
     // Roadmap P2, one dispatch a block: a call to a track's engine the sequencing pass made past the block's first
     // frame, kept for the track's job to make at that frame (play_calls()).
     struct EngineCall {
@@ -553,7 +559,7 @@ private:
     // yet) or the old way (every track rendered up to each tick), else kept for its job, at block_at (roadmap P2).
     bool deferring = false; // the sequencing pass of a one-dispatch block is running
     bool keep_call(Slot& slot, const EngineCall& call);
-    void engine_note_on(Slot& slot, int key, int velocity, float accent = 1);
+    void engine_note_on(Slot& slot, int key, int velocity, float accent = 1, const StepSound& step = {});
     void engine_note_off(Slot& slot, int key);
     void engine_slide(Slot& slot, int from, int to, int velocity, bool glide, float accent);
     void engine_param(Slot& slot, int id, int value);
@@ -638,7 +644,12 @@ private:
     void follow_lane();
     double tick_samples(uint32_t at) const;
     double ticks_frames(uint32_t from, uint32_t to) const;
-    void play_motion(unsigned track, Slot& slot, const Pattern& pattern, uint32_t at);
+    // Motion's points on ticks [from, to) of the pattern as played; `top` the pass's first tick (lanes start again).
+    void play_motion(unsigned track, Slot& slot, const Pattern& pattern, uint32_t from, uint32_t to, bool top);
+    // Elektron's per track direction (model/step_order.h): what tick `at` of a loop plays, the loop's steps from
+    // `base` (written ticks) up to `end` (as played), on pass `pass`; `lane` a kit lane's key + 1 (0 the pattern).
+    DirectedTick directed(unsigned track, const Pattern& pattern, uint32_t at, uint32_t end, uint32_t base, uint32_t pass, unsigned lane = 0) const;
+    StepSound step_sound(unsigned track, const Slot& slot, const Event& e, uint32_t pass) const; // step SOUND and PLAY
     void move_lane(unsigned track, Slot& slot, unsigned param, unsigned pad, int value); // a Motion lane to `value`
     void restore_lane(unsigned track, Slot& slot, unsigned param, unsigned pad);        // and back to the track's own
     void pad_mute_call(Slot& slot, unsigned pad, bool on); // issue 32: a lane's mute on a kit pad, on its frame
@@ -1131,6 +1142,7 @@ private:
     std::array<std::atomic<int>, track_count> positions_now {};
     std::array<std::atomic<uint32_t>, track_count> passes_now {};
     std::array<std::atomic<uint8_t>, track_count> speeds_now {}; // each track's speed (roadmap P1), for place_at()
+    std::array<std::atomic<uint8_t>, track_count> directions_now {}; // each track's PlayDirection (model/step_order.h)
     std::atomic<unsigned> count_beat {0};
     std::atomic<uint32_t> count_rest {0}, count_from {0};
     std::atomic<unsigned> tempo_shown {1200};

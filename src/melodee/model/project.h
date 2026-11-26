@@ -376,7 +376,8 @@ struct Track {
     uint8_t midi_channel = 0; // MIDI Config: 0 none, 1..16 notes on it play this track; its notes go out on it (parity phase 9)
     TrackMidiIn midi_in = TrackMidiIn::Any; // the port its own channel is heard on (MIDC's third byte)
     uint8_t plugin = no_plugin; // a PLUGIN track: the entry of Project::plugins it plays
-    uint8_t speed = speed_normal; // its patterns' playback speed (roadmap P1), an index into speeds: x1/2 .. x2
+    uint8_t speed = speed_normal; // its patterns' playback speed (roadmap P1), an index into speeds: x1/64 .. x4
+    uint8_t direction = 0;        // its patterns' steps forward, backward or shuffled each pass (model/step_order.h PlayDirection)
     MidiDevice midi;              // a MIDI track's device name, drum map and SysEx file (roadmap P4, MIDT v3)
     AudioTrackSettings audio;     // an AUDIO track's source and monitor (freeze plan F3, AUDT)
     // Its pattern in each scene (model/scene_links.h): 0 none (the track plays on when the scene launches), n + 1

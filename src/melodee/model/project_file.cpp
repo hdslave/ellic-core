@@ -6,6 +6,7 @@
 #include "melodee/model/pad_params.h"
 #include "melodee/model/scene_links.h"
 #include "melodee/model/scales.h"
+#include "melodee/model/step_order.h"
 #include "melodee/engine/engine_info.h"
 #include "melodee/engine/midi_engine.h"
 #include "melodee/engine/sampler.h"
@@ -326,6 +327,15 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
                     if (pattern.events[n].slice) { w.u32(n); w.u8(pattern.events[n].slice); }
                 w.end(at);
             }
+            uint32_t locked = 0;
+            for (const auto& e : pattern.events) locked += e.sample != 0;
+            if (locked) { // step SOUND: notes playing a sample of their own, its slot + 1, by their place in EVNT
+                at = w.begin("ESMP");
+                w.u8(t); w.u8(p); w.u32(locked);
+                for (uint32_t n = 0; n < pattern.events.size(); ++n)
+                    if (pattern.events[n].sample) { w.u32(n); w.u16(pattern.events[n].sample); }
+                w.end(at);
+            }
             uint32_t ratchets = 0;
             for (const auto& e : pattern.events) ratchets += e.hits() > 1 || e.ramp || e.pitch_ramp;
             if (ratchets) { // ratchets (roadmap P1), by their place in EVNT: hits, velocity ramp, pitch ramp
@@ -429,9 +439,21 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
     bool sped = false; // the tracks' playback speeds (roadmap P1), when one is not x1
     for (const auto& tr : project.tracks) sped |= tr.speed != speed_normal;
     if (sped) {
-        at = w.begin("TSPD");
+        at = w.begin("TSPD"); // as builds before x1/64 .. x4 number them (the nearest they play)
+        w.u8(track_count);
+        for (const auto& tr : project.tracks) w.u8(uint8_t(legacy_speed(tr.speed)));
+        w.end(at);
+        at = w.begin("TSP2"); // today's, after TSPD: model/pattern.h speeds
         w.u8(track_count);
         for (const auto& tr : project.tracks) w.u8(tr.speed);
+        w.end(at);
+    }
+    bool directed = false; // the tracks' playback directions (model/step_order.h), when one is not forward
+    for (const auto& tr : project.tracks) directed |= tr.direction != 0;
+    if (directed) {
+        at = w.begin("TDIR");
+        w.u8(track_count);
+        for (const auto& tr : project.tracks) w.u8(tr.direction);
         w.end(at);
     }
     bool named = false; // tracks with a name of their own (Tracks, Shift + Push), kept when their sound changes
@@ -1212,7 +1234,18 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
                 uint32_t place = r.u32();
                 unsigned slice = r.u8();
                 // Written in order with their slices, so the places after EVNT's sort are still theirs.
-                if (r.ok && place < pattern.events.size()) pattern.events[place].slice = uint8_t(std::min(slice, max_slices));
+                if (r.ok && place < pattern.events.size())
+                    pattern.events[place].slice = uint8_t(slice == slice_random ? slice : std::min(slice, max_slices));
+            }
+        } else if (name == "ESMP") { // step SOUND; without it every note plays its pad's own sample
+            unsigned t = r.u8(), p = r.u8();
+            if (t >= track_count || p >= pattern_count) continue;
+            auto& pattern = patterns->at[t][p];
+            uint32_t count = std::min<uint32_t>(r.u32(), max_pattern_events);
+            for (uint32_t k = 0; k < count && r.ok; ++k) {
+                uint32_t place = r.u32();
+                unsigned sample = r.u16();
+                if (r.ok && place < pattern.events.size() && sample && sample <= sample_slots) pattern.events[place].sample = uint16_t(sample);
             }
         } else if (name == "RTCH") { // ratchets (roadmap P1); without it every note plays once
             unsigned t = r.u8(), p = r.u8();
@@ -1245,11 +1278,23 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
                 bool own = r.u8() != 0;
                 if (k < track_count && r.ok) project->tracks[k].named = own;
             }
-        } else if (name == "TSPD") { // the tracks' playback speeds (roadmap P1); without it every track at x1
+        } else if (name == "TSPD") { // the tracks' playback speeds (roadmap P1), x1/2 .. x2; without it every track at x1
+            unsigned count = r.u8();
+            for (unsigned k = 0; k < count && r.ok; ++k) {
+                unsigned speed = r.u8();
+                if (k < track_count && r.ok) project->tracks[k].speed = uint8_t(speed_of_legacy(speed));
+            }
+        } else if (name == "TSP2") { // x1/64 .. x4, after TSPD (which an older build reads)
             unsigned count = r.u8();
             for (unsigned k = 0; k < count && r.ok; ++k) {
                 unsigned speed = r.u8();
                 if (k < track_count && r.ok) project->tracks[k].speed = uint8_t(speed < speed_count ? speed : speed_normal);
+            }
+        } else if (name == "TDIR") { // the tracks' playback directions; without it every track forward
+            unsigned count = r.u8();
+            for (unsigned k = 0; k < count && r.ok; ++k) {
+                unsigned direction = r.u8();
+                if (k < track_count && r.ok) project->tracks[k].direction = uint8_t(direction_of(direction));
             }
         } else if (name == "KEPT") { // punches kept with a pattern (pad-fx C); without it a pattern keeps none
             unsigned t = r.u8(), p = r.u8();

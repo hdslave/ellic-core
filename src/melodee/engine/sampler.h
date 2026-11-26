@@ -97,6 +97,10 @@ public:
     // own): 16 Levels; or slice `slice` of its sample's chop (-1 its own region): Chop under Seq Record (issue 24).
     // note_off for the pad's note releases it.
     void play_pad(unsigned pad, int velocity, int semitones, int cutoff = -1, int slice = -1);
+    // The next hit's own sound, a sequenced note's (step SOUND and PLAY): `sample` a slot played through the pad in
+    // place of its own (-1 its own), `play` StepPlay Forward or Reverse (else the pad's way), `pick` the draw a SLICE
+    // RND note takes its slice by. Taken by that hit alone (note_on just after).
+    void step_hit(int sample, unsigned play, unsigned pick) { next_sample = sample; next_play = uint8_t(play); next_pick = uint16_t(pick); }
     // Note Repeat holds a kit pad: on a pad of Cycle hold or Random hold, every repeat plays the layer the
     // first one picked, until the hold ends (model/sampler.h LayerPlay).
     void hold_layer(unsigned pad, bool on) { if (pad < sampler_pads) held_layer[pad] = int8_t(on ? -2 : -1); }
@@ -270,6 +274,7 @@ private:
         uint8_t velocity = 0;
         int8_t layer = -1;                  // the pad's layer it plays (layers_on), -1 the pad itself
         int8_t slice = -1;                  // issue 24: the slice of its sample's chop it plays (a slice hit), -1 the pad's region
+        uint8_t play = 0;                   // step PLAY: StepPlay Forward or Reverse it keeps over the pad's Reverse (0 the pad's)
         int16_t levels_cutoff = -1;         // 16 Levels' cutoff it was hit with, -1 the pad's own
         float accent = 1, fall = 1;         // the sequencer's accent; a release sample's rt_decay
         const SampleGrowth* grow = nullptr; // its sample is still being read: it reads only what landed (admit_grown)
@@ -366,6 +371,10 @@ private:
     uint32_t grain_serial = 0;
     unsigned tempo = 1200;
     uint32_t seed = 99;
+    // step_hit(): the next hit's sample, way and slice draw; `starting_play` the way the voices start() takes.
+    int next_sample = -1;
+    uint8_t next_play = 0, starting_play = 0;
+    uint16_t next_pick = 0;
     // A choke's fade and an instrument zone's duck move this far a frame: 64 44.1 kHz frames (1.5 ms) at any rate.
     float edge_step = 1.0f / 64;
     const Table* samples = nullptr;
