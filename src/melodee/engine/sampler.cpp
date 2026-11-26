@@ -225,8 +225,11 @@ void SamplerEngine::aim(Voice& v, const PadSound& sound, const SampleZone* zone,
     const float decay_s = time_seconds(decay) * (p[Decay] / 100.0f) + 0.005f;
     const bool from_end = !v.gate && !sound.decay_from_start;
     const bool hold = decay >= 100 || from_end;
+    // A one shot from the start falls to silence over its decay, as the MPC's AD envelope: sustain is Note On's (a
+    // pad's sustain is 100 until turned, and from the start it held the hit at full: issue 64).
+    const float floor = v.gate ? sustain / 100.0f : 0.0f;
     v.shape = {dsp::Envelope::coefficient(time_seconds(attack) * 0.3f), dsp::Envelope::coefficient(hold ? 1000.0f : decay_s),
-               dsp::Envelope::coefficient(time_seconds(release) * 0.5f + 0.003f), hold ? 1.0f : sustain / 100.0f};
+               dsp::Envelope::coefficient(time_seconds(release) * 0.5f + 0.003f), hold ? 1.0f : floor};
     v.aim.tail = from_end && decay < 100 && !v.loop ? decay_s * dsp::sample_rate() : 0.0f;
     // The pad's filter, or 16 Levels' cutoff (Classic when the pad has none).
     PadFilter filter = sound.filter;
