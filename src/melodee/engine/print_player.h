@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (C) 2026 Kerem Kilic (Ellic Studio)
 #pragma once
+#include "melodee/engine/dsp.h"
 #include "melodee/engine/multisample.h"
 #include "melodee/engine/stream_pager.h"
 #include "melodee/model/print.h"
@@ -111,6 +112,12 @@ private:
     };
     // One extra fade voice for a replacement launch or repeat when all the Ring voices are still busy.
     std::array<Voice, voice_count + 1> voices {}; // [0] the main voice
+    // When another replacement arrives during that fade, mix the displaced voice's pinned audio into this short
+    // buffer. Fades can overlap here without taking more pager streams or keeping their clips alive.
+    struct FadeFrame { float left = 0, right = 0, coverage = 0, ring_gain = 0; };
+    static constexpr unsigned fade_frames = unsigned(fade_seconds * dsp::max_rate) + 1;
+    std::array<FadeFrame, fade_frames> recycled {};
+    unsigned recycled_at = 0, recycled_count = 0;
     uint64_t expect = 0;  // the main voice's frame on the next tick
     double carry = 0;     // the next tick's place less `expect`, as render() counts ticks (-1..0]
     StreamPager* pager = nullptr;
@@ -118,6 +125,7 @@ private:
     void begin(PrintClip* clip, uint32_t frame, bool fade_in, float rate, bool replaces_live);
     void rewind(Voice& v);
     void close(Voice& v);
+    void recycle_fade(const Voice& v, float fade);
     void retire_main(bool ring, float rate); // the main voice to another, ringing on or fading
 };
 

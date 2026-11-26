@@ -8776,6 +8776,59 @@ void freeze_launch_seams() {
     }
 }
 
+void freeze_rapid_ring_repeats() {
+    const float saved_rate = dsp::sample_rate();
+    constexpr unsigned attack = 16, passes = 11;
+    constexpr float tail = 0.09375f;
+    for (unsigned rate : {44100u, unsigned(dsp::max_rate)}) {
+        dsp::device_rate.store(rate);
+        for (unsigned ticks : {1u, 2u}) {
+            auto project = std::make_unique<Project>();
+            auto bank = std::make_unique<PatternBank>();
+            project->tempo = 3000; project->swing = 50;
+            synth(project->tracks[0], 0);
+            bank->at[0][0].length = ticks;
+            FreezeRig rig(*project, *bank);
+            std::array<unsigned, passes + 1> seam {};
+            for (unsigned r = 0; r <= passes; ++r) seam[r] = unsigned(rig.host->tick_frame(r * ticks));
+            const unsigned pass = seam[1];
+            const float fade = PrintPlayer::fade_seconds * rate;
+            CHECK(pass > attack && pass < fade);
+            auto* pack = new FreezePack;
+            pack->keep_live = true;
+            auto clip = std::make_unique<PrintClip>();
+            std::vector<float> pcm(2 * (pass + rate), tail);
+            std::fill_n(pcm.begin(), 2 * attack, 0.0f);
+            clip->hold_whole(std::move(pcm), rate, pass, PrintTail::Ring);
+            pack->clips[0] = clip.get();
+            pack->owned.push_back(std::move(clip));
+            rig.freeze(pack);
+            rig.send({Command::Type::Play});
+            const auto heard = rig.play(seam.back() + 1);
+            CHECK(rig.host->printing_tracks() == 1);
+            for (unsigned r = 4; r < passes; ++r) {
+                for (unsigned f = seam[r]; f < seam[r + 1]; ++f) {
+                    float expected = (f < seam[r] + attack ? 3.0f : 4.0f) * tail;
+                    for (unsigned d = 4; d <= r; ++d)
+                        expected += tail * std::max(0.0f, 1.0f - (f - seam[d] + 1) / fade);
+                    CHECK(std::fabs(heard[f][0] - expected) < 1e-5f);
+                    CHECK(heard[f][1] == heard[f][0]);
+                }
+            }
+            CHECK(rig.host->print_waits() == 0 && rig.host->print_underruns() == 0);
+            // Unfreeze with both buffered fades and print voices still finishing. The pack comes back and no tail survives.
+            rig.freeze(nullptr);
+            const auto unfreeze = rig.play(1024);
+            CHECK(std::all_of(unfreeze.begin() + unsigned(std::ceil(fade)) + 1, unfreeze.end(),
+                              [](const auto& frame) { return frame == FreezeFrame {}; }));
+            FreezePack* done = nullptr;
+            CHECK(rig.host->frozen_tracks() == 0 && rig.host->take_done_freeze(done) && done == pack);
+            delete done;
+        }
+    }
+    dsp::device_rate.store(saved_rate);
+}
+
 void freeze_strip_unfreeze() {
     const float saved_rate = dsp::sample_rate();
     for (unsigned rate : {44100u, 48000u}) {
@@ -10204,6 +10257,7 @@ int main() {
     freeze_f2b();
     freeze_keep_live();
     freeze_launch_seams();
+    freeze_rapid_ring_repeats();
     freeze_strip_unfreeze();
     audio_track_playback();
     audio_warp();

@@ -41,7 +41,11 @@ void PrintPlayer::close(Voice& v) {
     v = Voice {};
 }
 
-void PrintPlayer::cut_all() { for (auto& v : voices) close(v); }
+void PrintPlayer::cut_all() {
+    for (auto& v : voices) close(v);
+    if (recycled_count) recycled.fill({});
+    recycled_at = recycled_count = 0;
+}
 
 void PrintPlayer::fade_all(float rate) {
     for (auto& v : voices) {
@@ -52,11 +56,13 @@ void PrintPlayer::fade_all(float rate) {
 }
 
 bool PrintPlayer::leaving() const {
+    if (recycled_count) return true; // keep the replacement mix routed until the buffered fades finish
     for (const auto& v : voices) if (v.clip && v.leaving) return true;
     return false;
 }
 
 bool PrintPlayer::sounding() const {
+    if (recycled_count) return true;
     for (const auto& v : voices) if (v.clip) return true;
     return false;
 }
@@ -89,6 +95,32 @@ void PrintPlayer::rewind(Voice& v) {
     }
 }
 
+void PrintPlayer::recycle_fade(const Voice& v, float fade) {
+    const PrintClip& c = *v.clip;
+    const uint32_t limit = c.resident ? c.part.total :
+        v.stream >= 0 && !pager->dead(v.stream) ? pager->limit(v.stream) : 0;
+    const uint32_t ready = std::min(c.frames, limit / c.stride);
+    const float step = std::min(v.step, fade);
+    float gain = v.gain, l = v.last_l, r = v.last_r;
+    bool heard = v.have_last;
+    unsigned f = 0;
+    for (; f < fade_frames && gain > 0; ++f) {
+        gain = std::max(0.0f, gain + step);
+        const uint32_t at = v.at + f;
+        if (at < ready) {
+            l = c.data()[at * c.stride]; r = c.data()[at * c.stride + 1];
+            heard = true;
+        }
+        // At EOF or beyond the pinned window, finish the fade on the last sample we could read safely.
+        if (!heard) continue;
+        auto& out = recycled[(recycled_at + f) % fade_frames];
+        out.left += l * gain; out.right += r * gain;
+        if (v.ring_tail) out.ring_gain = std::max(out.ring_gain, gain);
+        else out.coverage = std::min(1.0f, out.coverage + gain);
+    }
+    if (heard) recycled_count = std::max(recycled_count, f);
+}
+
 void PrintPlayer::retire_main(bool ring, float rate) {
     auto& m = voices[0];
     if (!m.clip) return;
@@ -105,7 +137,11 @@ void PrintPlayer::retire_main(bool ring, float rate) {
             // The new pass starts now. Move the selected tail's stream into the fade slot before reusing its voice.
             spare = *to;
             spare.step = std::min(spare.step, fade);
-        } else close(*to);
+        } else {
+            // Replacement is limited to plug-in tracks. Their prints have no kit pad sends.
+            if (to->replaces_live && !to->clip->sends) recycle_fade(*to, fade);
+            close(*to);
+        }
     }
     *to = m;
     to->ring_tail = ring;
@@ -267,6 +303,17 @@ void PrintPlayer::render(float* left, float* right, unsigned frames, float* cons
         waits += waited;
         if (v.clip && v.stream >= 0) pager->place(v.stream, uint32_t(std::min<uint64_t>(uint64_t(v.at) * c.stride, c.part.total)));
     }
+    if (!recycled_count) return;
+    const unsigned n = std::min(frames, recycled_count);
+    for (unsigned f = 0; f < n; ++f) {
+        auto& frame = recycled[(recycled_at + f) % fade_frames];
+        left[f] += frame.left; right[f] += frame.right;
+        if (coverage) coverage[f] = std::min(1.0f, coverage[f] + frame.coverage);
+        if (ring_gain) ring_gain[f] = std::max(ring_gain[f], frame.ring_gain);
+        frame = {};
+    }
+    recycled_at = (recycled_at + n) % fade_frames;
+    recycled_count -= n;
 }
 
 } // namespace melodee
