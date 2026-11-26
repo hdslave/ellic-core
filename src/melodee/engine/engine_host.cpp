@@ -1790,6 +1790,7 @@ void EngineHost::keep_keys(unsigned frames) {
 // allocates: the lines were made at start and only change where they read.
 void EngineHost::plan_compensation() {
     Compensation plan;
+    bool keep_delay_history = false;
     std::array<unsigned, track_count> own {}, through {}; // through: its submix's chain after it (the mixer)
     for (unsigned t = 0; t < track_count; ++t) {
         const auto& slot = slots[t];
@@ -1801,8 +1802,10 @@ void EngineHost::plan_compensation() {
         // A replacement can go live even while the pattern still has a print. Use the last tick's
         // playback mode for this block, so a rejected print keeps its live plug-in/chain latency.
         // Ordinary Pre FX prints still pass through the chain, which adds its own latency.
-        if (slot.freeze && (slot.freeze->keep_live ? slot.print_on : slot.freeze->clips[slot.pattern % pattern_count] != nullptr))
+        if (slot.freeze && (slot.freeze->keep_live ? slot.print_on : slot.freeze->clips[slot.pattern % pattern_count] != nullptr)) {
+            keep_delay_history |= slot.freeze->keep_live && own[t] != 0;
             own[t] = slot.freeze->tap == PrintTap::PostFx ? 0 : chain_latency(t);
+        }
         plan.tracks = std::max(plan.tracks, own[t] + through[t]);
         if (slot.engine == &slot.sampler) // its pads sent to a submix: that submix's chain late
             for (unsigned n = 0; n < sub_count; ++n) if ((slot.sampler.routes() >> n) & 1) plan.tracks = std::max(plan.tracks, chain_latency(sub_chain(n)));
@@ -1829,9 +1832,11 @@ void EngineHost::plan_compensation() {
     for (unsigned b = 0; b < bus_count; ++b) plan.delay[CompensationLines::pad_sends0 + b] = plan.tracks; // they leave before the chain
     // Kits' pads sent to a submix leave before their chain too: as late as the tracks that go into that submix.
     for (unsigned n = 0; n < sub_count; ++n) plan.delay[CompensationLines::pad_subs0 + n] = plan.tracks - std::min(chain_latency(sub_chain(n)), plan.tracks);
-    // On while anything is late, and for one block after it all came back to none (the lines ease back).
+    // Keep the other paths' history when a replacement print covers a late track. Falling back to
+    // live can then ease into its delay without starting from silence.
+    // Otherwise stay on while anything is late and for the block that eases back to no delay.
     bool late = plan.tracks || plan.returns;
-    plan.on = late || (pdc.on && (pdc.tracks || pdc.returns));
+    plan.on = late || keep_delay_history || (pdc.on && (pdc.tracks || pdc.returns));
     pdc = plan;
     pdc_total.store(plan.total, std::memory_order_relaxed);
     pdc_master.store(plan.master, std::memory_order_relaxed);

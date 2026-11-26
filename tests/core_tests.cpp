@@ -8868,6 +8868,57 @@ void freeze_short_swing() {
     CHECK(rig.host->print_waits() == 0 && rig.host->print_underruns() == 0);
 }
 
+void freeze_compensation_history() {
+    const unsigned rate = unsigned(dsp::sample_rate());
+    auto project = std::make_unique<Project>();
+    auto bank = std::make_unique<PatternBank>();
+    project->tempo = 3000; project->swing = 75;
+    for (unsigned t : {0u, 1u}) synth(project->tracks[t], t);
+    bank->at[0][0].length = 2;
+    put(bank->at[1][0], 0, 60, 100);
+    LatePlugin late;
+    late.late = 96;
+    FreezeInstrument constant;
+    auto host = std::make_unique<EngineHost>();
+    host->load(*project, *bank);
+    host->set_print_tap(1, true); // the other track should keep sounding through every change of latency
+    CHECK(host->offer_plugin(0, &late) && host->offer_plugin(1, &constant));
+    const unsigned pass = unsigned(host->tick_frame(2));
+    const unsigned short_half = unsigned(host->tick_frame(sixteenth_ticks));
+    const unsigned long_half = unsigned(host->tick_frame(2 * sixteenth_ticks));
+    auto* pack = new FreezePack;
+    pack->keep_live = true;
+    auto clip = std::make_unique<PrintClip>();
+    clip->hold_whole(std::vector<float>(2 * pass, 0.375f), rate, pass, PrintTail::Loop);
+    pack->clips[0] = clip.get();
+    pack->owned.push_back(std::move(clip));
+    Command freeze {Command::Type::Freeze, 0};
+    freeze.freeze = pack;
+    CHECK(host->send(freeze) && host->send({Command::Type::Play}));
+    const auto render = [&](unsigned frames, bool same) {
+        std::array<int32_t, EngineHost::block * 2> out;
+        while (frames) {
+            const unsigned n = std::min(frames, EngineHost::block);
+            host->render(out.data(), n, 1);
+            if (same) {
+                for (unsigned f = 0; f < n; ++f)
+                    CHECK(host->print_left()[f] == 0.25f && host->print_right()[f] == -0.125f);
+            }
+            frames -= n;
+        }
+    };
+    render(512, false);
+    render(short_half - 512, true);
+    CHECK(host->printing_tracks() == 1 && host->track_latency(0) == 0);
+    render(long_half - short_half, true); // delay comes back while the rejected print crossfades to live
+    CHECK(host->printing_tracks() == 0 && host->track_latency(0) == late.late);
+    render(512, true);
+    CHECK(host->printing_tracks() == 1 && host->track_latency(0) == 0);
+    CHECK(host->send({Command::Type::Freeze, 0}));
+    render(512, true);
+    CHECK(host->frozen_tracks() == 0 && host->track_latency(0) == late.late);
+}
+
 void freeze_swing_phase() {
     const unsigned rate = unsigned(dsp::sample_rate());
     auto project = std::make_unique<Project>();
@@ -10331,6 +10382,7 @@ int main() {
     freeze_launch_seams();
     freeze_rapid_ring_repeats();
     freeze_short_swing();
+    freeze_compensation_history();
     freeze_swing_phase();
     freeze_strip_unfreeze();
     audio_track_playback();
