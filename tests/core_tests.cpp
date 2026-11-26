@@ -8752,6 +8752,28 @@ void freeze_launch_seams() {
         CHECK(rig.host->pattern_of(0) == 1 && rig.host->printing_tracks() == uint32_t(next_print));
         check(seam, 0.375f, next_print ? 0.5f : 0.25f);
     }
+
+    // A repeat keeps the other Ring tails. With every slot full, the evicted tail still fades.
+    // Use a silent attack to isolate that tail and let its file end in the middle of the fade.
+    {
+        constexpr unsigned seam_frames = 512;
+        FreezeRig rig(*project, *bank);
+        auto* pack = new FreezePack;
+        pack->keep_live = true;
+        add(*pack, 0, bar, 3 * bar + 32, PrintTail::Ring, 0.09375f);
+        std::fill_n(pack->clips[0]->owned.begin(), 2 * seam_frames, 0.0f);
+        rig.freeze(pack);
+        rig.send({Command::Type::Play});
+        rig.play(3 * bar + seam_frames);
+        for (bool relaunch : {true, false}) {
+            if (relaunch) rig.send({Command::Type::Pattern, 0, 0, 0, 0});
+            CHECK(rig.play(bar - seam_frames).back()[0] == 0.375f);
+            const auto seam = rig.play(seam_frames);
+            CHECK(rig.host->pattern_of(0) == 0 && rig.host->printing_tracks() == 1);
+            check(seam, 0.375f, 0.28125f);
+            for (const auto& frame : seam) CHECK(frame[0] == frame[1]);
+        }
+    }
 }
 
 void freeze_strip_unfreeze() {

@@ -92,18 +92,24 @@ void PrintPlayer::rewind(Voice& v) {
 void PrintPlayer::retire_main(bool ring, float rate) {
     auto& m = voices[0];
     if (!m.clip) return;
+    const float fade = -1.0f / (fade_seconds * rate);
+    auto& spare = voices.back();
     Voice* to = nullptr;
     for (unsigned n = 1; n < voice_count && !to; ++n) if (!voices[n].clip) to = &voices[n];
-    if (!to && !ring && m.replaces_live && !voices.back().clip) to = &voices.back();
+    if (!to && !ring && m.replaces_live && !spare.clip) to = &spare;
     if (!to) { // none free: the one nearest its end makes room
         to = &voices[1];
         for (unsigned n = 2; n < voice_count; ++n)
             if (voices[n].clip->frames - voices[n].at < to->clip->frames - to->at) to = &voices[n];
-        close(*to);
+        if (ring && m.replaces_live && !spare.clip) {
+            // The new pass starts now. Move the selected tail's stream into the fade slot before reusing its voice.
+            spare = *to;
+            spare.step = std::min(spare.step, fade);
+        } else close(*to);
     }
     *to = m;
     to->ring_tail = ring;
-    if (!ring) to->step = std::min(to->step, -1.0f / (fade_seconds * rate));
+    if (!ring) to->step = std::min(to->step, fade);
     m = Voice {};
 }
 
@@ -189,7 +195,7 @@ void PrintPlayer::render(float* left, float* right, unsigned frames, float* cons
                 } else {
                     // A replacement Loop holds its last sample until the pattern tick decides whether to wrap.
                     // A departing print fades that sample when it has no remaining audio.
-                    if (v.replaces_live && !v.ring_tail && v.have_last) {
+                    if (v.replaces_live && v.have_last && (!v.ring_tail || v.step < 0)) {
                         const bool wait_for_tick = n == 0 && c.tail == PrintTail::Loop && !v.releasing && !v.leaving;
                         const float fade = -1.0f / (fade_seconds * c.rate);
                         if (!wait_for_tick && v.step >= 0) v.step = fade;
@@ -199,6 +205,7 @@ void PrintPlayer::render(float* left, float* right, unsigned frames, float* cons
                             v.gain = std::clamp(v.gain + v.step, 0.0f, 1.0f);
                             left[f] += v.last_l * v.gain; right[f] += v.last_r * v.gain;
                             if (replaced) replaced[f] = std::min(1.0f, replaced[f] + v.gain);
+                            if (ringing) ringing[f] = std::max(ringing[f], v.gain);
                         }
                         if (v.step > 0 && v.gain >= 1) v.step = 0;
                         if (v.gain > 0) break;

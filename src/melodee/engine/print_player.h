@@ -109,7 +109,7 @@ private:
         float last_l = 0, last_r = 0; // an exhausted replacement voice can fade from its last sample
         float gain = 1, step = 0; // a fade: step a frame
     };
-    // One extra fade voice for a replacement launch when all the Ring voices are still busy.
+    // One extra fade voice for a replacement launch or repeat when all the Ring voices are still busy.
     std::array<Voice, voice_count + 1> voices {}; // [0] the main voice
     uint64_t expect = 0;  // the main voice's frame on the next tick
     double carry = 0;     // the next tick's place less `expect`, as render() counts ticks (-1..0]
