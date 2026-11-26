@@ -10,7 +10,7 @@
 #include <cstdint>
 #include <vector>
 
-// A pattern as a list of note events on the sequencer's clock (96 ticks a
+// A pattern as a list of note events on the sequencer's clock (960 ticks a
 // quarter), up to 128 bars long. Q is the grid the pages step through and
 // quantising snaps to; the notes themselves sit on any tick. The Steps and
 // Roll pages see the pattern through step(): the notes that start inside one
@@ -23,7 +23,8 @@ enum class Division : uint8_t {
     SixtyFourth, Count
 };
 inline unsigned division_ticks(Division d) {
-    static const unsigned ticks[] {96, 64, 48, 32, 24, 16, 12, 8, 6};
+    constexpr unsigned q = ticks_per_quarter;
+    static const unsigned ticks[] {q, q * 2 / 3, q / 2, q / 3, q / 4, q / 6, q / 8, q / 12, q / 16};
     return ticks[unsigned(d) < unsigned(Division::Count) ? unsigned(d) : 4];
 }
 inline const char* division_name(Division d) {
@@ -43,10 +44,13 @@ enum StepFlag : uint8_t { step_accent = 1, step_slide = 2, step_tie = 4, step_mu
 constexpr unsigned max_ratchet = 8;
 constexpr int max_pitch_ramp = 24; // semitones a kit pad's last hit sits from its first
 
+// A note's length, a lock's hold or a kit lane's ticks as kept: at least one tick, at most the longest pattern.
+inline uint32_t note_ticks(uint64_t ticks) { return uint32_t(std::clamp<uint64_t>(ticks, 1, max_pattern_ticks)); }
+
 // One note of the pattern: where it starts, how long it is held (ticks).
 struct Event {
     uint32_t tick = 0;
-    uint16_t length = sixteenth_ticks;
+    uint32_t length = sixteenth_ticks; // 1..max_pattern_ticks (note_ticks)
     uint8_t key = 0, velocity = 100, chance = 100, flags = 0;
     int8_t pitch = 0; // a sampler pad's: semitones from its root (16 Levels, an instrument's keys)
     // Ratchet: hits inside its length, 1..8; the last hit's velocity in percent off the note's (-100..100), the
@@ -87,7 +91,7 @@ struct Event {
 // The pages' view of one step: up to four notes starting in it.
 struct Note {
     uint8_t key = 0, velocity = 0; // velocity 0: no note
-    uint8_t offset = 0;            // ticks after the step's start
+    uint16_t offset = 0;           // ticks after the step's start
 };
 struct Step {
     std::array<Note, notes_per_step> notes {};
@@ -109,7 +113,7 @@ struct MotionPoint {
     uint32_t tick = 0;
     uint8_t param = 0, pad = 0;
     int16_t value = 0;
-    uint16_t hold = 0;
+    uint32_t hold = 0; // 0..max_pattern_ticks
     bool lock() const { return hold > 0; }
     bool on(unsigned p, unsigned k) const { return param == p && pad == k; }
     bool operator==(const MotionPoint& o) const { return tick == o.tick && param == o.param && pad == o.pad && value == o.value && hold == o.hold; }
@@ -142,7 +146,7 @@ struct Feel {
     uint16_t groove_from = 0;      // 0 none; else 1 + track * pattern_count + pattern, where it was taken from (groove_source)
     uint8_t groove_amount = 100;
     uint16_t groove_step = sixteenth_ticks;
-    std::vector<int8_t> groove_offsets;  // ticks, within half a step
+    std::vector<int16_t> groove_offsets; // ticks, within half a step
     std::vector<uint8_t> groove_levels;  // percent, 25..175
     bool plain() const { return !strength && !humanize && !humanize_velocity && (groove_offsets.empty() || !groove_amount); }
     bool operator==(const Feel& o) const {

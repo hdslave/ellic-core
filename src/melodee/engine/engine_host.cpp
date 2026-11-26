@@ -365,7 +365,7 @@ bool EngineHost::place_at(unsigned track, uint64_t frame, int& position, uint32_
         uint32_t head = tick_head.load(std::memory_order_acquire);
         int now = position_of(track);
         if (!head || now < 0 || !playing()) return false;
-        uint32_t i = head - 1, reach = std::min(head, tick_ring_size - 16); // clear of what the writer may overwrite
+        uint32_t i = head - 1, reach = std::min(head, tick_ring_size - 512); // clear of what the writer may overwrite (a catch-up plays a sixteenth at once)
         uint64_t e = entry(i);
         int back = 0;
         while (int32_t(uint32_t(e) - f) > 0 && uint32_t(back) + 1 < reach) {
@@ -2046,6 +2046,16 @@ double EngineHost::tick_samples(uint32_t at) const {
     return (at % (2 * sixteenth_ticks)) < sixteenth_ticks ? base * swing / 50.0 : base * (100 - swing) / 50.0;
 }
 
+// The frames from tick `from` to tick `to` (from <= to): tick_samples() of each between, without a walk.
+double EngineHost::ticks_frames(uint32_t from, uint32_t to) const {
+    auto firsts = [](uint32_t t) { // ticks before t in the first sixteenth of their pair (the swing's long half)
+        constexpr uint32_t pair = 2 * sixteenth_ticks;
+        return uint64_t(t / pair) * sixteenth_ticks + std::min(t % pair, sixteenth_ticks);
+    };
+    const uint64_t first = firsts(to) - firsts(from), second = uint64_t(to - from) - first;
+    return tick_length() * (double(first) * swing + double(second) * (100 - swing)) / 50.0;
+}
+
 void EngineHost::bar_start() {
     if (!song_mode) {
         for (unsigned t = 0; t < track_count; ++t) {
@@ -2240,7 +2250,7 @@ void EngineHost::arp_tick() {
 // its kit lane's own.
 void EngineHost::arp_write(unsigned t, Slot& slot, int key, int velocity, unsigned rate, unsigned gate) {
     const auto& p = *patterns[t][slot.pattern];
-    const int64_t elapsed = int32_t(arp_origin + arp_ticks - slot.start);
+    const int64_t elapsed = int32_t(arp_origin + arp_ticks * arp_tick_ticks - slot.start); // the arp's clock in the sequencer's ticks
     auto in = [&](uint32_t loop) { int64_t n = elapsed % int64_t(loop); return uint32_t(n < 0 ? n + int64_t(loop) : n); };
     const uint32_t length = std::max<uint32_t>(p.length, 1), lane = p.lane_length(unsigned(key) & 0xff);
     uint32_t at = in(length), from = 0, span = 0;
@@ -2249,7 +2259,7 @@ void EngineHost::arp_write(unsigned t, Slot& slot, int key, int velocity, unsign
     ArpWritten w;
     w.track = uint8_t(t); w.pattern = slot.pattern; w.key = uint16_t(key); w.cutoff = uint8_t(key >> 16); w.velocity = uint8_t(std::clamp(velocity, 1, 127));
     Speed sp = speed_of(speeds_now[t].load(std::memory_order_relaxed)); // its pattern plays scaled: written as it reads
-    w.tick = uint32_t(uint64_t(at) * sp.num / sp.den); w.length = uint16_t(std::max(1u, rate * gate * sp.num / sp.den / 100));
+    w.tick = uint32_t(uint64_t(at) * sp.num / sp.den); w.length = note_ticks(uint64_t(rate) * arp_tick_ticks * gate * sp.num / sp.den / 100);
     if (!arp_written.push(w)) {}
 }
 
@@ -2656,16 +2666,18 @@ void EngineHost::sync_stop(uint64_t at) {
     sync_started = false;
 }
 
-// MIDI clock in: each pulse lets the sequencer through four more ticks once
-// its frame comes (a block after it arrived, to the frame: no block jitter).
+// MIDI clock in: each pulse lets the sequencer through a 24th of a quarter more (ext_pulse_ticks) once its frame
+// comes (a block after it arrived, to the frame: no block jitter).
 void EngineHost::ext_release(uint64_t at) {
     while (ext_tail != ext_head && int32_t(ext_ring[ext_tail] - uint32_t(at)) <= 0) {
         ext_tail = (ext_tail + 1) % ext_ring.size();
         ++ext_clocks;
         sync.allow(ext_clocks);
-        // Far behind the clock (a tempo jump): catch up at once, allowing for swing's late sixteenths.
-        uint32_t allowed = ext_base + (ext_clocks - 1) * 4;
-        if (running && !count_left && tick_now + 16 < allowed) until_tick = std::min(until_tick, -double(allowed - tick_now) * tick_length());
+        // Far behind the clock (a tempo jump), past swing's late sixteenths: a sixteenth more each pulse, played at once,
+        // until it has caught up (a beat behind plays its 960 ticks over a few pulses, not in one block).
+        uint32_t allowed = ext_base + (ext_clocks - 1) * ext_pulse_ticks;
+        if (running && !count_left && tick_now + 4 * ext_pulse_ticks < allowed)
+            until_tick = std::min(until_tick, -double(std::min(allowed - tick_now, sixteenth_ticks)) * tick_length());
     }
 }
 
@@ -3006,7 +3018,10 @@ void EngineHost::play_ahead(unsigned t, Slot& slot, bool seq) {
     const int64_t early = midi_early(t);
     const int64_t need = early - int64_t(clock.latency_frames());
     uint32_t lead = 0;
-    if (need > 0 && !slot.chained) lead = uint32_t(std::min(16.0, std::ceil(double(need) / std::max(1.0, tick_samples(tick_now)))));
+    // Ahead by what the latency does not cover, past the end of the next block: a block's MIDI is taken once it is
+    // rendered, so a tick left for the next one goes out as late as that block's end. At most a sixth of a beat.
+    const double ahead = double(need) + double(block_frames > block_at ? block_frames - block_at : 0) + block_frames;
+    if (need > 0 && !slot.chained) lead = uint32_t(std::min(double(ticks_per_quarter / 6), std::ceil(ahead / std::max(1.0, tick_samples(tick_now)))));
     // Where this track's ticks were last read from: a launch read ahead that came as read is kept; any other change
     // starts again here.
     if (slot.ahead_bar != UINT32_MAX && slot.start == slot.ahead_bar && slot.pattern == slot.ahead_queued) {
@@ -3019,11 +3034,13 @@ void EngineHost::play_ahead(unsigned t, Slot& slot, bool seq) {
     uint32_t last = tick_now + lead;
     if (song_mode || slot.chained || slot.off_queued || (scene_mute_set >> t & 1)) last = std::min(last, next_bar - 1); // off, or a scene's mute: nothing past its bar
     if (slot.follow_do && slot.follow_at > tick_now) last = std::min(last, slot.follow_at - 1);
-    int64_t to = 0; // frames from this tick to `tk`
-    for (uint32_t tk = tick_now; tk <= last; to += int64_t(std::lround(tick_samples(tk))), ++tk) {
-        if (tk < slot.ahead_next) continue;
+    // From where the read-ahead got to (the ticks before it were read already), the frames from this tick to it
+    // counted at once and carried as they are, rounded once each tick.
+    uint32_t tk = std::max(tick_now, slot.ahead_next);
+    double to = tk > last ? 0.0 : ticks_frames(tick_now, tk);
+    for (; tk <= last; to += tick_samples(tk), ++tk) {
         const bool queued = tk >= next_bar && slot.queued != 255;
-        const int64_t shift = to - early;
+        const int64_t shift = int64_t(std::lround(to)) - early;
         if (queued && slot.ahead_bar != next_bar) { // the launch's: the old pattern's notes end, the new one's program
             slot.ahead_bar = next_bar; slot.ahead_queued = slot.queued;
             const uint64_t at = uint64_t(std::max<int64_t>(0, int64_t(frame_now + block_at) + shift));
@@ -3227,6 +3244,7 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
     deferring = whole;
     keyed_pad = pad_keyed;
     cut_count = 0;
+    block_frames = frames;
     unsigned done = 0;
     while (done < frames) {
         if (next_command <= done) next_command = take_commands(done, frames);
@@ -3235,7 +3253,7 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
         if (running) {
             ext_release(frame_now + done);
             if (until_tick <= 0) { // a tick is due: it plays, unless MIDI clock in has not let it through yet
-                held = ext_gate && !count_left && tick_now >= ext_base + ext_clocks * 4;
+                held = ext_gate && !count_left && tick_now >= ext_base + ext_clocks * ext_pulse_ticks;
                 if (!held) { block_at = done; tick(); continue; }
                 if (ext_tail != ext_head) n = std::clamp<unsigned>(unsigned(int32_t(ext_ring[ext_tail] - uint32_t(frame_now + done))), 1, n);
             } else {
@@ -3257,7 +3275,7 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
             if (!slot.engine) continue;
             run_offs(slot, n);
             run_late(slot, n);
-            if (slot.engine == &slot.sampler) {
+            if (!whole && slot.engine == &slot.sampler) { // one dispatch a block: render_engine() points them, run by run
                 bool pad_key = pad_keyed >= 0 && &slot == &slots[unsigned(pad_keyed)];
                 slot.sampler.set_key_pad(pad_key ? int(comp.key_pad()) : -1, pad_key ? key_pad_l + done : nullptr, pad_key ? key_pad_r + done : nullptr);
                 slot.sampler.set_knob_out(knob_heard ? slot.knob_pad_l + done : nullptr, knob_heard ? slot.knob_pad_r + done : nullptr);

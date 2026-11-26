@@ -30,7 +30,7 @@ Step Pattern::step(unsigned s) const {
     unsigned count = 0;
     for (size_t n = lower(start); n < events.size() && events[n].tick < end && count < notes_per_step; ++n) {
         const auto& e = events[n];
-        out.notes[count++] = {e.key, e.velocity, uint8_t(e.tick - start)};
+        out.notes[count++] = {e.key, e.velocity, uint16_t(e.tick - start)};
         if (count == 1) {
             out.length = uint8_t(std::clamp<unsigned>((e.length + q() / 2) / q(), 1, 255));
             out.chance = e.chance; out.flags = e.flags; out.ratchet = uint8_t(e.hits()); out.ramp = e.ramp; out.condition = e.condition;
@@ -55,7 +55,7 @@ void Pattern::set_step(unsigned s, const Step& value) {
         if (!n.velocity) continue;
         Event e;
         e.tick = start + std::min<unsigned>(n.offset, q() - 1);
-        e.length = uint16_t(std::min<unsigned>(value.length * q(), 65535));
+        e.length = note_ticks(uint64_t(value.length) * q());
         if (value.length == old.length)
             for (unsigned k = 0; k < count; ++k) if (was[k].key == n.key) e.length = was[k].length;
         e.key = n.key; e.velocity = n.velocity; e.chance = value.chance; e.flags = value.flags;
@@ -179,7 +179,7 @@ void scale_pattern(Pattern& p, bool slower) {
     for (auto e : p.events) {
         if (e.tick >= p.length) continue;
         e.tick = slower ? e.tick * 2 : e.tick / 2;
-        e.length = uint16_t(slower ? std::min<unsigned>(e.length * 2u, 65535) : std::max<unsigned>(e.length / 2u, 1));
+        e.length = note_ticks(slower ? uint64_t(e.length) * 2 : e.length / 2u);
         if (e.tick < p.length) moved.push_back(e);
     }
     p.events.clear();
@@ -188,7 +188,7 @@ void scale_pattern(Pattern& p, bool slower) {
     for (auto m : p.motion) {
         if (m.tick >= p.length) continue; // hidden past the end: not brought in at double speed, as the notes
         m.tick = slower ? m.tick * 2 : m.tick / 2;
-        m.hold = uint16_t(slower ? std::min<unsigned>(m.hold * 2u, 0xffff) : (m.hold ? std::max<unsigned>(m.hold / 2u, 1) : 0));
+        if (m.hold) m.hold = note_ticks(slower ? uint64_t(m.hold) * 2 : m.hold / 2u);
         if (m.tick < p.length) points.push_back(m);
     }
     p.motion.clear();
@@ -221,9 +221,12 @@ void time_correct_all(Pattern& p, const std::array<uint64_t, 3>* keys, unsigned 
 
 namespace {
 // A note's own random numbers, from where it is (the same each time, so a pattern plays the same feel pass after pass
-// until its amount changes): two in -1..1, mostly small (the sum of two).
+// until its amount changes): two in -1..1, mostly small (the sum of two). Seeded by the tick on the 96-a-quarter
+// clock files kept before, so a note on one of those ticks draws what it drew then; one between them, its own.
 double humanize_draw(const Event& e, unsigned salt) {
-    uint32_t h = e.tick * 2654435761u ^ (uint32_t(e.key) << 16 | uint32_t(uint8_t(e.pitch)) << 8) ^ salt * 40503u;
+    constexpr uint32_t fine = ticks_per_quarter / file_ticks_per_quarter;
+    uint32_t h = (e.tick / fine) * 2654435761u ^ (uint32_t(e.key) << 16 | uint32_t(uint8_t(e.pitch)) << 8) ^ salt * 40503u
+               ^ (e.tick % fine) * 0x9e3779b9u;
     auto next = [&] { h ^= h << 13; h ^= h >> 17; h ^= h << 5; return double(h % 10001) / 10000.0; };
     return next() + next() - 1.0;
 }
@@ -271,14 +274,14 @@ Pattern speed_pattern(const Pattern& p, unsigned speed) {
     for (auto e : p.events) {
         if (e.tick >= p.length) continue;
         e.tick = uint32_t(std::min<uint64_t>(scale(e.tick), out.length - 1));
-        e.length = uint16_t(std::clamp<uint64_t>(scale(e.length), 1, 0xffff));
+        e.length = note_ticks(scale(e.length));
         out.add(e);
     }
     out.motion.clear();
     for (auto m : p.motion) {
         if (m.tick >= p.length) continue; // hidden past the end: not played on the last tick
         m.tick = uint32_t(std::min<uint64_t>(scale(m.tick), out.length - 1));
-        if (m.hold) m.hold = uint16_t(std::clamp<uint64_t>(scale(m.hold), 1, 0xffff));
+        if (m.hold) m.hold = note_ticks(scale(m.hold));
         out.write_motion(m);
     }
     for (auto& l : out.lanes) l.length = uint32_t(std::max<uint64_t>(scale(l.length), 1));
@@ -318,7 +321,7 @@ void groove_of(const Pattern& source, Feel& feel) {
     double mean = heard / count;
     for (unsigned n = 0; n < steps; ++n) {
         double offset = counts[n] ? offsets[n] / counts[n] : 0.0, level = counts[n] ? levels[n] / counts[n] / mean : 1.0;
-        feel.groove_offsets.push_back(int8_t(std::clamp(int(std::lround(offset)), -int(step) / 2, int(step) / 2)));
+        feel.groove_offsets.push_back(int16_t(std::clamp(int(std::lround(offset)), -int(step) / 2, int(step) / 2)));
         feel.groove_levels.push_back(uint8_t(std::clamp(int(std::lround(level * 100)), 25, 175)));
     }
 }

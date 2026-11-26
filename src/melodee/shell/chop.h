@@ -391,7 +391,7 @@ inline Pattern slice_pattern(const Slices& s, uint32_t frames, const std::array<
         if (tick >= p.length) break;
         Event e;
         e.tick = tick;
-        e.length = uint16_t(std::clamp<long>(std::lround((s.end(n, frames) - s.start[n]) * ticks_per_frame), 1, 0xffff));
+        e.length = note_ticks(uint64_t(std::max(0L, std::lround((s.end(n, frames) - s.start[n]) * ticks_per_frame))));
         e.key = uint8_t(keys[n]); e.velocity = 127;
         p.add(e);
     }

@@ -50,7 +50,7 @@ struct Command {
         PadNote,     // track, index = kit pad, value = velocity, pattern = semitones + 64, position = cutoff + 1 (0: the pad's): 16 Levels;
                      // micros = a slice + 1 of the pad's sample's chop (0: the pad's region): Chop under Seq Record (issue 24)
         // track = InputSource, index = sample slot, value = threshold dB (-96: at once), pattern = rec length
-        // (0 until stopped, 1..16 bars, 255 Seq: the pattern of track `position`, from where it comes round while playing)
+        // (0 until stopped, 1..128 bars, 255 Seq: the pattern of track `position`, from where it comes round while playing)
         RecordArm,
         RecordGain,  // value = dB
         // track = InputSource: what the meter, Audio Recall's ring and the next take hear; with InputSource::Track,
