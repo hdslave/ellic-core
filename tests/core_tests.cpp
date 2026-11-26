@@ -8519,11 +8519,10 @@ void freeze_f2b() {
     std::puts("freeze ok");
 }
 
-// Pad sends, freeze: a kit's print carries its pads' sends in a pair a bus (A and C here), cut to the print's frames;
-// a frozen kit plays them into its buses as the live kit sends, at its level, so what the buses hear is the same.
 // A plug-in with a latched note state, so we can see whether the host continued to deliver notes underneath a print.
 struct FreezeInstrument final : PluginRunner {
     float level = 0;
+    bool continuous = false;
     unsigned notes = 0, rendered = 0;
     void midi(uint8_t status, uint8_t key, uint8_t velocity) override {
         if ((status & 0xf0) != 0x90 || !velocity) return;
@@ -8532,8 +8531,44 @@ struct FreezeInstrument final : PluginRunner {
     }
     void silence() override { level = 0; }
     void render(float* l, float* r, unsigned frames) override {
+        for (unsigned f = 0; f < frames; ++f) {
+            float sample = continuous ? 0.08f * std::sin(2 * dsp::pi * float((rendered + f) % 147) / 147) : level;
+            l[f] += sample; r[f] -= sample * 0.5f;
+        }
         rendered += frames;
-        for (unsigned f = 0; f < frames; ++f) { l[f] += level; r[f] -= level * 0.5f; }
+    }
+};
+
+using FreezeFrame = std::array<float, 2>;
+using FreezePcm = std::array<int32_t, 2>;
+
+struct FreezeRig {
+    FreezeInstrument instrument;
+    FakePlugin half;
+    std::unique_ptr<EngineHost> host = std::make_unique<EngineHost>(EngineHost::Lean {2});
+    FreezeRig(const Project& p, const PatternBank& b) {
+        half.instrument = false;
+        host->load(p, b);
+        host->set_print_tap(0, true);
+        CHECK(host->offer_plugin(0, &instrument) && host->offer_plugin(1, &half));
+    }
+    void send(Command c) { CHECK(host->send(c)); }
+    void freeze(FreezePack* pack, bool at_bar = false) {
+        Command c {Command::Type::Freeze, 0, 0, 0, at_bar}; c.freeze = pack; send(c);
+    }
+    std::vector<FreezeFrame> play(unsigned frames, std::vector<FreezePcm>* main = nullptr) {
+        std::vector<FreezeFrame> out;
+        std::array<int32_t, 256> buffer;
+        while (frames) {
+            const unsigned n = std::min(frames, 128u);
+            host->render(buffer.data(), n, 1);
+            for (unsigned f = 0; f < n; ++f) {
+                out.push_back({host->print_left()[f], host->print_right()[f]});
+                if (main) main->push_back({buffer[2 * f], buffer[2 * f + 1]});
+            }
+            frames -= n;
+        }
+        return out;
     }
 };
 
@@ -8550,7 +8585,7 @@ void freeze_keep_live() {
     put(bank->at[0][0], 1, 61, 100); // silent for over one second while the print is playing
     put(bank->at[0][0], 15, 62, 100);
     put(bank->at[0][1], 0, 62, 100); // a live launch at the bar
-    using Frame = std::array<float, 2>;
+    using Frame = FreezeFrame;
     constexpr Frame print {0.375f, 0.25f};
     const auto pack_of = [&](PrintTail tail, PrintTap tap = PrintTap::PostFx) {
         auto* pack = new FreezePack;
@@ -8567,32 +8602,6 @@ void freeze_keep_live() {
         pack->owned.push_back(std::move(clip));
         return pack;
     };
-    struct Rig {
-        FreezeInstrument instrument;
-        FakePlugin half;
-        std::unique_ptr<EngineHost> host = std::make_unique<EngineHost>(EngineHost::Lean {2});
-        Rig(const Project& p, const PatternBank& b) {
-            half.instrument = false;
-            host->load(p, b);
-            host->set_print_tap(0, true);
-            CHECK(host->offer_plugin(0, &instrument) && host->offer_plugin(1, &half));
-        }
-        void send(Command c) { CHECK(host->send(c)); }
-        void freeze(FreezePack* pack, bool at_bar = false) {
-            Command c {Command::Type::Freeze, 0, 0, 0, at_bar}; c.freeze = pack; send(c);
-        }
-        std::vector<Frame> play(unsigned frames) {
-            std::vector<Frame> out;
-            std::array<int32_t, 256> buffer;
-            while (frames) {
-                const unsigned n = std::min(frames, 128u);
-                host->render(buffer.data(), n, 1);
-                for (unsigned f = 0; f < n; ++f) out.push_back({host->print_left()[f], host->print_right()[f]});
-                frames -= n;
-            }
-            return out;
-        }
-    };
     const auto check_fade = [&](const std::vector<Frame>& heard, const Frame& from, const Frame& to,
                                 bool print_start = false) {
         CHECK(heard.size() > fade);
@@ -8605,7 +8614,7 @@ void freeze_keep_live() {
         }
     };
     for (PrintTail tail : {PrintTail::Loop, PrintTail::Cut, PrintTail::Ring}) {
-        Rig live(*project, *bank), frozen(*project, *bank);
+        FreezeRig live(*project, *bank), frozen(*project, *bank);
         live.send({Command::Type::Play}); frozen.send({Command::Type::Play});
         auto start = live.play(512);
         CHECK(start == frozen.play(512) && start.back() == (Frame {0.125f, -0.0625f}));
@@ -8658,7 +8667,7 @@ void freeze_keep_live() {
         delete done;
     }
     {
-        Rig pre(*project, *bank);
+        FreezeRig pre(*project, *bank);
         pre.freeze(pack_of(PrintTail::Loop, PrintTap::PreFx));
         pre.send({Command::Type::Play});
         const auto heard = pre.play(512);
@@ -8673,6 +8682,134 @@ void freeze_keep_live() {
     }
 }
 
+void freeze_launch_seams() {
+    const unsigned rate = unsigned(dsp::sample_rate());
+    const unsigned bar = rate; // a bar at 240 BPM
+    const unsigned fade = unsigned(std::ceil(PrintPlayer::fade_seconds * rate));
+    auto project = std::make_unique<Project>();
+    auto bank = std::make_unique<PatternBank>();
+    project->tempo = 2400; project->swing = 50;
+    synth(project->tracks[0], 0);
+    put(bank->at[0][0], 0, 60, 100);
+    put(bank->at[0][1], 0, 60, 100);
+    const auto add = [rate](FreezePack& pack, unsigned pattern, unsigned pass, unsigned tail_frames,
+                            PrintTail tail, float level, bool attack = false) {
+        std::vector<float> pcm(2 * (pass + tail_frames), level);
+        if (attack) std::fill_n(pcm.begin(), 64, -level);
+        auto clip = std::make_unique<PrintClip>();
+        clip->hold_whole(std::move(pcm), rate, pass, tail);
+        pack.clips[pattern] = clip.get();
+        pack.owned.push_back(std::move(clip));
+    };
+    const auto check = [&](const std::vector<FreezeFrame>& audio, float from, float to) {
+        CHECK(audio.size() > fade);
+        for (unsigned f = 0; f < audio.size(); ++f) {
+            const float gain = std::min(1.0f, (f + 1) / (PrintPlayer::fade_seconds * rate));
+            CHECK(std::fabs(audio[f][0] - (from + (to - from) * gain)) < 1e-5f);
+        }
+        CHECK(audio.back()[0] == to);
+    };
+
+    // A print at 240.1 BPM is still accepted at 240.0. Keep its end until the actual launch tick.
+    const unsigned short_pass = unsigned(std::ceil(double(bar) * 2400 / 2401));
+    CHECK(short_pass < bar && bar - short_pass <= 64);
+    for (bool launch : {false, true}) {
+        FreezeRig rig(*project, *bank);
+        auto* pack = new FreezePack;
+        pack->keep_live = true;
+        add(*pack, 0, short_pass, 0, PrintTail::Loop, 0.375f, true);
+        rig.freeze(pack);
+        rig.send({Command::Type::Play});
+        rig.play(1024);
+        if (launch) rig.send({Command::Type::Pattern, 0, 0, 0, 1});
+        rig.play(short_pass - 1024);
+        CHECK(rig.host->printing_tracks() == 1);
+        for (const auto& f : rig.play(bar - short_pass)) CHECK(f[0] == 0.375f);
+        const auto seam = rig.play(512);
+        if (launch) {
+            CHECK(rig.host->pattern_of(0) == 1 && rig.host->printing_tracks() == 0);
+            check(seam, 0.375f, 0.25f);
+        } else {
+            CHECK(rig.host->pattern_of(0) == 0 && rig.host->printing_tracks() == 1);
+            CHECK(seam.front()[0] == -0.375f && seam[32][0] == 0.375f);
+        }
+    }
+
+    // The main print and all three old Ring tails are audible before the launch.
+    // All four fade, whether the next pattern plays live or has its own print.
+    for (bool next_print : {false, true}) {
+        FreezeRig rig(*project, *bank);
+        auto* pack = new FreezePack;
+        pack->keep_live = true;
+        add(*pack, 0, bar, 4 * bar, PrintTail::Ring, 0.09375f);
+        if (next_print) add(*pack, 1, bar, 0, PrintTail::Loop, 0.5f);
+        rig.freeze(pack);
+        rig.send({Command::Type::Play});
+        rig.play(3 * bar + 1024);
+        rig.send({Command::Type::Pattern, 0, 0, 0, 1});
+        CHECK(rig.play(bar - 1024).back()[0] == 0.375f);
+        const auto seam = rig.play(512);
+        CHECK(rig.host->pattern_of(0) == 1 && rig.host->printing_tracks() == uint32_t(next_print));
+        check(seam, 0.375f, next_print ? 0.5f : 0.25f);
+    }
+}
+
+void freeze_strip_unfreeze() {
+    const float saved_rate = dsp::sample_rate();
+    for (unsigned rate : {44100u, 48000u}) {
+        dsp::device_rate.store(rate);
+        const unsigned fade = unsigned(std::ceil(PrintPlayer::fade_seconds * rate));
+        auto project = std::make_unique<Project>();
+        auto bank = std::make_unique<PatternBank>();
+        project->tempo = 1200; project->swing = 50;
+        synth(project->tracks[0], 0);
+        auto& strip = project->tracks[0].strip;
+        strip.eq[3] = 35;
+        strip.comp_amount = 24;
+        strip.comp_speed = uint8_t(CompSpeed::Slow);
+        FreezeRig live(*project, *bank), frozen(*project, *bank);
+        live.instrument.continuous = frozen.instrument.continuous = true;
+        live.send({Command::Type::Play}); frozen.send({Command::Type::Play});
+        const auto before = live.play(4096);
+        CHECK(before == frozen.play(4096));
+        CHECK(std::any_of(before.begin(), before.end(), [](const auto& f) { return std::fabs(f[0]) > 0.03f; }));
+
+        auto* pack = new FreezePack;
+        pack->keep_live = true;
+        auto clip = std::make_unique<PrintClip>();
+        std::vector<float> samples(4 * rate);
+        for (unsigned f = 0; f < 2 * rate; ++f) {
+            const float sample = 0.45f * std::sin(2 * dsp::pi * float(f % 147) / 147);
+            samples[2 * f] = sample; samples[2 * f + 1] = -sample * 0.5f;
+        }
+        clip->hold_whole(std::move(samples), rate, 2 * rate, PrintTail::Loop);
+        pack->clips[0] = clip.get();
+        pack->owned.push_back(std::move(clip));
+        frozen.freeze(pack);
+        live.play(rate);
+        const auto printed = frozen.play(rate);
+        CHECK(frozen.host->printing_tracks() == 1 && frozen.host->sleeping_tracks() == 0);
+        float peak = 0;
+        for (size_t f = printed.size() - 1024; f < printed.size(); ++f)
+            peak = std::max(peak, std::fabs(printed[f][0]));
+        CHECK(peak > 0.08f && peak < 0.35f); // the effect is still active on the louder frozen print
+
+        frozen.freeze(nullptr);
+        std::vector<FreezePcm> expected_main, heard_main;
+        const auto expected = live.play(8192, &expected_main);
+        const auto heard = frozen.play(8192, &heard_main);
+        CHECK(frozen.host->frozen_tracks() == 0 && frozen.instrument.rendered == live.instrument.rendered);
+        CHECK(std::any_of(expected_main.begin() + fade, expected_main.end(), [](const auto& f) { return f[0] != 0; }));
+        for (size_t f = fade; f < heard.size(); ++f) {
+            CHECK(std::memcmp(&heard[f], &expected[f], sizeof(FreezeFrame)) == 0);
+            CHECK(std::memcmp(&heard_main[f], &expected_main[f], sizeof(FreezePcm)) == 0);
+        }
+    }
+    dsp::device_rate.store(saved_rate);
+}
+
+// Pad sends, freeze: a kit's print carries its pads' sends in a pair a bus (A and C here), cut to the print's frames;
+// a frozen kit plays them into its buses as the live kit sends, at its level, so what the buses hear is the same.
 void pad_sends_freeze() {
     const float rate = dsp::sample_rate();
     auto project = std::make_unique<Project>();
@@ -10044,6 +10181,8 @@ int main() {
     prints_f2a();
     freeze_f2b();
     freeze_keep_live();
+    freeze_launch_seams();
+    freeze_strip_unfreeze();
     audio_track_playback();
     audio_warp();
     exports_p4();

@@ -54,15 +54,16 @@ EngineHost::EngineHost(bool lean, unsigned delay_blocks)
     for (auto& t : patterns) for (auto& p : t) p = new Pattern;
     for (auto& s : positions_now) s.store(-1);
     pad_fx = std::make_unique<std::array<SamplerEngine::PadEffects, track_count>>();
-    print_frames = std::make_unique<std::array<float, 4 * block * track_count>>();
+    print_frames = std::make_unique<std::array<float, 6 * block * track_count>>();
     for (unsigned t = 0; t < track_count; ++t) {
         slots[t].sampler.set_pad_effects(&(*pad_fx)[t]); slots[t].sampler.set_pager(&pager);
         slots[t].print.set_pager(&pager); // freeze plan F2b
         slots[t].audio.player.set_pager(&pager); // freeze plan F3
         slots[t].plugin.set_pool(&pool);   // its performance knobs' echo and reverb (engine/macros.h)
-        auto* print = print_frames->data() + 4 * block * t;
+        auto* print = print_frames->data() + 6 * block * t;
         slots[t].pre_print = {print, print + block};
         slots[t].post_print = {print + 2 * block, print + 3 * block};
+        slots[t].replacement_print = {print + 4 * block, print + 5 * block};
     }
     // Build every engine's static tables now, not on the audio thread.
     for (unsigned k = 0; k < unsigned(EngineKind::Count); ++k) (void)engine_info(EngineKind(k));
@@ -424,6 +425,7 @@ void EngineHost::load_track(unsigned t, const Track& track) {
     apply({Command::Type::Pan, uint8_t(t), 0, 0, track.mix.pan});
     strips[t].set(track.strip);
     strips[t].reset(); // as loaded, not glided to from the last project's
+    slot.print_strip_active = false;
     strip_set_by[t] = track.strip; slot.strip_moved = false;
     apply({Command::Type::TrackOut, uint8_t(t), 0, 0, track.mix.out});
     slot.out_was = slot.out; // loaded: no crossing over
@@ -988,7 +990,7 @@ void EngineHost::apply(const Command& c) {
             Strip v = strips[c.track].values();
             strip_set(v, StripPart(c.index), c.value);
             if (c.track == master_chain) v.comp_amount = 0; // the master's compressor is the Compressor (Shift + Pad 5)
-            strips[c.track].set(v);
+            set_strip(c.track, v);
             if (c.track < track_count) { // as set, apart from what Motion moves; Motion's modulators swing around it
                 strip_set(strip_set_by[c.track], StripPart(c.index), c.value);
                 const int lane = motion_strip(StripPart(c.index));
@@ -1861,7 +1863,8 @@ void EngineHost::restore(Slot& slot) {
     slot.locks_on = 0;
     if (mods_on) mod_back(unsigned(&slot - slots.data())); // roadmap P4: modulators swing around the values as set again
     if (slot.strip_moved) { // the mixer's strip back as set (it glides there)
-        strips[unsigned(&slot - slots.data())].set(strip_set_by[unsigned(&slot - slots.data())]);
+        const unsigned t = unsigned(&slot - slots.data());
+        set_strip(t, strip_set_by[t]);
         slot.strip_moved = false;
     }
     if (slot.mix_moved) { // roadmap P4: the strip back where it was set
@@ -1933,12 +1936,17 @@ void EngineHost::move_mix(unsigned, Slot& slot, unsigned param, int value) {
     }
 }
 
+void EngineHost::set_strip(unsigned n, const Strip& values) {
+    strips[n].set(values);
+    if (n < track_count && slots[n].print_strip_active) slots[n].print_strip.set(values);
+}
+
 // The mixer: one value of track `t`'s strip moved by Motion (or a modulator), or back as set. It glides there as a
 // turned knob does (ChannelStrip).
 void EngineHost::move_strip(unsigned t, unsigned param, int value) {
     Strip v = strips[t].values();
     strip_set(v, strip_lane_part(param), value);
-    strips[t].set(v);
+    set_strip(t, v);
 }
 
 void EngineHost::restore_strip(unsigned t, unsigned param) {
@@ -3160,8 +3168,7 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
     for (unsigned n = 0; n < sub_count; ++n) solo |= sub_soloing(n); // the mixer: a submix's solo solos its tracks
     for (auto& slot : slots) {
         solo |= slot.soloing();
-        slot.print_replaces_live = false;
-        slot.pre_print.fed = slot.post_print.fed = false;
+        slot.pre_print.fed = slot.post_print.fed = slot.replacement_print.fed = false;
         // An empty track (no engine, no print sounding) is read by nothing this block (every reader asks for its
         // engine first): its buffers are left as they are, and cleared again once it plays.
         if (!slot.engine && !slot.print.sounding()) { slot.knob_pad_fed = false; continue; }
@@ -3263,25 +3270,24 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
         // Freeze plan F2b: frozen tracks' prints, each where its pattern is (memory the pager has pinned; a copy).
         for (auto& slot : slots) {
             if (!slot.print.sounding()) continue;
-            auto& print = slot.print_post ? slot.post_print : slot.pre_print;
+            const bool replacement = slot.print_post && ((slot.freeze && slot.freeze->keep_live) ||
+                                                        (slot.freeze_leaving && slot.freeze_leaving->keep_live));
+            auto& print = replacement ? slot.replacement_print : slot.print_post ? slot.post_print : slot.pre_print;
             if (!print.fed) {
                 std::fill_n(print.left, frames, 0.0f); std::fill_n(print.right, frames, 0.0f);
+                if (replacement) {
+                    std::fill_n(slot.print_coverage, frames, 0.0f);
+                    std::fill_n(slot.ring_gain, frames, 0.0f);
+                }
                 print.fed = true;
             }
             // A kit's pad sends printed beside it go where its live pads' would (mixed at the track's level, pan, mute).
             float* to_l[bus_count];
             float* to_r[bus_count];
             for (unsigned b = 0; b < bus_count; ++b) { to_l[b] = slot.pad_sends->l[b] + done; to_r[b] = slot.pad_sends->r[b] + done; }
-            float* coverage = nullptr;
-            if (slot.print_post && ((slot.freeze && slot.freeze->keep_live) ||
-                                    (slot.freeze_leaving && slot.freeze_leaving->keep_live))) {
-                if (!slot.print_replaces_live) {
-                    std::fill_n(slot.print_coverage, frames, 0.0f);
-                    slot.print_replaces_live = true;
-                }
-                coverage = slot.print_coverage + done;
-            }
-            slot.print.render(print.left + done, print.right + done, n, to_l, to_r, coverage);
+            slot.print.render(print.left + done, print.right + done, n, to_l, to_r,
+                              replacement ? slot.print_coverage + done : nullptr,
+                              replacement ? slot.ring_gain + done : nullptr);
             slot.send_pad_fed |= slot.print.sends_fed();
         }
         for (auto& slot : slots) // freeze plan F3: audio tracks' regions, each where the song is (into the track's own buffers)
@@ -3369,13 +3375,7 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
         }
         if (!(asleep && post)) run_chain(t, slot.left, slot.right, frames);
         if (may_sleep && post) peak_of();
-        if (slot.print_replaces_live) {
-            for (unsigned f = 0; f < frames; ++f) {
-                const float live = 1.0f - slot.print_coverage[f];
-                slot.left[f] = slot.left[f] * live + slot.post_print.left[f];
-                slot.right[f] = slot.right[f] * live + slot.post_print.right[f];
-            }
-        } else if (slot.post_print.fed) { // the chain's sound as it was printed, at unity (prints hold no level or pan)
+        if (slot.post_print.fed) { // the chain's sound as it was printed, at unity (prints hold no level or pan)
             for (unsigned f = 0; f < frames; ++f) { slot.left[f] += slot.post_print.left[f]; slot.right[f] += slot.post_print.right[f]; }
         }
         if (may_sleep) { // asleep after a second below the floor, nothing held by hand and no pattern played live
@@ -3387,7 +3387,47 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
             const float* kl = nullptr;
             const float* kr = nullptr;
             if (strip_keyed(t)) key_buffers(t, strips[t].values().comp_key, kl, kr);
-            strips[t].process(slot.left, slot.right, frames, kl, kr);
+            auto& live = strips[t];
+            auto& printed = slot.replacement_print;
+            if (printed.fed && !slot.print_strip_active) slot.print_strip = live;
+            slot.print_strip_active = printed.fed;
+            const bool strip_print = printed.fed && !slot.print_strip.idle();
+            if (strip_print) {
+                // Undo the bus fade for the print's own strip. At zero gain give it the current live input so
+                // a print starting partway into this block begins with the same history the live strip had there.
+                for (unsigned f = 0; f < frames; ++f) {
+                    const float gain = std::max(slot.print_coverage[f], slot.ring_gain[f]);
+                    if (gain == 1.0f) continue;
+                    if (gain > 0) {
+                        const float full = 1.0f / gain;
+                        printed.left[f] *= full; printed.right[f] *= full;
+                    } else {
+                        printed.left[f] = slot.left[f]; printed.right[f] = slot.right[f];
+                    }
+                }
+                slot.print_strip.process(printed.left, printed.right, frames, kl, kr);
+            }
+            live.process(slot.left, slot.right, frames, kl, kr);
+            slot.track_reduction = live.reduction_db();
+            if (printed.fed) {
+                for (unsigned f = 0; f < frames; ++f) {
+                    const float cover = slot.print_coverage[f];
+                    if (cover == 1.0f) {
+                        slot.left[f] = printed.left[f]; slot.right[f] = printed.right[f];
+                        continue;
+                    }
+                    const float gain = std::max(cover, slot.ring_gain[f]);
+                    if (gain == 0) continue;
+                    const float print_gain = strip_print ? gain : 1.0f;
+                    slot.left[f] = slot.left[f] * (1.0f - cover) + printed.left[f] * print_gain;
+                    slot.right[f] = slot.right[f] * (1.0f - cover) + printed.right[f] * print_gain;
+                }
+                const float cover = slot.print_coverage[frames - 1];
+                const float gain = std::max(cover, slot.ring_gain[frames - 1]);
+                if (strip_print && gain > 0) {
+                    slot.track_reduction = std::max(slot.track_reduction * (1.0f - cover), slot.print_strip.reduction_db() * gain);
+                }
+            }
             spectrum_put(t, slot.left, slot.right, frames);
         }
         if (punch_target == t) punch.process(slot.left, slot.right, frames);
@@ -3587,7 +3627,7 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
         meters[t].store(std::max(level, shown), std::memory_order_relaxed);
         peak_l[t].store(std::max(level_l, peak_l[t].load(std::memory_order_relaxed) * fall), std::memory_order_relaxed);
         peak_r[t].store(std::max(level_r, peak_r[t].load(std::memory_order_relaxed) * fall), std::memory_order_relaxed);
-        const float reduced = slot.engine ? strips[t].reduction_db() : 0.0f;
+        const float reduced = slot.engine ? slot.track_reduction : 0.0f;
         reductions[t].store(std::max(reduced, reductions[t].load(std::memory_order_relaxed) * fall), std::memory_order_relaxed);
     }
     mix_loops(frames, solo);

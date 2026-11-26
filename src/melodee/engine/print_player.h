@@ -59,7 +59,8 @@ struct FreezePack {
     // (pads, keys, the arp) play nothing and a pattern without a print stays silent.
     bool deep = false;
     // Shallow Post FX freezes on plug-in instrument tracks only. The live instrument and its track FX keep
-    // running alongside the print, including while it covers their output, so this mode does not save their CPU.
+    // running alongside the print, including while it covers their output. Active strip processing also runs for
+    // both paths, so keeping the live path does not save its CPU.
     bool keep_live = false;
     std::array<PrintClip*, pattern_count> clips {};
     std::vector<std::unique_ptr<PrintClip>> owned;
@@ -78,18 +79,19 @@ public:
     // `at` the tick in the pattern, `start` the frames from the pattern's top to that tick as a print counts them
     // (unrounded), `tick` this tick's length in frames.
     void follow(PrintClip* clip, uint32_t at, double start, double tick, float rate, bool replaces_live = false);
-    void release(float rate);  // the pattern stopped or changed: a Ring print's tail rings on at its pass's end, else a fade
+    void release(float rate); // the pattern stopped or changed: ordinary Ring tails ring, replacement voices fade
     void fade_all(float rate); // unfrozen: every voice fades out, marked as leaving
     void cut_all();            // every voice closed at once
     bool leaving() const;      // a voice from before fade_all() still sounds
     bool sounding() const;     // any voice
-    bool playing() const { return voices[0].clip != nullptr; }
+    bool playing() const { return voices[0].clip && !voices[0].releasing; }
     uint32_t position() const { return voices[0].at; }
     // Adds `frames` of every voice into `left` / `right`; a print with pad sends adds them into `send_l` / `send_r`
     // [bus] (nullptr: not heard), and sends_fed() then has a bit for each bus it added to.
-    // Replacement voices write their combined audible gain per frame to coverage, when supplied.
+    // Replacement voices write their combined audible gain per frame to coverage. An additive Ring tail instead
+    // writes its own gain to ring_gain (the maximum when several tails ring), so it can be heard without covering live.
     void render(float* left, float* right, unsigned frames, float* const* send_l = nullptr, float* const* send_r = nullptr,
-                float* coverage = nullptr);
+                float* coverage = nullptr, float* ring_gain = nullptr);
     unsigned sends_fed() const { return fed; }
     uint32_t underruns = 0; // runs that met a frame the pager had not pinned yet
     uint32_t waits = 0;     // the same just after a jump to where nothing is held (counted apart: not late, not yet)
@@ -98,20 +100,23 @@ private:
     struct Voice {
         PrintClip* clip = nullptr;
         uint32_t at = 0;
+        uint32_t held_end = 0; // frames held at a replacement Loop's end while waiting for the next tick
         int stream = -1;
-        bool seeking = false, leaving = false;
+        bool seeking = false, leaving = false, releasing = false;
         bool replaces_live = false;
         bool ring_tail = false; // a printed tail additive to the next pass
         bool have_last = false;
         float last_l = 0, last_r = 0; // an exhausted replacement voice can fade from its last sample
         float gain = 1, step = 0; // a fade: step a frame
     };
-    std::array<Voice, voice_count> voices {}; // [0] the main voice
+    // One extra fade voice for a replacement launch when all the Ring voices are still busy.
+    std::array<Voice, voice_count + 1> voices {}; // [0] the main voice
     uint64_t expect = 0;  // the main voice's frame on the next tick
     double carry = 0;     // the next tick's place less `expect`, as render() counts ticks (-1..0]
     StreamPager* pager = nullptr;
     unsigned fed = 0;
     void begin(PrintClip* clip, uint32_t frame, bool fade_in, float rate, bool replaces_live);
+    void rewind(Voice& v);
     void close(Voice& v);
     void retire_main(bool ring, float rate); // the main voice to another, ringing on or fading
 };

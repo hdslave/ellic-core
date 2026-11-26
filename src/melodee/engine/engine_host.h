@@ -543,9 +543,13 @@ private:
             float* left = nullptr;
             float* right = nullptr;
             bool fed = false;
-        } pre_print, post_print;
+        } pre_print, post_print, replacement_print;
         float print_coverage[block] {};
-        bool print_replaces_live = false;
+        float ring_gain[block] {};
+        // The print has its own EQ and compressor history while the live strip keeps processing the instrument.
+        ChannelStrip print_strip;
+        bool print_strip_active = false;
+        float track_reduction = 0;
         // Freeze plan F3: an AUDIO track's engine (its takes' voices), its patterns' takes, ones replaced whose voices
         // still fade, and the pattern tick it followed last (a jump when the next is not the one after).
         AudioTrackEngine audio;
@@ -611,7 +615,7 @@ private:
     void freeze_at_bar();
     void wake(Slot& slot) { slot.awake = true; slot.quiet = 0; }
     void print_tick(unsigned t, Slot& slot, uint32_t at, uint32_t length);
-    std::unique_ptr<std::array<float, 4 * block * track_count>> print_frames;
+    std::unique_ptr<std::array<float, 6 * block * track_count>> print_frames;
     std::array<FreezePack*, track_count> freeze_next {}; // waiting for the next bar
     static constexpr float sleep_floor = 3.16e-5f; // -90 dB: a frozen track's engine below it a second sleeps
     float pan_centre = 0.7071f;                    // set_pan()'s sides at the centre, as a print was made at
@@ -649,6 +653,7 @@ private:
     void restore_mix(Slot& slot, unsigned param);
     // The mixer, core step 6: a track's strip on Motion's lanes (model/strip.h is_strip_lane()). strip_set_by: each
     // track's strip as its commands set it, which Motion moves away from and Stop (or a lane's end) brings back.
+    void set_strip(unsigned n, const Strip& values);
     void move_strip(unsigned t, unsigned param, int value);
     void restore_strip(unsigned t, unsigned param);
     std::array<Strip, track_count> strip_set_by {};
