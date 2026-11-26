@@ -266,8 +266,8 @@ struct Song {
 
 // Roadmap P5: a scene (a sequence on screen) launches a pattern on each track together on the next bar, with a name
 // and a tempo of its own (0: none; tenths of a BPM) taking over on that bar, and a colour (issue 19) its cell and pad
-// show (0: none; 1-16 a track colour, ui/shades.h). Which pattern each track plays in it is the track's
-// (Track::in_scene, model/scene_links.h).
+// show (0: none; 1-16 a track colour, ui/shades.h). Which pattern each track plays in it, and whether the track is
+// muted in it, is the track's (Track::in_scene and scene_mutes, model/scene_links.h).
 struct Scene {
     char name[12] {};
     uint16_t tempo = 0;
@@ -382,6 +382,9 @@ struct Track {
     // Its pattern in each scene (model/scene_links.h): 0 none (the track plays on when the scene launches), n + 1
     // pattern n, scene_off: the track stops. Kept with the track, so a move, copy or clear takes them along.
     std::array<uint8_t, pattern_count> in_scene {};
+    // Its mute in each scene, a bit a scene (model/scene_links.h scene_muted): where a scene keeps a pattern or off
+    // for the track, launching it sets the mixer mute to the bit. Kept with the track, as in_scene (SEQL v2).
+    std::array<uint64_t, (pattern_count + 63) / 64> scene_mutes {};
     bool off = false; // stopped by its scene or SEQ + STOP: its pattern does not play until a launch (SEQL)
     bool used() const { return engine != EngineKind::None; }
     bool is_audio() const { return engine == EngineKind::Audio; }

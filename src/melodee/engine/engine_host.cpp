@@ -1004,7 +1004,11 @@ void EngineHost::apply(const Command& c) {
         slot.sends[c.index % bus_count] = std::clamp<int>(c.value, 0, 100) / 100.0f;
         if (mods_on) mod_note(c.track % track_count, motion_send(c.index), 0, slot.mix_sends[c.index % bus_count], true);
         break;
-    case Type::Mute: slot.mute = c.value != 0; midi_silenced(); break; // Mute Notes: heard on, its notes ring (issue 27)
+    case Type::Mute: // Mute Notes: heard on, its notes ring (issue 27)
+        slot.mute = c.value != 0;
+        scene_mute_set = uint16_t(scene_mute_set & ~(1u << (c.track % track_count))); // by hand after a scene's: the hand's
+        midi_silenced();
+        break;
     case Type::Solo: slot.solo = c.value != 0; midi_silenced(); break;
     case Type::PatternData:
         if (c.data) {
@@ -1070,6 +1074,13 @@ void EngineHost::apply(const Command& c) {
         if (running && !song_mode) scene_tempo = uint16_t(std::clamp<int>(c.value, 300, 3000));
         else { global_tempo = uint16_t(std::clamp<int>(c.value, 300, 3000)); scene_tempo = 0; follow_tempo(); }
         break;
+    case Type::SceneMutes: { // the mutes a scene keeps: on the bar its patterns launch on; stopped, at once
+        const uint16_t tracks = uint16_t(c.index & ((1u << track_count) - 1));
+        scene_mute_set = uint16_t(scene_mute_set | tracks);
+        scene_mute_on = uint16_t((scene_mute_on & ~tracks) | (uint16_t(c.value) & tracks));
+        if (!running || song_mode) scene_mutes_now();
+        break;
+    }
     case Type::Play:
         if (running) break;
         mtc_off(); // MTC in places it right after (MtcIn locate)
@@ -1077,6 +1088,7 @@ void EngineHost::apply(const Command& c) {
         drop_hits();
         for (auto& s : slots) { s.weighed = s.went = false; s.keys_weighed = {}; s.keys_went = {}; } // PRE and NEI start afresh
         tick_now = c.value == 1 ? 0 : c.position;
+        restart_ahead();
         arp_ticks = 0; until_arp = 0; // the repeats line up with the bar, so their swing falls with the sequencer's
         arp_origin = tick_now;         // and Seq Record writes each where it fell (roadmap P1)
         song_mode = c.value == 1; song_bar_now = c.index;
@@ -1122,6 +1134,7 @@ void EngineHost::apply(const Command& c) {
         song_mode = false;
         in_song.store(false, std::memory_order_relaxed);
         if (scene_tempo) { global_tempo = scene_tempo; scene_tempo = 0; } // roadmap P5: a scene's, still waiting for its bar: with its patterns, below
+        scene_mutes_now(); // and its mutes
         follow_lane(); // roadmap P5: the project's tempo again
         for (unsigned t = 0; t < track_count; ++t) {
             positions_now[t].store(-1, std::memory_order_relaxed);
@@ -1160,6 +1173,7 @@ void EngineHost::apply(const Command& c) {
         if (!running || song_mode) break;
         sync_stop(frame_now); // the clocks go on from the new place: Song Position and Continue
         tick_now = c.position; until_tick = 0; // the new place plays at once
+        restart_ahead();
         arp_ticks = 0; until_arp = 0; arp_origin = tick_now; // the repeats from it
         loop_restart = true;
         for (auto& s : slots) { s.start = 0; for (auto& skip : s.skips) skip.key = -1; }
@@ -2149,6 +2163,7 @@ void EngineHost::bar_start() {
             plan_follow(t);
         }
         if (scene_tempo) { global_tempo = scene_tempo; scene_tempo = 0; } // roadmap P5: a scene's, with its patterns
+        scene_mutes_now(); // and its mutes
         follow_tempo(); // BPM per pattern: the one launched last leads
         return;
     }
@@ -2280,6 +2295,7 @@ void EngineHost::mtc_place(double seconds) {
         for (unsigned t = 0; t < track_count; ++t) fit_kept(t); // pad-fx C: as Locate
     }
     tick_count.store(tick_now, std::memory_order_relaxed);
+    restart_ahead();
     mtc_on = running; mtc_at = seconds; mtc_error = 0; speed = 1; mtc_misses = 0;
     mtc_now.store(mtc_on, std::memory_order_relaxed);
     mtc_placed.fetch_add(1, std::memory_order_relaxed);
@@ -2479,6 +2495,15 @@ bool EngineHost::solo_on() const {
     for (const auto& slot : slots) if (slot.soloing()) return true;
     for (unsigned s = 0; s < sub_count; ++s) if (sub_soloing(s)) return true;
     return false;
+}
+
+// A scene's mutes, kept for its bar (Type::SceneMutes), set now.
+void EngineHost::scene_mutes_now() {
+    if (!scene_mute_set) return;
+    for (unsigned t = 0; t < track_count; ++t)
+        if (scene_mute_set >> t & 1) slots[t].mute = (scene_mute_on >> t & 1) != 0;
+    scene_mute_set = scene_mute_on = 0;
+    midi_silenced();
 }
 
 void EngineHost::midi_silenced() {
@@ -3083,6 +3108,16 @@ int64_t EngineHost::midi_early(unsigned t) const {
     return ms < 0 ? int64_t(std::lround(-ms * dsp::sample_rate() / 1000.0)) : 0;
 }
 
+// Where the read-ahead had got to is the old place's: from a new one (Play from the top, Locate, MTC) it starts again
+// at tick_now. Else, with the pattern's start the same (0), a track stopped further on skipped every tick until the
+// playhead got back there: its notes came bars late after Play (issue 59).
+void EngineHost::restart_ahead() {
+    for (auto& s : slots) {
+        s.ahead_next = 0; s.ahead_start = s.ahead_bar = UINT32_MAX;
+        s.ahead_pattern = s.ahead_queued = 255;
+    }
+}
+
 void EngineHost::play_ahead(unsigned t, Slot& slot, bool seq) {
     const int64_t early = midi_early(t);
     const int64_t need = early - int64_t(clock.latency_frames());
@@ -3098,7 +3133,7 @@ void EngineHost::play_ahead(unsigned t, Slot& slot, bool seq) {
     slot.ahead_bar = slot.ahead_bar != UINT32_MAX && slot.ahead_bar <= tick_now ? UINT32_MAX : slot.ahead_bar;
     const uint32_t next_bar = (tick_now / bar + 1) * bar;
     uint32_t last = tick_now + lead;
-    if (song_mode || slot.chained || slot.off_queued) last = std::min(last, next_bar - 1); // off: nothing past its bar
+    if (song_mode || slot.chained || slot.off_queued || (scene_mute_set >> t & 1)) last = std::min(last, next_bar - 1); // off, or a scene's mute: nothing past its bar
     if (slot.follow_do && slot.follow_at > tick_now) last = std::min(last, slot.follow_at - 1);
     int64_t to = 0; // frames from this tick to `tk`
     for (uint32_t tk = tick_now; tk <= last; to += int64_t(std::lround(tick_samples(tk))), ++tk) {
