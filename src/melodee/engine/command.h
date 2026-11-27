@@ -46,7 +46,7 @@ struct Command {
         Return,      // index = bus, value = 0..100
         Pressure,    // track, index = key, value = 0..127 (poly aftertouch)
         Pad,         // track, index = kit pad, pad
-        Audition,    // track, pad (sample, start, end), value = velocity: a region on no pad; index = a kit pad + 1 whose speed it takes
+        Audition,    // track, pad (sample, start, end, level: 100 as the file is), value = velocity: a region on no pad; index = a kit pad + 1 whose speed it takes
         PadNote,     // track, index = kit pad, value = velocity, pattern = semitones + 64, position = cutoff + 1 (0: the pad's): 16 Levels;
                      // micros = a slice + 1 of the pad's sample's chop (0: the pad's region): Chop under Seq Record (issue 24)
         // track = InputSource, index = sample slot, value = threshold dB (-96: at once), pattern = rec length
@@ -178,7 +178,10 @@ struct Command {
         // The mixer: value 1: takes, Audio Recall and the input meter hear the input after its strip (else before).
         InputWet,
         // Elektron's per track direction: track, value = its PlayDirection (model/step_order.h).
-        TrackDirection
+        TrackDirection,
+        // The sample browser's preview level moved: track, value = level 0..127 (100 as the file is). The audition
+        // sounding now glides there; the next one takes the level its own Audition carries (pad.level).
+        AuditionLevel
 
     };
     enum SubPart : uint16_t { SubLevel, SubPan, SubMute, SubSolo, SubSend0 }; // SubMix's index; SubSend0 + bus

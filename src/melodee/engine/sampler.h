@@ -90,7 +90,10 @@ public:
     bool pad_muted(unsigned pad) const { return pad < sampler_pads && ((muted[pad / 64] >> (pad % 64)) & 1); }
     // A region of a sample on no pad, for Chop's audition (plays one shot). With kit pad `pad` holding the sample, at
     // that pad's speed and pitch (Warp, Semi, Fine) as its slice's pad plays it; -1 as the file is.
+    // set_accent() before it is the audition's level (the browser's preview level).
     void audition(uint16_t sample, uint32_t start, uint32_t end, int velocity, int pad = -1, bool reverse = false);
+    // The audition sounding now glides to `gain` (the browser's preview level moved); nothing else of it changes.
+    void audition_level(float gain);
     // A sample is about to change: whatever plays it stops now.
     void sample_gone(uint16_t sample);
     // A kit pad shifted by `semitones`, its filter at `cutoff` (0..100; -1 its
@@ -394,6 +397,7 @@ private:
     std::array<int, sampler::Count> p {};
     uint32_t clock = 0;
     float accent = 1; // the sequencer's, for the voices started next (set_accent)
+    PadSound auditioned; // the audition voice's sound (audition()), which audition_level() aims it from
     float bend = 0;   // semitones, set_bend
     bool pedal = false;
     bool keyed = false; // set_keyed()

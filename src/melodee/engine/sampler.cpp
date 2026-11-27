@@ -846,11 +846,25 @@ void SamplerEngine::audition(uint16_t sample, uint32_t from, uint32_t to, int ve
     sound.reverse = reverse; // a reversed slice heard on Chop with no kit pad to play it
     for (auto& v : voices) if (v.pad == int(sampler_pads)) v.choked = true; // one audition at a time
     if (sample == no_sample) return; // only that: the audition stops
+    auditioned = sound;
     Voice& v = free_voice();
     start(v, sound, int(sampler_pads), velocity);
     // At the pad's speed with its pitch kept (Warp by Beats or Tones): stretched, as the pad's voice is. An audition
     // as the file is never stretches (the kit's Tune under PITCH Stretch moves it as tape does, as before).
     if (as_pad && v.pad >= 0 && !v.stretch && std::fabs(v.step - v.advance) > 1e-6) begin_stretch(v, false);
+}
+
+void SamplerEngine::audition_level(float gain) {
+    glide_setup();
+    for (auto& v : voices) {
+        if (v.pad != int(sampler_pads) || v.choked) continue;
+        Voice probe = v; // aimed again at the new level; only its gain is taken, so its pitch and stretch stay
+        probe.accent = gain;
+        aim(probe, auditioned, nullptr, nullptr, v.key);
+        v.accent = gain;
+        v.aim.gain = probe.aim.gain;
+        v.gliding = glide_frames;
+    }
 }
 
 void SamplerEngine::sample_gone(uint16_t slot) {

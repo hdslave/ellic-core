@@ -354,6 +354,43 @@ void solo_empty_track() {
     CHECK(host.dropped() == 0);
 }
 
+// The browser's preview through the host: an Audition at its pad.level, and AuditionLevel moving the one sounding now.
+void audition_level_host() {
+    auto project = std::make_unique<Project>();
+    auto bank = std::make_unique<PatternBank>();
+    tone_kit(*project, 0);
+    EngineHost host;
+    host.load(*project, *bank);
+    SampleData tone = tone_sample();
+    host.offer_sample(0, &tone);
+    std::vector<int32_t> out(256);
+    auto peak = [&](unsigned blocks) {
+        float most = 0;
+        for (unsigned n = 0; n < blocks; ++n) {
+            host.render(out.data(), 128, 1);
+            most = 0; // the last block's: past the glide
+            for (auto s : out) most = std::max(most, std::fabs(s / 2147483648.0f));
+        }
+        return most;
+    };
+    auto audition = [&](uint8_t level) {
+        Command a {Command::Type::Audition, 0, 0, 0, 100};
+        a.pad.sample = 0; a.pad.level = level;
+        host.send(a);
+    };
+    peak(2);
+    audition(100);
+    const float full = peak(24);
+    CHECK(full > 0.05f);
+    host.send({Command::Type::AuditionLevel, 0, 0, 0, 0});
+    CHECK(peak(24) < 1e-6f);
+    host.send({Command::Type::AuditionLevel, 0, 0, 0, 100});
+    CHECK(std::fabs(peak(24) / full - 1) < 0.05f);
+    audition(0); // a new one at the level it carries
+    CHECK(peak(24) < 1e-6f);
+    CHECK(host.dropped() == 0);
+}
+
 void host_sequencer() {
     auto project = std::make_unique<Project>();
     auto bank = std::make_unique<PatternBank>();
@@ -1025,6 +1062,34 @@ void preview_progressive() {
         CHECK(loudest(engine) > 0.01f);
         for (unsigned b = 0; b < 40; ++b) loudest(engine);
         CHECK(!engine.sounding());
+    }
+    { // The browser's preview level (set_accent before the audition): 70 is that much quieter than 100, and
+      // audition_level() glides the one sounding now there, to silence and back, without starting it again.
+        SampleData flat;
+        flat.frames = 44100; flat.left.assign(44100, 0.5f); flat.right.assign(44100, 0.5f);
+        SamplerEngine::Table flat_table {};
+        flat_table[preview_slot] = &flat;
+        auto settled = [&](SamplerEngine& e) { float at = 0; for (unsigned b = 0; b < 24; ++b) at = loudest(e); return at; }; // past the 48 ms glide
+        auto heard_at = [&](float accent) {
+            SamplerEngine engine;
+            engine.set_samples(&flat_table);
+            engine.set_accent(accent);
+            engine.audition(uint16_t(preview_slot), 0, 0, 100);
+            engine.set_accent(1);
+            return settled(engine);
+        };
+        const float full = heard_at(1), lower = heard_at(volume_gain(70));
+        CHECK(full > 0.01f && std::fabs(lower / full - volume_gain(70)) < 0.01f);
+        SamplerEngine engine;
+        engine.set_samples(&flat_table);
+        engine.audition(uint16_t(preview_slot), 0, 0, 100);
+        settled(engine);
+        engine.audition_level(volume_gain(70));
+        CHECK(std::fabs(settled(engine) / full - volume_gain(70)) < 0.01f);
+        engine.audition_level(0);
+        CHECK(settled(engine) < 1e-5f && engine.sounding()); // silent, still playing
+        engine.audition_level(1);
+        CHECK(std::fabs(settled(engine) / full - 1) < 0.01f);
     }
 }
 void recording() {
@@ -10310,6 +10375,7 @@ int main() {
     layouts();
     host_sequencer();
     solo_empty_track();
+    audition_level_host();
     drum_racks();
     sequenced_legato();
     audio_quality();
