@@ -17,7 +17,9 @@ struct Command {
         Sound,       // track, index = sound: sets every parameter from the engine's factory sound
         Param,       // track, index = parameter, value
         Wheel,       // track, value 0..1000
-        Level, Pan, Send, Mute, Solo, // track, value; Send's index: the bus 0-3 a track's send goes into
+        Level, Pan, Send, Mute, Solo, // track, value; Send's index: the bus 0-3 a track's send goes into. Mute and
+                                      // Solo (and PadMute) with a position: while playing they wait for the next
+                                      // multiple of that many ticks (issue 40: Rec quantize's Q), else at once
         PatternData, // track, pattern, data: the pattern's new copy (the one it replaces goes back to be freed)
         Pattern,     // track, value = pattern to play (on the next bar while playing patterns)
         Play,        // value 1: the song from bar `index`; 0: the patterns from tick `position`. track 1: a bar's count-in first

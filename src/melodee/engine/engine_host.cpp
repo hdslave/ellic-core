@@ -630,13 +630,25 @@ void EngineHost::apply(const Command& c) {
         break;
     case Type::KeyedRoot: slot.sampler.set_keyed_root(c.value); break;
     case Type::PadMute: { // Mute Notes (issue 27): what the pad plays rings on
-        bool fade = !mutes_notes(slot);
+        const unsigned t = c.track % track_count;
+        bool waits = mute_waits(c.position), changed = false; // issue 40: on the next step of Rec quantize's Q
         for (unsigned pad = 0; pad < sampler_pads; ++pad) {
             if (c.index != 0xffff && pad != c.index) continue;
-            slot.sampler.set_pad_mute(pad, c.value != 0, fade);
-            uint64_t bit = uint64_t(1) << (pad % 64);
-            slot.pad_mutes[pad / 64] = c.value ? slot.pad_mutes[pad / 64] | bit : slot.pad_mutes[pad / 64] & ~bit; // as set (issue 32)
+            const uint64_t bit = uint64_t(1) << (pad % 64);
+            auto& set = pad_wait_set[t][pad / 64];
+            auto& on = pad_wait_on[t][pad / 64];
+            if (waits) {
+                on = c.value ? on | bit : on & ~bit;
+                const bool now = (slot.pad_mutes[pad / 64] & bit) != 0;
+                set = (c.value != 0) != now ? set | bit : set & ~bit; // pressed back before it: nothing waits
+                changed = true;
+                continue;
+            }
+            if (set & bit) { set &= ~bit; changed = true; }
+            pad_mute_now(slot, pad, c.value != 0);
         }
+        if (waits) wait_for(t, c.position);
+        if (changed) publish_mute_waits();
         break;
     }
     case Type::TrackLoad:
@@ -1004,12 +1016,36 @@ void EngineHost::apply(const Command& c) {
         slot.sends[c.index % bus_count] = std::clamp<int>(c.value, 0, 100) / 100.0f;
         if (mods_on) mod_note(c.track % track_count, motion_send(c.index), 0, slot.mix_sends[c.index % bus_count], true);
         break;
-    case Type::Mute: // Mute Notes: heard on, its notes ring (issue 27)
+    case Type::Mute: { // Mute Notes: heard on, its notes ring (issue 27)
+        const uint16_t bit = uint16_t(1u << (c.track % track_count));
+        scene_mute_set = uint16_t(scene_mute_set & ~bit); // by hand after a scene's: the hand's
+        if (mute_waits(c.position)) { // issue 40: on the next step of Rec quantize's Q; pressed back before it, nothing waits
+            mute_wait_on = uint16_t(c.value ? mute_wait_on | bit : mute_wait_on & ~bit);
+            mute_wait_set = uint16_t((c.value != 0) != slot.mute ? mute_wait_set | bit : mute_wait_set & ~bit);
+            wait_for(c.track, c.position);
+            publish_mute_waits();
+            break;
+        }
+        if (mute_wait_set & bit) { mute_wait_set = uint16_t(mute_wait_set & ~bit); publish_mute_waits(); }
         slot.mute = c.value != 0;
-        scene_mute_set = uint16_t(scene_mute_set & ~(1u << (c.track % track_count))); // by hand after a scene's: the hand's
         midi_silenced();
         break;
-    case Type::Solo: slot.solo = c.value != 0; midi_silenced(); break;
+    }
+    case Type::Solo: {
+        const uint16_t bit = uint16_t(1u << (c.track % track_count));
+        if (mute_waits(c.position)) { // issue 40, as Mute
+            solo_wait_on = uint16_t(c.value ? solo_wait_on | bit : solo_wait_on & ~bit);
+            solo_wait_set = uint16_t((c.value != 0) != slot.solo ? solo_wait_set | bit : solo_wait_set & ~bit);
+            wait_for(c.track, c.position);
+            publish_mute_waits();
+            break;
+        }
+        if (solo_wait_set & bit) { solo_wait_set = uint16_t(solo_wait_set & ~bit); publish_mute_waits(); }
+        slot.solo = c.value != 0;
+        midi_silenced();
+        break;
+    }
+
     case Type::PatternData:
         if (c.data) {
             auto& at = patterns[c.track % track_count][c.pattern % pattern_count];
@@ -1135,6 +1171,7 @@ void EngineHost::apply(const Command& c) {
         in_song.store(false, std::memory_order_relaxed);
         if (scene_tempo) { global_tempo = scene_tempo; scene_tempo = 0; } // roadmap P5: a scene's, still waiting for its bar: with its patterns, below
         scene_mutes_now(); // and its mutes
+        mutes_due(); // issue 40: and the hand's still waiting for their beat or bar
         follow_lane(); // roadmap P5: the project's tempo again
         for (unsigned t = 0; t < track_count; ++t) {
             positions_now[t].store(-1, std::memory_order_relaxed);
@@ -2429,6 +2466,52 @@ bool EngineHost::solo_on() const {
 }
 
 // A scene's mutes, kept for its bar (Type::SceneMutes), set now.
+void EngineHost::pad_mute_now(Slot& slot, unsigned pad, bool on) {
+    pad %= sampler_pads;
+    slot.sampler.set_pad_mute(pad, on, !mutes_notes(slot));
+    const uint64_t bit = uint64_t(1) << (pad % 64);
+    slot.pad_mutes[pad / 64] = on ? slot.pad_mutes[pad / 64] | bit : slot.pad_mutes[pad / 64] & ~bit; // as set (issue 32)
+}
+
+void EngineHost::wait_for(unsigned t, uint32_t grid) {
+    t %= track_count;
+    grid = std::max<uint32_t>(grid, 1);
+    const uint32_t due = (tick_now / grid + 1) * grid; // the next step: a press on it waits for the one after
+    if (!(waits_on(t) && wait_due[t] > tick_now && wait_due[t] <= due)) { wait_due[t] = due; wait_grid[t] = grid; }
+}
+
+void EngineHost::mutes_due(int track) {
+    if (!(mute_wait_set | solo_wait_set | pad_waits)) return;
+    for (unsigned t = 0; t < track_count; ++t) {
+        if (track >= 0 && t != unsigned(track)) continue;
+        auto& slot = slots[t];
+        const uint16_t bit = uint16_t(1u << t);
+        if (mute_wait_set & bit) slot.mute = (mute_wait_on & bit) != 0;
+        if (solo_wait_set & bit) slot.solo = (solo_wait_on & bit) != 0;
+        mute_wait_set = uint16_t(mute_wait_set & ~bit);
+        solo_wait_set = uint16_t(solo_wait_set & ~bit);
+        for (unsigned w = 0; w < pad_wait_words; ++w) {
+            for (uint64_t set = pad_wait_set[t][w]; set; set &= set - 1) {
+                const unsigned b = unsigned(__builtin_ctzll(set));
+                pad_mute_now(slot, w * 64 + b, (pad_wait_on[t][w] >> b & 1) != 0);
+            }
+            pad_wait_set[t][w] = 0;
+        }
+    }
+    midi_silenced();
+    publish_mute_waits();
+}
+
+void EngineHost::publish_mute_waits() {
+    pad_waits = 0;
+    for (unsigned t = 0; t < track_count; ++t)
+        for (unsigned w = 0; w < pad_wait_words; ++w) {
+            if (pad_wait_set[t][w]) pad_waits = uint16_t(pad_waits | 1u << t);
+            pad_waits_now[t][w].store(pad_wait_set[t][w], std::memory_order_relaxed);
+        }
+    mute_waits_now.store(uint32_t(mute_wait_set | solo_wait_set), std::memory_order_relaxed);
+}
+
 void EngineHost::scene_mutes_now() {
     if (!scene_mute_set) return;
     for (unsigned t = 0; t < track_count; ++t)
@@ -2960,6 +3043,11 @@ void EngineHost::tick() {
     if (!bounce_song && render_out.running() && tick_now >= bounce_ticks) render_out.finish(block_at);
     if (tick_now % bar == 0) { freeze_at_bar(); bar_start(); } // freeze plan F2b: a frozen track switches on a bar line
     if (!running) return;
+    // Issue 40: mutes and solos pressed while playing with Rec quantize on, on their step, before this tick's notes. A
+    // transport that jumped back (a loop, a locate) more than a step before it: now.
+    if (mute_wait_set | solo_wait_set | pad_waits)
+        for (unsigned t = 0; t < track_count; ++t)
+            if (waits_on(t) && (tick_now >= wait_due[t] || wait_due[t] - tick_now > wait_grid[t])) mutes_due(int(t));
     if (song_mode && !song.tempo.empty()) follow_lane(); // roadmap P5: the tempo lane, this tick's tempo before its length
     if (!song_mode) // roadmap P5: follow actions due on this tick, before the tick's notes (a launch waiting for its bar first)
         for (unsigned t = 0; t < track_count; ++t) {
