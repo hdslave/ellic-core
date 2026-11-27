@@ -2146,7 +2146,8 @@ void EngineHost::bar_start() {
     if (tick_now) ++song_bar_now;
     bool rendering = bounce_song && render_out.running(); // the mixdown plays the song once, loop or not
     if (!rendering && song.looping() && song_bar_now == song.loop_end) song_bar_now = song.loop_start;
-    if ((rendering || !song.looping()) && !song_recording && song_bar_now >= std::max(song.length(), 1u)) { // the end of the song
+    // The end of the song; played from past the loop's end (issue 60), the loop never comes round: it ends too.
+    if ((rendering || !song.looping() || song_bar_now > song.loop_end) && !song_recording && song_bar_now >= std::max(song.length(), 1u)) {
         running = false;
         if (rendering) render_out.tail(); // on until the mix falls silent
         for (auto& s : slots) { for (auto& off : s.offs) if (off.key >= 0) { engine_note_off(s, off.key); off.key = -1; } s.held = {}; }

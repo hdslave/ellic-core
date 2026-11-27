@@ -792,6 +792,10 @@ void arrange() {
         host->render(block.data(), 128, 1);
         CHECK(host->offer_plugin(0, nullptr));
         host->render(block.data(), 128, 1);
+        // Issue 60: played from past the loop's end, the song runs to its end and stops (the loop never comes round).
+        host->send({Command::Type::Play, 0, 0, 6, 1}); // from bar 7 of 8
+        for (unsigned n = 0; n < 2000; ++n) host->render(block.data(), 128, 1); // past bar 8's end
+        CHECK(!host->playing());
     }
     // A clip changed for another pattern in its place while it plays: the new pattern from the next bar, where the
     // clip has it by then (the old one played on to the clip's end).

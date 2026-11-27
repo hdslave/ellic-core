@@ -1709,7 +1709,7 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
             for (unsigned k = 0; k < count && r.ok; ++k) {
                 Clip c;
                 c.track = uint8_t(r.u8() % track_count); c.pattern = uint8_t(r.u8() % pattern_count);
-                c.bar = uint16_t(std::min<unsigned>(r.u16(), song_bars)); c.bars = uint16_t(std::clamp<unsigned>(r.u16(), 1, max_bars)); c.muted = r.u8() != 0;
+                c.bar = uint16_t(std::min<unsigned>(r.u16(), song_bars)); c.bars = uint16_t(std::clamp<unsigned>(r.u16(), 1, song_bars)); c.muted = r.u8() != 0; // a clip may be longer than a pattern (an MPC song's, a jam's)
                 if (song.count < song.clips.size()) song.clips[song.count++] = c;
             }
             unsigned markers = r.u8();
