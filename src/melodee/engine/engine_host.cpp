@@ -2192,10 +2192,14 @@ void EngineHost::bar_start() {
         follow_tempo(); // BPM per pattern: the one launched last leads
         return;
     }
-    if (tick_now) ++song_bar_now;
+    const bool moved_on = tick_now != 0; // into the next bar (not the first tick: the bar Play began on)
+    if (moved_on) ++song_bar_now;
     bool rendering = bounce_song && render_out.running(); // the mixdown plays the song once, loop or not
-    if (!rendering && song.looping() && song_bar_now == song.loop_end) song_bar_now = song.loop_start;
-    if ((rendering || !song.looping()) && !song_recording && song_bar_now >= std::max(song.length(), 1u)) { // the end of the song
+    // The loop goes round for a song that comes to its end from inside it. One played from past it (the cursor after
+    // the brace, or the brace moved behind the place) plays on to the song's end and stops, as with no loop.
+    if (!rendering && song.looping() && moved_on && song_bar_now == song.loop_end) song_bar_now = song.loop_start;
+    const bool goes_round = song.looping() && song_bar_now < song.loop_end; // still to reach the loop's end
+    if ((rendering || !goes_round) && !song_recording && song_bar_now >= std::max(song.length(), 1u)) { // the end of the song
         running = false;
         heard_turn();
         if (rendering) render_out.tail(); // on until the mix falls silent
@@ -3364,7 +3368,10 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
         double from = song_mode ? double(tick_now && !in_bar ? song_bar_now + 1 : song_bar_now) * bar_ticks + in_bar : double(tick_now);
         fx_clock->song = std::max(0.0, (from - std::max(until_tick, 0.0) / tick_length()) / ticks_per_quarter);
     }
-    fx_clock->looping = fx_clock->playing && song_mode && song.looping() && !(bounce_song && render_out.running());
+    // Told only while the place is inside the brace: before it, or past it (the cursor after it, the brace moved
+    // behind the place), the place does not go round it now.
+    fx_clock->looping = fx_clock->playing && song_mode && song.looping() && !(bounce_song && render_out.running())
+                        && song_bar_now >= song.loop_start && song_bar_now < song.loop_end;
     fx_clock->loop_from = fx_clock->looping ? double(song.loop_start) * bar / ticks_per_quarter : 0.0;
     fx_clock->loop_to = fx_clock->looping ? double(song.loop_end) * bar / ticks_per_quarter : 0.0;
     if (mods_on) run_modulators(frames); // roadmap P4: before the tracks' buffers are cleared (a follower hears the last block)
