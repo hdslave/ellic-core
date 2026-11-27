@@ -8,7 +8,8 @@
 // The MPC's MIDI Config (Shift + Pad 8, parity phase 9), kept with Melodee's
 // settings: which port MIDI goes in and out of, the channels, whether MIDI
 // plays the pads and the pads (and patterns) send MIDI, clock sync both
-// ways, MIDI Thru, Program Change to patterns and the CV clock on SYNC OUT.
+// ways, MIDI Thru, Program Change to sequences or plug-ins and the CV clock
+// on SYNC OUT.
 // A track may also have a channel of its own (Track::midi_channel, kept with
 // the project): notes on it play that track whatever is selected, from its own
 // input (Track::midi_in: any port, the jacks or USB), so each track can have a
@@ -29,6 +30,14 @@ inline const char* track_midi_in_name(TrackMidiIn in) {
     static const char* const names[] {"Any", "External", "USB"};
     return names[unsigned(in) % unsigned(TrackMidiIn::Count)];
 }
+// What a Program Change in does (MidiConfig::program_change): nothing; Sequence: 1..16 launches that sequence;
+// Plug-in: the plug-in of each track the message reaches loads that preset (the Bank Select CCs before it pick the
+// bank of 128). Plain numbers, so 0/1 read as the off/on of older settings files.
+constexpr uint8_t program_off = 0, program_sequence = 1, program_plugin = 2, program_choices = 3;
+inline const char* program_change_name(unsigned value) {
+    static const char* const names[] {"Off", "Sequence", "Plug-in"};
+    return names[value % program_choices];
+}
 
 struct MidiConfig {
     MidiPort port = MidiPort::External;
@@ -38,7 +47,7 @@ struct MidiConfig {
     PadMidiOut pad_out = PadMidiOut::Never;
     MidiSync sync_in = MidiSync::Off, sync_out = MidiSync::Off;
     bool thru = false;             // what comes in goes out again, as it came
-    bool program_change = false;   // Program Change 1..16 launches that pattern on every track
+    uint8_t program_change = program_off; // program_sequence, program_plugin: what a Program Change in does
     bool cv_out = false;           // a clock on SYNC OUT (CV_CLK_OUT)
     uint8_t cv_base = 2, cv_division = 1; // pulses a quarter: base x division (2: Volca and Pocket Operator sync)
     // Remote (from any port): 0 Off, 1..16 the channel; each CC 0 Off, else its number. The value picks the track
@@ -86,7 +95,7 @@ inline bool read_midi_config(MidiConfig& m, const std::string& key, int value) {
     else if (key == "midi_sync_in") m.sync_in = MidiSync(clamp(value, 0, int(MidiSync::Count) - 1));
     else if (key == "midi_sync_out") m.sync_out = MidiSync(clamp(value, 0, int(MidiSync::Count) - 1));
     else if (key == "midi_thru") m.thru = value != 0;
-    else if (key == "program_change") m.program_change = value != 0;
+    else if (key == "program_change") m.program_change = uint8_t(clamp(value, 0, program_choices - 1));
     else if (key == "cv_out") m.cv_out = value != 0;
     else if (key == "cv_base") m.cv_base = uint8_t(clamp(value, 1, 8));
     else if (key == "cv_division") m.cv_division = uint8_t(clamp(value, 1, 24));
