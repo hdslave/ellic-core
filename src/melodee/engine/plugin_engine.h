@@ -84,6 +84,7 @@ public:
         if (runner) runner->render(left, right, frames);
         macros.process(left, right, frames);
     }
+    void pass(unsigned frames) { if (runner) runner->pass(frames); } // a block its track's print plays in its place
     // A plug-in's tail is its own business: while one is attached it is heard (and while a knob's echo or reverb rings).
     bool sounding() const override { return runner != nullptr || macros.sounding(); }
 
