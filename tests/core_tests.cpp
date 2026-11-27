@@ -3216,8 +3216,18 @@ void sfz_reader() {
         auto read = read_sfz("<control> set_cc1=100 set_hdcc2=0.25\n<region> sample=up.wav key=60 hicc64=63\n<region> sample=down.wav key=60 locc64=64\n"
                              "<region> sample=wheel high.wav key=61 locc1=90\n<region> sample=wheel low.wav key=61 hicc1=89\n"
                              "<region> sample=fine.wav key=62 lohdcc2=0.5\n<region> sample=fine low.wav key=62 hihdcc2=0.5\n<region> sample=note.wav key=63 locc133=64\n");
-        CHECK(samples(read) == S({"up.wav", "wheel high.wav", "fine low.wav", "note.wav"}));
-        CHECK(read.left == 3 && read.ignored.count("locc133"));
+        // Issue 66: a controller's range other than the pedal's is followed as it plays (the region kept, the range and
+        // where the controller starts on its zone); the pedal's waits as before; a region a controller's move starts is
+        // left out.
+        CHECK(samples(read) == S({"up.wav", "wheel high.wav", "wheel low.wav", "fine.wav", "fine low.wav", "note.wav"}));
+        CHECK(read.left == 1 && read.left_by == std::set<std::string> {"locc64"} && read.ignored.count("locc133"));
+        const auto& up = read.regions[0].zone, &high = read.regions[1].zone, &low = read.regions[2].zone, &fine = read.regions[3].zone;
+        CHECK(up.cc == -1 && high.cc == 1 && high.cc_low == 90 && high.cc_high == 127 && high.cc_start == 100);
+        CHECK(low.cc == 1 && low.cc_low == 0 && low.cc_high == 89 && fine.cc == 2 && fine.cc_low == 64 && fine.cc_start == 32);
+        CHECK(read.regions[5].zone.cc == -1);
+        auto hats = read_sfz("<region> sample=closed.wav key=42 hicc4=63\n<region> sample=open.wav key=42 locc4=64\n<region> sample=splash.wav on_locc4=100\n");
+        CHECK(samples(hats) == S({"closed.wav", "open.wav"}) && hats.left == 1 && hats.left_by.count("on_locc4"));
+        CHECK(hats.regions[0].zone.cc == 4 && hats.regions[0].zone.cc_high == 63 && hats.regions[1].zone.cc_low == 64 && hats.regions[1].zone.cc_start == 0);
     }
     {
         auto read = read_sfz("<global> sw_lokey=24 sw_hikey=25 sw_default=24\n<region> sample=note.wav key=60 sw_last=24\n<region> sample=other.wav key=60 sw_last=25\n"

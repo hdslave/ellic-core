@@ -148,6 +148,17 @@ std::optional<Gate> gate_of(const std::string& name) {
     return g;
 }
 
+// Issue 66: the controller a region's range follows as it plays (locc4=64 hicc4=95: a hi-hat's half open), the
+// first of its gates in name order whose controller is not the sustain pedal's (a layer for the pedal down stays
+// left out, kept_from()); -1 none.
+int followed_controller(const Opcodes& o) {
+    for (const auto& [name, value] : o) {
+        auto found = gate_of(name);
+        if (found && found->controller != 64 && double_of(value)) return found->controller;
+    }
+    return -1;
+}
+
 struct Moved { std::string stage; int controller = 0; };
 // A stage moved by a controller with no curve of its own (ampeg_release_oncc72, ampeg_releasecc64).
 std::optional<Moved> moved_of(const std::string& name, const Opcodes& o) {
@@ -184,10 +195,13 @@ bool known(const std::string& name, const Opcodes& o) {
 // What keeps a region from a press, named; none if nothing does. A controller's
 // condition is read where it starts: a layer for the pedal down is left out.
 std::optional<std::string> kept_from(const Opcodes& o) {
+    const int followed = followed_controller(o); // issue 66: that one's range is the engine's, as it plays
     for (const auto& [name, value] : o) { // in name order, the first waiting
+        // A region a controller's move starts (on_locc64): not a press's, and Melodee starts none.
+        if ((starts_with(name, "on_lo") || starts_with(name, "on_hi")) && name.find("cc") != std::string::npos) return name;
         auto found = gate_of(name);
         auto limit = double_of(value);
-        if (!found || !limit) continue;
+        if (!found || !limit || found->controller == followed) continue;
         double start = starts(found->controller, o), asked = found->unit ? *limit : *limit / 127;
         if (found->low ? start < asked : start > asked) return name;
     }
@@ -246,6 +260,17 @@ std::optional<SfzRegion> region_of(const Opcodes& o) {
     if (low < 0 || high < 0) return std::nullopt; // played by nothing
     if (auto v = note_at(o, "pitch_keycenter")) root = *v;
     auto& z = made.zone;
+    if (const int cc = followed_controller(o); cc >= 0) { // issue 66: its controller's range, followed as it plays
+        z.cc = int8_t(cc);
+        z.cc_start = uint8_t(std::clamp(int(std::lround(starts(cc, o) * 127)), 0, 127));
+        for (const auto& [name, value] : o) {
+            auto found = gate_of(name);
+            auto limit = double_of(value);
+            if (!found || !limit || found->controller != cc) continue;
+            const uint8_t v = uint8_t(std::clamp(int(std::lround(found->unit ? *limit * 127 : *limit)), 0, 127));
+            if (found->low) z.cc_low = v; else z.cc_high = v;
+        }
+    }
     z.low_key = clamped<uint8_t>(low + shift, 0, 127);
     z.high_key = clamped<uint8_t>(high + shift, 0, 127);
     z.root = clamped<uint8_t>(root + shift, 0, 127);

@@ -1687,6 +1687,7 @@ void EngineHost::mod_write(unsigned t, unsigned param, unsigned pad, int value) 
     }
     if (param == motion_wheel) { if (slot.engine) engine_wheel(slot, std::clamp(value / 127.0f, 0.0f, 1.0f)); return; }
     if (param == motion_bend) { if (slot.engine) engine_bend(slot, std::clamp(value / 64.0f, -1.0f, 1.0f)); return; }
+    if (param == motion_cc) return; // issue 66: not a modulator's
     if (int which = pad_param_of(param); which >= 0) {
         if (slot.kind == EngineKind::Sampler || slot.kind == EngineKind::Keygroup) slot.sampler.move_pad(pad % sampler_pads, PadParam(which), value);
         return;
@@ -2029,6 +2030,14 @@ void EngineHost::move_lane(unsigned t, Slot& slot, unsigned param, unsigned pad,
         if (slot.kind == EngineKind::Sampler || slot.kind == EngineKind::Keygroup) { pad_mute_call(slot, pad % sampler_pads, value != 0); slot.pad_mutes_moved = true; }
         return;
     }
+    if (param == motion_cc) { // issue 66: a controller, as MIDI in's (in order with the notes)
+        if (slot.kind == EngineKind::Sampler || slot.kind == EngineKind::Keygroup) {
+            EngineCall call;
+            call.op = EngineCall::Op::Control; call.a = int32_t(pad & 0x7f); call.b = std::clamp(value, 0, 127);
+            if (!keep_call(slot, call)) make_call(t, slot, call);
+        }
+        return;
+    }
     if (param >= motion_pad_base) { // a kit pad's own value (a keygroup's sound's)
         if (slot.kind == EngineKind::Sampler || slot.kind == EngineKind::Keygroup) {
             EngineCall call;
@@ -2054,6 +2063,7 @@ void EngineHost::restore_lane(unsigned t, Slot& slot, unsigned param, unsigned p
     if (is_mix_lane(param)) { restore_mix(slot, param); return; } // roadmap P4
     if (param == motion_wheel) { engine_wheel(slot, slot.wheel); return; }
     if (param == motion_bend) { engine_bend(slot, slot.bend); return; }
+    if (param == motion_cc) return; // issue 66: the controller stays where the lane left it, as a knob would
     if (param == motion_pad_mute) { // issue 32: the pad's mute as set
         if (slot.kind == EngineKind::Sampler || slot.kind == EngineKind::Keygroup) pad_mute_call(slot, pad % sampler_pads, (slot.pad_mutes[pad % sampler_pads / 64] >> (pad % 64)) & 1);
         return;

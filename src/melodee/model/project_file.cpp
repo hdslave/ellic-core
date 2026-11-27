@@ -711,6 +711,16 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
         for (unsigned n = 0; n < sampler_pads; ++n) if (tr.pads[n].used() && !tr.pads[n].plain_layers()) write_layers(w, n, tr.pads[n]);
         w.end(at);
     }
+    for (unsigned t = 0; t < track_count; ++t) { // issue 66: CC layers' controller, where not CC 4: track, then pad and CC
+        const auto& tr = project.tracks[t];
+        unsigned own = 0;
+        for (const auto& pad : tr.pads) own += pad.used() && pad.layer_cc != layer_cc_first;
+        if (!own) continue;
+        at = w.begin("LYCC");
+        w.u8(t); w.u8(own);
+        for (unsigned n = 0; n < sampler_pads; ++n) if (tr.pads[n].used() && tr.pads[n].layer_cc != layer_cc_first) { w.u8(n); w.u8(tr.pads[n].layer_cc); }
+        w.end(at);
+    }
     // Instruments' zones trimmed (round 3 "instrument C"): pad, slot, zone, cents, tenths of a dB. ZTRM names the slot
     // in a byte; the trims of an instrument in a slot past legacy_sample_slots go in ZTRX, the slot in two.
     for (unsigned t = 0; t < track_count; ++t)
@@ -1163,6 +1173,14 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
             if (t >= track_count) continue;
             unsigned used = r.u8();
             for (unsigned k = 0; k < used && r.ok; ++k) read_layers(r, project->tracks[t].pads.data(), sampler_pads, sample_slots);
+        } else if (name == "LYCC") { // issue 66: CC layers' controller; without it CC 4
+            unsigned t = r.u8();
+            if (t >= track_count) continue;
+            unsigned own = r.u8();
+            for (unsigned k = 0; k < own && r.ok; ++k) {
+                unsigned n = r.u8(), cc = r.u8();
+                if (r.ok && n < sampler_pads) project->tracks[t].pads[n].layer_cc = uint8_t(std::clamp(cc, 1u, 127u));
+            }
         } else if (name == "ZTRM" || name == "ZTRX") { // instruments' zones trimmed (round 3 "instrument C"); without it none are
             const bool wide = name == "ZTRX"; // the slot in two bytes
             unsigned t = r.u8();
@@ -1988,6 +2006,14 @@ std::vector<uint8_t> save_bank(const BankFile& bank) {
         for (unsigned k = 0; k < bank_pads; ++k) if (bank.pads[k].used() && !bank.pads[k].plain_layers()) write_layers(w, k, bank.pads[k]);
         w.end(at);
     }
+    unsigned own_cc = 0; // issue 66, as LYCC
+    for (unsigned k = 0; k < bank_pads; ++k) own_cc += bank.pads[k].used() && bank.pads[k].layer_cc != layer_cc_first;
+    if (own_cc) {
+        at = w.begin("BLCC");
+        w.u8(own_cc);
+        for (unsigned k = 0; k < bank_pads; ++k) if (bank.pads[k].used() && bank.pads[k].layer_cc != layer_cc_first) { w.u8(k); w.u8(bank.pads[k].layer_cc); }
+        w.end(at);
+    }
     at = w.begin("BPFX");
     for (unsigned k = 0; k < bank_pads; ++k)
         if (bank.chains[k].count()) { w.u8(k); write_chain(w, bank.chains[k]); }
@@ -2062,6 +2088,12 @@ bool load_bank(const std::vector<uint8_t>& data, BankFile& out) {
         } else if (name == "BLYR") {
             unsigned used = r.u8();
             for (unsigned k = 0; k < used && r.ok; ++k) read_layers(r, bank.pads.data(), bank_pads, unsigned(bank.samples.size()));
+        } else if (name == "BLCC") { // issue 66
+            unsigned own = r.u8();
+            for (unsigned k = 0; k < own && r.ok; ++k) {
+                unsigned n = r.u8(), cc = r.u8();
+                if (r.ok && n < bank_pads) bank.pads[n].layer_cc = uint8_t(std::clamp(cc, 1u, 127u));
+            }
         } else if (name == "BPFX") {
             while (r.ok && !r.done()) {
                 unsigned k = r.u8();
