@@ -20,7 +20,7 @@ struct Command {
         Level, Pan, Send, Mute, Solo, // track, value; Send's index: the bus 0-3 a track's send goes into
         PatternData, // track, pattern, data: the pattern's new copy (the one it replaces goes back to be freed)
         Pattern,     // track, value = pattern to play (on the next bar while playing patterns)
-        Play,        // value 1: the song from bar `index`; 0: the patterns from tick `position`. track 1: a bar's count-in first
+        Play,        // value 1: the song from bar `index`, `position` ticks into it (a MIDI Continue from Song Position); 0: the patterns from tick `position`. track 1: a bar's count-in first
         Stop,
         Locate,      // position: the patterns playing jump there (the wheel on Patterns)
         Signature,   // index = ticks a beat, value = ticks a bar

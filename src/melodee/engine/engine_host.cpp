@@ -1091,7 +1091,9 @@ void EngineHost::apply(const Command& c) {
         running = true; until_tick = 0;
         drop_hits();
         for (auto& s : slots) { s.weighed = s.went = false; s.keys_weighed = {}; s.keys_went = {}; } // PRE and NEI start afresh
-        tick_now = c.value == 1 ? 0 : c.position;
+        // The song from a bar's top counts from tick 0; from inside a bar (a MIDI Continue), from that bar's own tick on,
+        // as a locate (mtc_place) places it, its clips found at once below.
+        tick_now = c.value == 1 ? (c.position ? uint32_t(c.index) * bar + c.position % bar : 0) : c.position;
         restart_ahead();
         arp_ticks = 0; until_arp = 0; // the repeats line up with the bar, so their swing falls with the sequencer's
         arp_origin = tick_now;         // and Seq Record writes each where it fell (roadmap P1)
@@ -1115,6 +1117,7 @@ void EngineHost::apply(const Command& c) {
             stopped_now.store(off, std::memory_order_relaxed);
         }
         for (unsigned t = 0; t < track_count; ++t) plan_follow(t); // roadmap P5: from each pattern's top (not in the song)
+        if (song_mode && tick_now % bar) clips_at_bar(true); // inside a bar: no bar's start to find its clips
         follow_lane(); // roadmap P5: the song's tempo where it starts, its count-in too
         if (render_out.cued()) { // a render starts with the first frame played
             if (bounce_song != song_mode || count_left) render_out.cancel();
