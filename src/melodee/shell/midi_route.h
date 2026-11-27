@@ -57,24 +57,27 @@ int levels_key(const Track& track, int key, bool instrument, int root = 0);
 inline unsigned out_channel_of(const MidiConfig& config, const Track& track) { return track.midi_channel ? track.midi_channel : config.out_channel; }
 
 // MIDI clock in: the tempo it sets, held through the follower's wobble. A clock's own jitter moves the reading a
-// tenth either way now and then (an SMK-37 at 120: 120.0, now and then 119.9), which made the tempo, and the header's
-// BPM with every chip after it, shake. A reading a tenth away is taken once it has held for steady_pulses (four
-// beats), so a slow ramp still follows; one further away at once. take() a pulse: the tempo in tenths (0: none yet).
+// tenth or two either way now and then (an SMK-37 at 120: 120.0, now and then 119.9 or 119.8), which made the tempo,
+// and the header's BPM with every chip after it, shake. A reading less than `jump` tenths away is taken only once the
+// readings have stayed on that side for steady_pulses (four beats), so a slow ramp still follows; one `jump` or more
+// away at once. take() a pulse: the tempo in tenths (0: none yet).
 class TempoSteady {
 public:
     static constexpr unsigned steady_pulses = 96;
+    static constexpr int jump = 5; // half a BPM
     unsigned take(unsigned tenths) {
         if (!tenths) return held;
-        const unsigned off = tenths > held ? tenths - held : held - tenths;
-        if (!held || off >= 2) { held = tenths; waiting = 0; return held; }
-        if (!off) { waiting = 0; return held; }
-        if (tenths != candidate) { candidate = tenths; waiting = 0; }
-        if (++waiting >= steady_pulses) { held = tenths; waiting = 0; }
+        const int off = int(tenths) - int(held);
+        if (!held || off >= jump || off <= -jump) { held = tenths; waiting = 0; side = 0; return held; }
+        if (!off) { waiting = 0; side = 0; return held; }
+        if ((off > 0 ? 1 : -1) != side) { side = off > 0 ? 1 : -1; waiting = 0; }
+        if (++waiting >= steady_pulses) { held = tenths; waiting = 0; side = 0; }
         return held;
     }
-    void reset() { held = candidate = waiting = 0; }
+    void reset() { held = waiting = 0; side = 0; }
 private:
-    unsigned held = 0, candidate = 0, waiting = 0;
+    unsigned held = 0, waiting = 0;
+    int side = 0;
 };
 
 // MIDI clock in: the tempo from the last pulses' kernel stamps. A pause of a
