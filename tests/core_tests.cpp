@@ -2377,9 +2377,22 @@ void mtc_in() {
         host.send({Command::Type::Stop});
         host.send({Command::Type::SongLoop, 0, 0, 2, 4});
         host.send({Command::Type::Play, 0, 0, 0, 1});
-        mtc(1, 10.0, frame); // bar 6 on the bar line: the loop's bar 3 (index 2 + (5 - 2) % 2 = 3)
+        mtc(1, 10.0, frame); // bar 6 on the bar line, past the loop (bars 3-4): it plays on from there, as from a cursor
         render();
-        CHECK(host.song_bar() == 3 && host.position_of(0) >= 0 && host.position_of(0) <= 6);
+        CHECK(host.song_bar() == 5 && host.position_of(0) >= 0 && host.position_of(0) <= 6);
+        for (unsigned n = 0; n < 700; ++n) render(); // a bar on (689 blocks): bar 7, not back into the loop
+        CHECK(host.song_bar() == 6 && host.mtc_following());
+        host.send({Command::Type::Stop});
+        host.send({Command::Type::Play, 0, 0, 0, 1});
+        mtc(1, 7.0, frame); // bar 4's second half: inside the loop, which comes round at bar 5's line
+        render();
+        CHECK(host.song_bar() == 3);
+        for (unsigned n = 0; n < 400; ++n) render(); // past bar 4's end: round to bar 3
+        CHECK(host.song_bar() == 2 && host.mtc_following());
+        // Going round, the song far behind the master (about 8.2 s by now, 15 s told): placed again round the loop, bar 8's
+        // second half as bar 4's (index 2 + (7 - 2) % 2 = 3).
+        for (unsigned n = 0; n < 4; ++n) { mtc(2, 15.0 + n * 128 / 44100.0, frame); render(); }
+        CHECK(host.song_bar() == 3 && host.mtc_following());
         host.send({Command::Type::Stop});
         host.send({Command::Type::SongLoop, 0, 0, 0, 0});
         host.send({Command::Type::Play, 0, 0, 0, 1});

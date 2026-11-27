@@ -819,7 +819,12 @@ private:
     std::atomic<bool> mtc_now {false};
     std::atomic<int> mtc_error_now {0}, mtc_ppm {0};
     std::atomic<unsigned> mtc_placed {0};
-    void mtc_place(double seconds); // the song (or the patterns playing) to where `seconds` falls at the tempo playing now
+    // The song (or the patterns playing) to where `seconds` falls at the tempo playing now. `round`: a song going round its
+    // loop, placed again, keeps going round (the master's time folded into the loop); else the master's time is the
+    // song's place, as a cursor is, so past the loop it plays on.
+    void mtc_place(double seconds, bool round = false);
+    bool song_inside_loop() const { return song_mode && song.looping() && song_bar_now >= song.loop_start && song_bar_now < song.loop_end; }
+    bool song_placed = false; // mtc_place() put the song on a bar line: the first tick's bar_start() moves it there, not on
     void mtc_off();
     void clips_at_bar(bool force);    // the song's clips for song_bar_now (a clip from where it stands in the bar)
     double quarter_samples() const { return tick_length() * ticks_per_quarter; }

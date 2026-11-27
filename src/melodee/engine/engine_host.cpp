@@ -905,7 +905,7 @@ void EngineHost::apply(const Command& c) {
         if (c.index == 1 && !(mtc_on && std::fabs(error) < 0.02)) { mtc_place(master); break; } // the same place: no jump
         if (!mtc_on) break;
         if (std::fabs(error) > 0.1) { // a stray sample, or the song fell far behind (an overload): placed again
-            if (++mtc_misses >= 4) mtc_place(master);
+            if (++mtc_misses >= 4) mtc_place(master, song_inside_loop()); // going round its loop: round it still
             break;
         }
         mtc_misses = 0;
@@ -1097,7 +1097,7 @@ void EngineHost::apply(const Command& c) {
         restart_ahead();
         arp_ticks = 0; until_arp = 0; // the repeats line up with the bar, so their swing falls with the sequencer's
         arp_origin = tick_now;         // and Seq Record writes each where it fell (roadmap P1)
-        song_mode = c.value == 1; song_bar_now = c.index;
+        song_mode = c.value == 1; song_bar_now = c.index; song_placed = false;
         count_left = c.track == 1 ? bar : 0;
         heard_turn();
         count_beat.store(count_left ? 1 : 0, std::memory_order_relaxed);
@@ -2192,8 +2192,10 @@ void EngineHost::bar_start() {
         follow_tempo(); // BPM per pattern: the one launched last leads
         return;
     }
-    const bool moved_on = tick_now != 0; // into the next bar (not the first tick: the bar Play began on)
-    if (moved_on) ++song_bar_now;
+    if (tick_now) ++song_bar_now; // into the next bar (not the first tick: the bar Play began on)
+    // Played on into this bar: not Play's first bar, nor the bar line MTC placed the song on (mtc_place()).
+    const bool moved_on = tick_now != 0 && !song_placed;
+    song_placed = false;
     bool rendering = bounce_song && render_out.running(); // the mixdown plays the song once, loop or not
     // The loop goes round for a song that comes to its end from inside it. One played from past it (the cursor after
     // the brace, or the brace moved behind the place) plays on to the song's end and stops, as with no loop.
@@ -2293,8 +2295,10 @@ void EngineHost::mtc_off() {
 
 // MTC in: time to the song through the tempo playing now (BPM per pattern: the lead pattern's; in the song, the one it
 // plays at). Patterns: every track from the patterns' start, as Locate (the tick since Play, each track's pattern round
-// as many times as fits). Song: the bar and the tick in it, round the loop as the song plays it; past its end, it stops.
-void EngineHost::mtc_place(double seconds) {
+// as many times as fits). Song: the bar and the tick in it, as a cursor there would play: before or inside its loop it
+// goes round it (bar_start()), past it it plays on to the song's end, and past that it stops. A song going round its loop
+// that is placed again (it fell behind: `round`) keeps going round, the master's time folded into the loop.
+void EngineHost::mtc_place(double seconds, bool round) {
     double ticks = std::max(0.0, seconds) * tempo / 10.0 / 60.0 * ticks_per_quarter;
     if (song_mode && !song.tempo.empty()) // roadmap P5: through the song's tempo lane, bar by bar
         ticks = song.tempo.bars_at(std::max(0.0, seconds), double(bar) / ticks_per_quarter, global_tempo) * bar;
@@ -2307,12 +2311,14 @@ void EngineHost::mtc_place(double seconds) {
     if (punch_from_song) { punch.stop(); punch_from_song = false; } // the song's punch was the old place's
     if (song_mode) {
         unsigned b = at / bar, offset = at % bar;
-        if (song.looping() && b >= song.loop_end) b = song.loop_start + (b - song.loop_start) % (song.loop_end - song.loop_start);
+        if (round && song.looping() && b >= song.loop_end) b = song.loop_start + (b - song.loop_start) % (song.loop_end - song.loop_start);
+        const bool goes_round = song.looping() && b < song.loop_end; // still to reach the loop's end
         tick_now = b * bar + offset;
         for (auto& s : slots) s.clip = -1; // every clip from the new place
         if (offset == 0) {
             song_bar_now = b ? b - 1 : 0; // the first tick's bar_start() moves it on to b (and finds its end)
-        } else if (!song.looping() && !song_recording && b >= std::max(song.length(), 1u)) {
+            song_placed = b != 0;          // there, not on into b from inside the loop
+        } else if (!goes_round && !song_recording && b >= std::max(song.length(), 1u)) {
             running = false; // past the song's end
             heard_turn();
             for (auto& s : slots) { for (auto& off : s.offs) if (off.key >= 0) { engine_note_off(s, off.key); off.key = -1; } s.held = {}; }
