@@ -344,9 +344,9 @@ struct SampleRef {
         };
         const char* end = path + std::strlen(path);
         if (const char* mark = std::strrchr(path, '#'); mark && mark + 1 < end)
-            if (kind(path, mark, "xpm") || kind(path, mark, "xty") || kind(path, mark, "xpj") || kind(path, mark, "sf2")) return true;
+            if (kind(path, mark, "xpm") || kind(path, mark, "xty") || kind(path, mark, "xtd") || kind(path, mark, "xpj") || kind(path, mark, "sf2")) return true;
         if (dspreset()) return true;
-        return kind(path, end, "sfz") || kind(path, end, "xpm") || kind(path, end, "xty") || kind(path, end, "exs");
+        return kind(path, end, "sfz") || kind(path, end, "xpm") || kind(path, end, "xty") || kind(path, end, "xtd") || kind(path, end, "exs");
     }
     // A DecentSampler preset (roadmap P3).
     bool dspreset() const {

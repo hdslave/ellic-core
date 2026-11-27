@@ -145,6 +145,28 @@ SampleChop read_mpc_slices(const std::string& path) {
     return chop;
 }
 
+std::vector<FileSlice> mpc_file_slices(const std::string& path, uint64_t* frames) {
+    std::vector<FileSlice> out;
+    if (frames) *frames = 0;
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return out;
+    const auto chunks = chunks_of(file);
+    const Format f = format_of(file, chunks);
+    if (frames) *frames = f.frames;
+    if (!f.rate || !f.frames) return out;
+    std::string text;
+    for (const auto& c : chunks) if (is(c, "atem")) text = body_of(file, c);
+    if (text.empty()) return out;
+    const auto value = juce::JSON::parse(juce::String::fromUTF8(text.c_str()))["value0"];
+    const int count = std::min(int(number(value, "Num slices")), 4096);
+    for (int n = 0; n < count; ++n) {
+        const auto slice = value[juce::Identifier("Slice " + juce::String(n))];
+        const double start = slice.isObject() ? number(slice, "Start") : 0, end = slice.isObject() ? number(slice, "End") : 0;
+        out.push_back({uint64_t(std::clamp(start, 0.0, double(f.frames))), uint64_t(std::clamp(end, 0.0, double(f.frames)))});
+    }
+    return out;
+}
+
 bool write_mpc_slices(const std::string& path, const SampleChop& chop, bool in_place) {
     static std::mutex writing; // one file at a time (Context::write_chops' threads, an export)
     std::lock_guard<std::mutex> one(writing);

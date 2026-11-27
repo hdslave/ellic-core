@@ -54,7 +54,7 @@ struct SampleFile {
     bool folder = false;
     bool bank = false;      // a kit bank file (".mldb", model/project_file.h), listed with the WAV files
     bool instrument = false; // a multisampled instrument (".sfz", ".xpm", ".exs"), loaded onto a pad as a WAV file is
-    bool kit = false;        // an MPC drum program (".xpm", ".xty"): Push loads it onto the track as Load Kit does
+    bool kit = false;        // an MPC drum program (".xpm", ".xty", an MPC 3 kit's ".xtd"): Push loads it onto the track as Load Kit does
     bool expansion = false;  // an MPC expansion (".xpn"): Push installs it onto the card
     bool presets = false;    // a SoundFont (".sf2", roadmap P3): listed as a folder, its presets inside it
     bool midi = false;       // a Standard MIDI File (".mid", roadmap P4): Push lays its notes on the track's pattern
