@@ -8641,55 +8641,6 @@ void freeze_f2b() {
         CHECK(load_project(save_project(*project, *bank), *back, *back_bank, nullptr, nullptr, &read).empty() && !read.freeze[3].frozen());
     }
 
-    // A replacement print and its live path trade gain at the first frame and at Unfreeze. The
-    // same signal on both stays at unity throughout, including blocks picked up mid-fade.
-    {
-        PrintClip clip;
-        clip.hold_whole(std::vector<float>(2 * 384, 0.25f), uint32_t(rate), 384, PrintTail::Loop);
-        clip.replaces_live = true;
-        PrintPlayer player;
-        auto render = [&] {
-            std::array<float, 128> left {}, right {}, coverage {};
-            player.render(left.data(), right.data(), left.size(), nullptr, nullptr, coverage.data());
-            for (size_t n = 0; n < left.size(); ++n) {
-                CHECK(left[n] == 0.25f * coverage[n] && right[n] == left[n]);
-                CHECK(left[n] + 0.25f * (1.0f - coverage[n]) == 0.25f);
-            }
-            return coverage;
-        };
-        player.follow(&clip, 0, 0, 1024, rate);
-        const auto entering = render();
-        CHECK(entering.front() > 0 && entering.back() > entering.front() && entering.back() < 1);
-        render();
-        CHECK(render().front() == 1);
-        CHECK(player.position() == clip.frames); // exercise Unfreeze exactly at the loop seam
-        player.fade_all(rate);
-        const auto leaving = render();
-        CHECK(leaving.front() < 1 && leaving.back() < leaving.front() && leaving.back() > 0);
-        render();
-        CHECK(render().front() == 0 && !player.sounding());
-    }
-
-    // After launching a live pattern, a replacement print's Ring tail still sounds at full
-    // gain but leaves the live signal at unity. Test the fixed voice pool and the extra tail pool.
-    for (unsigned tail_frames : {128u, 2048u}) {
-        constexpr unsigned pass = 384;
-        PrintClip clip;
-        clip.hold_whole(std::vector<float>(2 * (pass + tail_frames), 0.25f), uint32_t(rate), pass, PrintTail::Ring);
-        clip.replaces_live = true;
-        CHECK(bool(clip.spare) == (tail_frames > pass));
-        PrintPlayer player;
-        player.follow(&clip, 0, 0, 1024, rate);
-        std::array<float, pass> left {}, right {}, coverage {};
-        player.render(left.data(), right.data(), pass, nullptr, nullptr, coverage.data());
-        CHECK(coverage.back() == 1);
-        player.follow(nullptr, 0, 0, 1024, rate);
-        left.fill(0); right.fill(0); coverage.fill(0);
-        player.render(left.data(), right.data(), 128, nullptr, nullptr, coverage.data());
-        for (unsigned i = 0; i < 128; ++i)
-            CHECK(left[i] == 0.25f && right[i] == 0.25f && coverage[i] == 0);
-    }
-
     // A print's file: its frames on a page's boundary (a JUNK chunk before them), read back as written.
     {
         char name[] = "/tmp/melodee-print-XXXXXX";

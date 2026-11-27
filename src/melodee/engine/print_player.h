@@ -26,7 +26,6 @@ struct PrintVoice {
     uint32_t at = 0;
     int stream = -1;
     bool seeking = false, leaving = false;
-    bool ring_tail = false; // rings alongside the next pattern without replacing its live audio
     float gain = 1, step = 0;
 };
 
@@ -58,7 +57,6 @@ struct PrintClip {
     uint32_t rate = 0;      // the device's rate it was printed at
     PrintTail tail = PrintTail::Loop;
     bool resident = false;  // every frame in memory: read without the pager
-    bool replaces_live = false; // this clip crossfades against a live engine that stays running
     // Extra cursors for overlapping Ring tails. Each sounding pass keeps its existing pager stream.
     std::vector<PrintTailVoice> tail_voices;
     PrintTailVoice* spare = nullptr;
@@ -85,7 +83,6 @@ struct FreezePack {
     // Freeze plan F2d: a deep freeze. Its plug-ins are let go once the engine sleeps, so nothing wakes it: hands
     // (pads, keys, the arp) play nothing and a pattern without a print stays silent.
     bool deep = false;
-    bool keep_live = false; // Post FX prints of a transport-driven instrument with continuous live state
     uint32_t serial = 0; // identifies the shell request
     bool clock_rejected = false; // set by the audio thread before retiring an incompatible deep pack
     std::array<PrintClip*, pattern_count> clips {};
@@ -115,9 +112,7 @@ public:
     uint32_t position() const { return voices[0].at; }
     // Adds `frames` of every voice into `left` / `right`; a print with pad sends adds them into `send_l` / `send_r`
     // [bus] (nullptr: not heard), and sends_fed() then has a bit for each bus it added to.
-    // When supplied, coverage takes the maximum gain of the replacement clips that supplied each frame.
-    void render(float* left, float* right, unsigned frames, float* const* send_l = nullptr, float* const* send_r = nullptr,
-                float* coverage = nullptr);
+    void render(float* left, float* right, unsigned frames, float* const* send_l = nullptr, float* const* send_r = nullptr);
     unsigned sends_fed() const { return fed; }
     uint32_t underruns = 0; // runs that met a frame the pager had not pinned yet
     uint32_t waits = 0;     // the same just after a jump to where nothing is held (counted apart: not late, not yet)
