@@ -1158,6 +1158,11 @@ private:
     uint32_t count_left = 0; // Count-In: ticks of the bar counted before the song starts
     uint8_t swing = 50;
     bool running = false;
+    // EffectClock::playing as it stands after each change of `running` or the count-in, and how many times it has
+    // turned (EffectClock::turns); heard_turn() after each such change.
+    bool heard_playing = false;
+    uint32_t heard_turns = 0;
+    void heard_turn() { const bool now = running && !count_left; if (now != heard_playing) { heard_playing = now; ++heard_turns; } }
     uint32_t tick_now = 0;
     double until_tick = 0; // samples until the next tick
     uint32_t random = 0x2545F491u;

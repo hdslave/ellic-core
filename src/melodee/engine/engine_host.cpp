@@ -1097,6 +1097,7 @@ void EngineHost::apply(const Command& c) {
         arp_origin = tick_now;         // and Seq Record writes each where it fell (roadmap P1)
         song_mode = c.value == 1; song_bar_now = c.index;
         count_left = c.track == 1 ? bar : 0;
+        heard_turn();
         count_beat.store(count_left ? 1 : 0, std::memory_order_relaxed);
         count_rest.store(count_left, std::memory_order_relaxed);
         count_from.store(tick_now, std::memory_order_relaxed);
@@ -1122,6 +1123,7 @@ void EngineHost::apply(const Command& c) {
         break;
     case Type::Stop:
         running = false;
+        heard_turn();
         drop_hits(); // a ratchet's hits still to come go with it
         mtc_off();
         sync_stop(frame_now);
@@ -2190,6 +2192,7 @@ void EngineHost::bar_start() {
     if (!rendering && song.looping() && song_bar_now == song.loop_end) song_bar_now = song.loop_start;
     if ((rendering || !song.looping()) && !song_recording && song_bar_now >= std::max(song.length(), 1u)) { // the end of the song
         running = false;
+        heard_turn();
         if (rendering) render_out.tail(); // on until the mix falls silent
         for (auto& s : slots) { for (auto& off : s.offs) if (off.key >= 0) { engine_note_off(s, off.key); off.key = -1; } s.held = {}; }
         drop_punches(); // no tick comes to end them
@@ -2289,6 +2292,7 @@ void EngineHost::mtc_place(double seconds) {
     auto at = uint32_t(std::ceil(ticks - 1e-9));
     sync_stop(frame_now); // the clocks out go on from the new place
     count_left = 0; count_beat.store(0, std::memory_order_relaxed); count_rest.store(0, std::memory_order_relaxed);
+    heard_turn();
     until_tick = (at - ticks) * tick_length(); // the tick after the place, to the sample
     for (auto& s : slots) for (auto& skip : s.skips) skip.key = -1;
     if (punch_from_song) { punch.stop(); punch_from_song = false; } // the song's punch was the old place's
@@ -2301,6 +2305,7 @@ void EngineHost::mtc_place(double seconds) {
             song_bar_now = b ? b - 1 : 0; // the first tick's bar_start() moves it on to b (and finds its end)
         } else if (!song.looping() && !song_recording && b >= std::max(song.length(), 1u)) {
             running = false; // past the song's end
+            heard_turn();
             for (auto& s : slots) { for (auto& off : s.offs) if (off.key >= 0) { engine_note_off(s, off.key); off.key = -1; } s.held = {}; }
             drop_punches();
         } else {
@@ -3029,6 +3034,7 @@ void EngineHost::tick() {
             count_beat.store(done / beat + 1, std::memory_order_relaxed);
         }
         --count_left;
+        heard_turn();
         count_rest.store(count_left, std::memory_order_relaxed);
         if (!count_left) count_beat.store(0, std::memory_order_relaxed);
         until_tick += tick_length();
@@ -3346,6 +3352,7 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
     fx_clock->sig_unit = std::max(1u, 4 * ticks_per_quarter / std::max(beat, 1u));
     fx_clock->block = block_count;
     fx_clock->playing = running && !count_left;
+    fx_clock->turns = heard_turns;
     if (fx_clock->playing) {
         unsigned bar_ticks = std::max(bar, 1u), in_bar = tick_now % bar_ticks;
         // The next tick's bar: one on from song_bar_now when it starts a bar (bar_start() has not counted it yet).

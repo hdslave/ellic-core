@@ -49,6 +49,9 @@ struct EffectClock {
     double bpm = 120;
     unsigned sig_beats = 4, sig_unit = 4; // 4/4
     uint64_t block = 0;     // which block: a plug-in heard in parts of a block counts on from its start
+    // How many times `playing` has turned, on or off: a Stop and a Play taken before one block leave `playing` and the
+    // place as they were, and count two here (melodee-hdslave: a sleeping plug-in is woken for them).
+    uint32_t turns = 0;
 };
 // The live host's clock, which its render workers read too. A print host (EngineHost::Lean) renders beside it on
 // another thread with its own: it points effect_clock_now at that for its thread at the start of each block.
