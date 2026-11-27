@@ -8,8 +8,8 @@
 // The MPC's MIDI Config (Shift + Pad 8, parity phase 9), kept with Melodee's
 // settings: which port MIDI goes in and out of, the channels, whether MIDI
 // plays the pads and the pads (and patterns) send MIDI, clock sync both
-// ways, MIDI Thru, Program Change to sequences or plug-ins and the CV clock
-// on SYNC OUT.
+// ways, MIDI Thru, Program Change to sequences or plug-ins (and out again when
+// a plug-in's preset is picked) and the CV clock on SYNC OUT.
 // A track may also have a channel of its own (Track::midi_channel, kept with
 // the project): notes on it play that track whatever is selected, from its own
 // input (Track::midi_in: any port, the jacks or USB), so each track can have a
@@ -58,6 +58,7 @@ struct MidiConfig {
     MidiSync sync_in = MidiSync::Off, sync_out = MidiSync::Off;
     bool thru = false;             // what comes in goes out again, as it came
     uint8_t program_change = program_off; // program_sequence, program_plugin: what a Program Change in does
+    bool send_program = false;     // a PLUGIN track's preset picked here goes out as Bank Select + Program Change
     bool cv_out = false;           // a clock on SYNC OUT (CV_CLK_OUT)
     uint8_t cv_base = 2, cv_division = 1; // pulses a quarter: base x division (2: Volca and Pocket Operator sync)
     // Remote (from any port): 0 Off, 1..16 the channel; each CC 0 Off, else its number. The value picks the track
@@ -69,7 +70,7 @@ struct MidiConfig {
     bool operator==(const MidiConfig& o) const {
         return port == o.port && in_channel == o.in_channel && out_channel == o.out_channel && pad_in == o.pad_in &&
                pad_out == o.pad_out && sync_in == o.sync_in && sync_out == o.sync_out && thru == o.thru &&
-               program_change == o.program_change && cv_out == o.cv_out && cv_base == o.cv_base && cv_division == o.cv_division &&
+               program_change == o.program_change && send_program == o.send_program && cv_out == o.cv_out && cv_base == o.cv_base && cv_division == o.cv_division &&
                remote_channel == o.remote_channel && track_cc == o.track_cc && pattern_cc == o.pattern_cc && scene_cc == o.scene_cc &&
                preset_cc == o.preset_cc && preset_knob == o.preset_knob;
     }
@@ -92,6 +93,7 @@ template <class Out> void write_midi_config(Out& out, const MidiConfig& m) {
     out << "midi_port=" << int(m.port) << "\nmidi_in_channel=" << int(m.in_channel) << "\nmidi_out_channel=" << int(m.out_channel)
         << "\npad_midi_in=" << int(m.pad_in) << "\npad_midi_out=" << int(m.pad_out) << "\nmidi_sync_in=" << int(m.sync_in)
         << "\nmidi_sync_out=" << int(m.sync_out) << "\nmidi_thru=" << int(m.thru) << "\nprogram_change=" << int(m.program_change)
+        << "\nsend_program_change=" << int(m.send_program)
         << "\ncv_out=" << int(m.cv_out) << "\ncv_base=" << int(m.cv_base) << "\ncv_division=" << int(m.cv_division)
         << "\nremote_channel=" << int(m.remote_channel) << "\nremote_track_cc=" << int(m.track_cc)
         << "\nremote_pattern_cc=" << int(m.pattern_cc) << "\nremote_scene_cc=" << int(m.scene_cc)
@@ -109,6 +111,7 @@ inline bool read_midi_config(MidiConfig& m, const std::string& key, int value) {
     else if (key == "midi_sync_out") m.sync_out = MidiSync(clamp(value, 0, int(MidiSync::Count) - 1));
     else if (key == "midi_thru") m.thru = value != 0;
     else if (key == "program_change") m.program_change = uint8_t(clamp(value, 0, program_choices - 1));
+    else if (key == "send_program_change") m.send_program = value != 0;
     else if (key == "cv_out") m.cv_out = value != 0;
     else if (key == "cv_base") m.cv_base = uint8_t(clamp(value, 1, 8));
     else if (key == "cv_division") m.cv_division = uint8_t(clamp(value, 1, 24));
