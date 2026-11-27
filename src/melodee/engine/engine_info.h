@@ -72,14 +72,14 @@ enum class StageKind : uint8_t {
     Follow, Cloud, KitFilter,                          // a kit: Melodee's own kit-wide pages
     Layers,                                            // a kit: the last pad's four layers (roadmap P3)
     Colour,                                            // a kit: the last pad's colour (shell/pad_colour.h)
-    PluginSound,       // a PLUGIN track's first page: its presets (K1-K3 its performance knobs, engine/macros.h), or its face when it has none
+    PluginSound,       // a PLUGIN track's presets (K1-K3 its performance knobs, engine/macros.h), or its face when it has none; first unless PANEL shows
     PluginEdit,        // a PLUGIN track's own parameters, three a row; the wheel moves the rows
     OpenEdit,          // a button that opens the Edit page instead of a Stage page (a MIDI track's B3: its every page)
     NewSynth, NewKit, NewMidi,                         // an empty track: what it becomes (Push)
     // Freeze plan F3, an audio track: the take of the pattern in hand (CLIP its level, start and end; FADES its fade in,
     // fade out and reverse; WARP how it follows the tempo), and what it records (INPUT: source, monitor, gain).
     Clip, Fades, Warp, AudioInput,
-    PluginScreen,      // a PLUGIN track's own screen, drawn by the plug-in (PANEL); passed over when it has none
+    PluginScreen,      // a PLUGIN track's own screen, drawn by the plug-in (PANEL): its first page; passed over when it has none
 };
 // What the picture over the knobs draws.
 enum class StagePicture : uint8_t {
