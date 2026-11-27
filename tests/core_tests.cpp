@@ -2440,7 +2440,7 @@ void mtc_in() {
         // a bar line there, not a bar of silence while plug-ins hear it play.
         {
             Command play {Command::Type::Play, 0, 0, 10, 1};
-            play.position = 96; // bar 11's second beat
+            play.position = ticks_per_quarter; // bar 11's second beat
             host.send(play);
         }
         render();
