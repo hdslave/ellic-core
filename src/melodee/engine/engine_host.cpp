@@ -3359,6 +3359,9 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
         double from = song_mode ? double(tick_now && !in_bar ? song_bar_now + 1 : song_bar_now) * bar_ticks + in_bar : double(tick_now);
         fx_clock->song = std::max(0.0, (from - std::max(until_tick, 0.0) / tick_length()) / ticks_per_quarter);
     }
+    fx_clock->looping = fx_clock->playing && song_mode && song.looping() && !(bounce_song && render_out.running());
+    fx_clock->loop_from = fx_clock->looping ? double(song.loop_start) * bar / ticks_per_quarter : 0.0;
+    fx_clock->loop_to = fx_clock->looping ? double(song.loop_end) * bar / ticks_per_quarter : 0.0;
     if (mods_on) run_modulators(frames); // roadmap P4: before the tracks' buffers are cleared (a follower hears the last block)
     bool solo = false;
     for (auto& strip : loop_strips) solo |= strip.solo && loops.on();

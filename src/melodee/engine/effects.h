@@ -52,6 +52,11 @@ struct EffectClock {
     // How many times `playing` has turned, on or off: a Stop and a Play taken before one block leave `playing` and the
     // place as they were, and count two here (melodee-hdslave: a sleeping plug-in is woken for them).
     uint32_t turns = 0;
+    // The loop the song's place goes round while it plays, for plug-ins: on Song with its loop braced (the mixdown
+    // plays the song once: none), from and to in quarter notes as `song` counts them. Patterns play on with `song`
+    // counting up (each loops on its own; the place never goes back): none.
+    bool looping = false;
+    double loop_from = 0, loop_to = 0;
 };
 // The live host's clock, which its render workers read too. A print host (EngineHost::Lean) renders beside it on
 // another thread with its own: it points effect_clock_now at that for its thread at the start of each block.
