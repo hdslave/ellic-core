@@ -1507,7 +1507,6 @@ void EngineHost::play_calls(unsigned t, Slot& slot, unsigned frames) {
     if (slot.freeze && !slot.awake) { // freeze plan F2b: a frozen track's engine asleep takes its calls, renders nothing
         while (k < count) make_call(t, slot, slot.calls[k++]);
         slot.call_count = 0;
-        if (slot.engine == &slot.plugin) slot.plugin.pass(frames); // its plug-in not run: the time passes for it
         return;
     }
     while (at < frames) {
@@ -1613,7 +1612,6 @@ void EngineHost::run_chain(unsigned chain, float* left, float* right, unsigned f
             quiet = false; why = 'p'; // a plug-in rests by its own gate
             auto* runner = runner_of(unsigned(effect.param(0)));
             if (runner && !effect.bypassed()) runner->render(left, right, frames);
-            else if (runner) runner->pass(frames); // bypassed: through, not run, its time passing
             continue;
         }
         if (!quiet) { effect.process(left, right, frames); continue; }
@@ -3610,10 +3608,6 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
             for (unsigned f = 0; f < frames; ++f) { slot.left[f] += slot.print_l[f] * u; slot.right[f] += slot.print_r[f] * u; }
         }
         if (!(asleep && post)) run_chain(t, slot.left, slot.right, frames);
-        else // its chain skipped for its Post FX print: the plug-ins on it are not run, their time passing
-            for (unsigned k = 0; k < max_slots && fx[t][k].kind() != EffectKind::None; ++k)
-                if (fx[t][k].kind() == EffectKind::Plugin)
-                    if (auto* runner = runner_of(unsigned(fx[t][k].param(0)))) runner->pass(frames);
         if (may_sleep && post) peak_of();
         if (slot.print_replaces_live) { // the same running chain is heard again as the print fades out
             for (unsigned f = 0; f < frames; ++f) {
@@ -4151,6 +4145,9 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
         audio_under.store(audio_u, std::memory_order_relaxed);
         audio_waited.store(audio_w, std::memory_order_relaxed);
     }
+    // Every plug-in this host holds is told the block's frames: one not run in it (its track empty or frozen with
+    // the print in its place, its slot bypassed, its chain not played, used nowhere now) counts them as time passed.
+    for (auto* runner : runners) if (runner) runner->pass(frames);
     // Last of all: a Park whose fade has gone silent hands the state to the loader, nothing touched after it.
     if (park_wanted && park_gain.silent()) go_parked();
 }

@@ -19,9 +19,10 @@ public:
     // An instrument adds its output into left/right; an effect works on them
     // in place. `frames` is at most the engine host's block.
     virtual void render(float* left, float* right, unsigned frames) = 0;
-    // Frames of a block it plays a part in but is not run for: a frozen track's print plays in its place, or its slot
-    // is bypassed. Time passes for it all the same (melodee-hdslave: a CLAP plug-in's steady_time counts them). An
-    // entry two tracks share is run, or passed, once for each.
+    // At each block's end, for every plug-in the engine host holds: that block's frames. One it ran in the block
+    // (render(), once or more) has had them; one it did not run at all (its track empty or frozen with the print in
+    // its place, its slot bypassed, its chain not played, or used nowhere now) passes them here, as time passes for
+    // it all the same (melodee-hdslave: a CLAP plug-in's steady_time counts them).
     virtual void pass(unsigned /*frames*/) {}
     // Roadmap P4, plug-in delay compensation: how many device frames its output lags what goes in (an effect) or
     // the notes it is sent (an instrument): the latency the plug-in reports, at the device's rate, and its rate
