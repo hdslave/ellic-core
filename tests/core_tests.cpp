@@ -2393,6 +2393,14 @@ void mtc_in() {
         // second half as bar 4's (index 2 + (7 - 2) % 2 = 3).
         for (unsigned n = 0; n < 4; ++n) { mtc(2, 15.0 + n * 128 / 44100.0, frame); render(); }
         CHECK(host.song_bar() == 3 && host.mtc_following());
+        // The whole song braced (bars 1-8) under a longer timeline: a master at 30.25 s (bar 16) is the song gone round
+        // its loop, folded into it in phase (bar 8), not past the song's end.
+        host.send({Command::Type::Stop});
+        host.send({Command::Type::SongLoop, 0, 0, 0, 8});
+        host.send({Command::Type::Play, 0, 0, 0, 1});
+        mtc(1, 30.25, frame);
+        render();
+        CHECK(host.playing() && host.song_bar() == 7);
         host.send({Command::Type::Stop});
         host.send({Command::Type::SongLoop, 0, 0, 0, 0});
         host.send({Command::Type::Play, 0, 0, 0, 1});

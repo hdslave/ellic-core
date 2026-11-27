@@ -2294,8 +2294,10 @@ void EngineHost::mtc_off() {
 // MTC in: time to the song through the tempo playing now (BPM per pattern: the lead pattern's; in the song, the one it
 // plays at). Patterns: every track from the patterns' start, as Locate (the tick since Play, each track's pattern round
 // as many times as fits). Song: the bar and the tick in it, as a cursor there would play: before or inside its loop it
-// goes round it (bar_start()), past it it plays on to the song's end, and past that it stops. A song going round its loop
-// that is placed again (it fell behind: `round`) keeps going round, the master's time folded into the loop.
+// goes round it (bar_start()), past it it plays on to the song's end. A time past the song's end, with a loop, is the
+// song gone round its loop under a longer timeline (a master's song a looped one vamps under): folded into the loop;
+// with none, it stops. A song going round its loop that is placed again (it fell behind: `round`) keeps going round,
+// the master's time folded into the loop.
 void EngineHost::mtc_place(double seconds, bool round) {
     double ticks = std::max(0.0, seconds) * tempo / 10.0 / 60.0 * ticks_per_quarter;
     if (song_mode && !song.tempo.empty()) // roadmap P5: through the song's tempo lane, bar by bar
@@ -2309,7 +2311,9 @@ void EngineHost::mtc_place(double seconds, bool round) {
     if (punch_from_song) { punch.stop(); punch_from_song = false; } // the song's punch was the old place's
     if (song_mode) {
         unsigned b = at / bar, offset = at % bar;
-        if (round && song.looping() && b >= song.loop_end) b = song.loop_start + (b - song.loop_start) % (song.loop_end - song.loop_start);
+        const bool past_end = b >= std::max(song.length(), 1u);
+        if ((round || past_end) && song.looping() && b >= song.loop_end)
+            b = song.loop_start + (b - song.loop_start) % (song.loop_end - song.loop_start);
         const bool goes_round = song.looping() && b < song.loop_end; // still to reach the loop's end
         tick_now = b * bar + offset;
         for (auto& s : slots) s.clip = -1; // every clip from the new place
