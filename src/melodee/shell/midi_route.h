@@ -33,10 +33,10 @@ uint16_t note_tracks(const MidiConfig& config, const std::array<uint8_t, track_c
 bool track_hears(TrackMidiIn in, const std::string& driver, bool surface);
 
 // Remote (MIDI Config's Remote rows): what a CC does. Track: select `index`; Pattern: launch `index` on the selected
-// track; Scene: launch scene `index`. None: not a remote CC (it goes on to the tracks), or a value past the end
-// (Ignored: taken, nothing done).
+// track; Scene: launch scene `index`; Play: play, or stop while playing; Record: as Seq Record. None: not a remote CC
+// (it goes on to the tracks), or a value past the end or a transport CC let go (Ignored: taken, nothing done).
 struct RemoteJob {
-    enum class Kind : uint8_t { None, Ignored, Track, Pattern, Scene } kind = Kind::None;
+    enum class Kind : uint8_t { None, Ignored, Track, Pattern, Scene, Play, Record } kind = Kind::None;
     unsigned index = 0;
 };
 RemoteJob remote_cc(const MidiConfig& config, unsigned channel, unsigned cc, unsigned value);

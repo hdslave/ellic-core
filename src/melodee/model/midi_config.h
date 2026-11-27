@@ -63,16 +63,18 @@ struct MidiConfig {
     uint8_t cv_base = 2, cv_division = 1; // pulses a quarter: base x division (2: Volca and Pocket Operator sync)
     // Remote (from any port): 0 Off, 1..16 the channel; each CC 0 Off, else its number. The value picks the track
     // (0 = T1), the selected track's pattern (0 = A01) or the scene (0 = the first); the preset CC's turns step the
-    // selected track's presets, sent as `preset_knob` says.
+    // selected track's presets, sent as `preset_knob` says. The transport's (issue 7, a foot pedal): a press (64 or more)
+    // of the play CC plays, or stops while playing; of the record CC, as Seq Record. Off until learned.
     uint8_t remote_channel = 0;
     uint8_t track_cc = 102, pattern_cc = 103, scene_cc = 104, preset_cc = 0, preset_knob = knob_binary_offset;
+    uint8_t play_cc = 0, record_cc = 0;
     unsigned cv_ppqn() const { return unsigned(cv_base) * cv_division; }
     bool operator==(const MidiConfig& o) const {
         return port == o.port && in_channel == o.in_channel && out_channel == o.out_channel && pad_in == o.pad_in &&
                pad_out == o.pad_out && sync_in == o.sync_in && sync_out == o.sync_out && thru == o.thru &&
                program_change == o.program_change && send_program == o.send_program && cv_out == o.cv_out && cv_base == o.cv_base && cv_division == o.cv_division &&
                remote_channel == o.remote_channel && track_cc == o.track_cc && pattern_cc == o.pattern_cc && scene_cc == o.scene_cc &&
-               preset_cc == o.preset_cc && preset_knob == o.preset_knob;
+               preset_cc == o.preset_cc && preset_knob == o.preset_knob && play_cc == o.play_cc && record_cc == o.record_cc;
     }
     bool operator!=(const MidiConfig& o) const { return !(*this == o); }
 };
@@ -97,7 +99,8 @@ template <class Out> void write_midi_config(Out& out, const MidiConfig& m) {
         << "\ncv_out=" << int(m.cv_out) << "\ncv_base=" << int(m.cv_base) << "\ncv_division=" << int(m.cv_division)
         << "\nremote_channel=" << int(m.remote_channel) << "\nremote_track_cc=" << int(m.track_cc)
         << "\nremote_pattern_cc=" << int(m.pattern_cc) << "\nremote_scene_cc=" << int(m.scene_cc)
-        << "\nremote_preset_cc=" << int(m.preset_cc) << "\nremote_preset_knob=" << int(m.preset_knob) << '\n';
+        << "\nremote_preset_cc=" << int(m.preset_cc) << "\nremote_preset_knob=" << int(m.preset_knob)
+        << "\nremote_play_cc=" << int(m.play_cc) << "\nremote_record_cc=" << int(m.record_cc) << '\n';
 }
 // One key=value; false when the key is not MIDI Config's.
 inline bool read_midi_config(MidiConfig& m, const std::string& key, int value) {
@@ -121,6 +124,8 @@ inline bool read_midi_config(MidiConfig& m, const std::string& key, int value) {
     else if (key == "remote_scene_cc") m.scene_cc = uint8_t(clamp(value, 0, 127));
     else if (key == "remote_preset_cc") m.preset_cc = uint8_t(clamp(value, 0, 127));
     else if (key == "remote_preset_knob") m.preset_knob = uint8_t(clamp(value, 0, knob_modes - 1));
+    else if (key == "remote_play_cc") m.play_cc = uint8_t(clamp(value, 0, 127));
+    else if (key == "remote_record_cc") m.record_cc = uint8_t(clamp(value, 0, 127));
     else return false;
     return true;
 }
