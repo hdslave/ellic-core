@@ -387,6 +387,9 @@ struct Track {
     // for the track, launching it sets the mixer mute to the bit. Kept with the track, as in_scene (SEQL v2).
     std::array<uint64_t, (pattern_count + 63) / 64> scene_mutes {};
     bool off = false; // stopped by its scene or SEQ + STOP: its pattern does not play until a launch (SEQL)
+    // Its colour (issue 69): 0 the one of its place (track n the nth track colour, ui/shades.h in a product), 1-16 a
+    // track colour picked for it, as Scene::colour (TCOL). Kept with the track, so a move or copy takes it along.
+    uint8_t colour = 0;
     bool used() const { return engine != EngineKind::None; }
     bool is_audio() const { return engine == EngineKind::Audio; }
     // Plays samples off its pads: a kit, or a keygroup (its one sound on pad 1, always its last pad), whose sound
@@ -402,6 +405,9 @@ struct Track {
     // The name of its sound, plug-in or kit, unless it has one of its own (named).
     void name_from(const char* text) { if (!named) set_name(text); }
 };
+
+// The track colour a track shows (0-15): the one picked for it (Track::colour), else its place's.
+inline unsigned track_colour_slot(const Track& track, unsigned index) { return track.colour ? (track.colour - 1u) % 16u : index % 16u; }
 
 // Time signatures the project can take (Shift + K2 on Patterns), as on the
 // MPC: every pattern shares it.

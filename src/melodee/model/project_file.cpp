@@ -465,6 +465,14 @@ std::vector<uint8_t> save_project(const Project& project, const PatternBank& pat
         for (const auto& tr : project.tracks) w.u8(tr.named);
         w.end(at);
     }
+    bool coloured = false; // tracks with a colour picked for them (issue 69), else each in its place's
+    for (const auto& tr : project.tracks) coloured |= tr.colour != 0;
+    if (coloured) {
+        at = w.begin("TCOL");
+        w.u8(track_count);
+        for (const auto& tr : project.tracks) w.u8(tr.colour);
+        w.end(at);
+    }
     at = w.begin("TIME"); // time signature, BPM per pattern (P1-P16, as older builds read it)
     w.u8(project.signature); w.u8(project.seq_tempo);
     for (unsigned n = 0; n < legacy_patterns; ++n) w.u16(project.pattern_tempo[n]);
@@ -1296,6 +1304,12 @@ std::string load_project(const std::vector<uint8_t>& data, Project& target, Patt
             for (unsigned k = 0; k < count && r.ok && version >= 1; ++k) {
                 bool own = r.u8() != 0;
                 if (k < track_count && r.ok) project->tracks[k].named = own;
+            }
+        } else if (name == "TCOL") { // the tracks' colours picked for them (issue 69); without it each in its place's
+            unsigned count = r.u8();
+            for (unsigned k = 0; k < count && r.ok; ++k) {
+                unsigned colour = r.u8();
+                if (k < track_count && r.ok) project->tracks[k].colour = uint8_t(colour <= 16 ? colour : 0);
             }
         } else if (name == "TSPD") { // the tracks' playback speeds (roadmap P1), x1/2 .. x2; without it every track at x1
             unsigned count = r.u8();
