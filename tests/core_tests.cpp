@@ -2412,6 +2412,14 @@ void mtc_in() {
         CHECK(host.song_bar() == 3);
         for (unsigned n = 0; n < 400; ++n) render();
         CHECK(host.playing() && host.song_bar() == 2);
+        // The loop as plug-ins are told it in the block an MTC placing on a bar line lands in, before its first tick has
+        // moved the song there: bar 5's line (past the loop) is outside it, bar 3's (its first bar) inside.
+        mtc(1, 8.0, frame);
+        render();
+        CHECK(host.playing() && !effect_clock.looping);
+        mtc(1, 4.0, frame);
+        render();
+        CHECK(host.playing() && effect_clock.looping && effect_clock.loop_from == 8 && effect_clock.loop_to == 16);
         host.send({Command::Type::Stop});
         host.send({Command::Type::SongLoop, 0, 0, 0, 0});
         host.send({Command::Type::Play, 0, 0, 0, 1});

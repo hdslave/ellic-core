@@ -3387,9 +3387,16 @@ void EngineHost::render(int32_t* out, unsigned frames, float volume, const int32
         fx_clock->song = std::max(0.0, (from - std::max(until_tick, 0.0) / tick_length()) / ticks_per_quarter);
     }
     // Told only while the place is inside the brace: before it, or past it (the cursor after it, the brace moved
-    // behind the place), the place does not go round it now.
+    // behind the place), the place does not go round it now. The place's bar: on a bar's line before its first tick
+    // has moved the song on (bar_start()), the bar that tick moves it to: round the loop from its end, but an MTC
+    // placing's own line (song_placed) as it is.
+    unsigned place_bar = song_bar_now;
+    if (song_mode && tick_now && tick_now % std::max(bar, 1u) == 0) {
+        place_bar = song_bar_now + 1;
+        if (!song_placed && song.looping() && place_bar == song.loop_end) place_bar = song.loop_start;
+    }
     fx_clock->looping = fx_clock->playing && song_mode && song.looping() && !(bounce_song && render_out.running())
-                        && song_bar_now >= song.loop_start && song_bar_now < song.loop_end;
+                        && place_bar >= song.loop_start && place_bar < song.loop_end;
     fx_clock->loop_from = fx_clock->looping ? double(song.loop_start) * bar / ticks_per_quarter : 0.0;
     fx_clock->loop_to = fx_clock->looping ? double(song.loop_end) * bar / ticks_per_quarter : 0.0;
     if (mods_on) run_modulators(frames); // roadmap P4: before the tracks' buffers are cleared (a follower hears the last block)
