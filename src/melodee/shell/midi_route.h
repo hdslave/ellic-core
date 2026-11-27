@@ -56,6 +56,27 @@ int levels_key(const Track& track, int key, bool instrument, int root = 0);
 // when (PadMidiOut), for Command::MidiTrack.
 inline unsigned out_channel_of(const MidiConfig& config, const Track& track) { return track.midi_channel ? track.midi_channel : config.out_channel; }
 
+// MIDI clock in: the tempo it sets, held through the follower's wobble. A clock's own jitter moves the reading a
+// tenth either way now and then (an SMK-37 at 120: 120.0, now and then 119.9), which made the tempo, and the header's
+// BPM with every chip after it, shake. A reading a tenth away is taken once it has held for steady_pulses (four
+// beats), so a slow ramp still follows; one further away at once. take() a pulse: the tempo in tenths (0: none yet).
+class TempoSteady {
+public:
+    static constexpr unsigned steady_pulses = 96;
+    unsigned take(unsigned tenths) {
+        if (!tenths) return held;
+        const unsigned off = tenths > held ? tenths - held : held - tenths;
+        if (!held || off >= 2) { held = tenths; waiting = 0; return held; }
+        if (!off) { waiting = 0; return held; }
+        if (tenths != candidate) { candidate = tenths; waiting = 0; }
+        if (++waiting >= steady_pulses) { held = tenths; waiting = 0; }
+        return held;
+    }
+    void reset() { held = candidate = waiting = 0; }
+private:
+    unsigned held = 0, candidate = 0, waiting = 0;
+};
+
 // MIDI clock in: the tempo from the last pulses' kernel stamps. A pause of a
 // quarter second or more starts it over.
 class ClockFollower {
