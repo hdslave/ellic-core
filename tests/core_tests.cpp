@@ -2382,6 +2382,10 @@ void mtc_in() {
         CHECK(host.song_bar() == 5 && host.position_of(0) >= 0 && host.position_of(0) <= 6);
         for (unsigned n = 0; n < 700; ++n) render(); // a bar on (689 blocks): bar 7, not back into the loop
         CHECK(host.song_bar() == 6 && host.mtc_following());
+        // On past the song's end (bar 9) under the master, which runs on: the song gone round its loop there, in phase
+        // (index 2 + (8 - 2) % 2 = 2), as a placing at that time puts it, still following, not stopped.
+        for (unsigned n = 0; n < 1400; ++n) render(); // two bars on: bar 9's line passed
+        CHECK(host.playing() && host.mtc_following() && host.song_bar() >= 2 && host.song_bar() < 4);
         host.send({Command::Type::Stop});
         host.send({Command::Type::Play, 0, 0, 0, 1});
         mtc(1, 7.0, frame); // bar 4's second half: inside the loop, which comes round at bar 5's line

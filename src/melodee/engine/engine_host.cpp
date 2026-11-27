@@ -2208,7 +2208,12 @@ void EngineHost::bar_start() {
     // the brace, or the brace moved behind the place) plays on to the song's end and stops, as with no loop.
     if (!rendering && song.looping() && moved_on && song_bar_now == song.loop_end) song_bar_now = song.loop_start;
     const bool goes_round = song.looping() && song_bar_now < song.loop_end; // still to reach the loop's end
-    if ((rendering || !goes_round) && !song_recording && song_bar_now >= std::max(song.length(), 1u)) { // the end of the song
+    const bool past_end = !song_recording && song_bar_now >= std::max(song.length(), 1u);
+    // Under a master that runs on (MTC, MIDI clock), a looped song past its end goes round its loop, in phase, as the
+    // master's time there places it (mtc_place()): it vamps under the longer timeline rather than stopping.
+    if (past_end && !rendering && !goes_round && song.looping() && song_bar_now >= song.loop_end && (mtc_on || ext_gate))
+        song_bar_now = song.loop_start + (song_bar_now - song.loop_start) % (song.loop_end - song.loop_start);
+    else if ((rendering || !goes_round) && past_end) { // the end of the song
         running = false;
         heard_turn();
         if (rendering) render_out.tail(); // on until the mix falls silent
