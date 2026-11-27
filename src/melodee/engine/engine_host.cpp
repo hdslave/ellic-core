@@ -2299,6 +2299,7 @@ void EngineHost::mtc_off() {
 // with none, it stops. A song going round its loop that is placed again (it fell behind: `round`) keeps going round,
 // the master's time folded into the loop.
 void EngineHost::mtc_place(double seconds, bool round) {
+    song_placed = false; // set again below only for a placing on a bar line: one before it (unticked) is gone with it
     double ticks = std::max(0.0, seconds) * tempo / 10.0 / 60.0 * ticks_per_quarter;
     if (song_mode && !song.tempo.empty()) // roadmap P5: through the song's tempo lane, bar by bar
         ticks = song.tempo.bars_at(std::max(0.0, seconds), double(bar) / ticks_per_quarter, global_tempo) * bar;

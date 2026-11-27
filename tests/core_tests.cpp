@@ -2401,6 +2401,17 @@ void mtc_in() {
         mtc(1, 30.25, frame);
         render();
         CHECK(host.playing() && host.song_bar() == 7);
+        // Two placings before one block, the loop on bars 3-4: bar 3's line, then bar 4's second half. The second is
+        // inside a bar, so the first's bar line is gone with it: at bar 5's line the song goes round to bar 3.
+        host.send({Command::Type::Stop});
+        host.send({Command::Type::SongLoop, 0, 0, 2, 4});
+        host.send({Command::Type::Play, 0, 0, 0, 1});
+        mtc(1, 4.0, frame);
+        mtc(1, 7.0, frame);
+        render();
+        CHECK(host.song_bar() == 3);
+        for (unsigned n = 0; n < 400; ++n) render();
+        CHECK(host.playing() && host.song_bar() == 2);
         host.send({Command::Type::Stop});
         host.send({Command::Type::SongLoop, 0, 0, 0, 0});
         host.send({Command::Type::Play, 0, 0, 0, 1});
