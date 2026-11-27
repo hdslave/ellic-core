@@ -2424,6 +2424,15 @@ void mtc_in() {
         mtc(1, 20.5, frame); // bar 11 of an eight-bar song
         render(); render();
         CHECK(!host.playing() && !host.mtc_following());
+        // Play from inside a bar past the song's end (a MIDI Continue's Song Position there): it stops at once, as from
+        // a bar line there, not a bar of silence while plug-ins hear it play.
+        {
+            Command play {Command::Type::Play, 0, 0, 10, 1};
+            play.position = 96; // bar 11's second beat
+            host.send(play);
+        }
+        render();
+        CHECK(!host.playing());
         CHECK(host.dropped() == 0 && host.midi_dropped() == 0);
     }
 }

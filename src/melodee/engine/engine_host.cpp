@@ -1117,7 +1117,16 @@ void EngineHost::apply(const Command& c) {
             stopped_now.store(off, std::memory_order_relaxed);
         }
         for (unsigned t = 0; t < track_count; ++t) plan_follow(t); // roadmap P5: from each pattern's top (not in the song)
-        if (song_mode && tick_now % bar) clips_at_bar(true); // inside a bar: no bar's start to find its clips
+        if (song_mode && tick_now % bar) { // inside a bar: no bar's start to find its clips, or the song's end
+            const bool goes_round = song.looping() && song_bar_now < song.loop_end;
+            if (!goes_round && !song_recording && song_bar_now >= std::max(song.length(), 1u)) {
+                running = false; // past the song's end, as mtc_place() and bar_start() end it
+                heard_turn();
+                drop_punches();
+            } else {
+                clips_at_bar(true);
+            }
+        }
         follow_lane(); // roadmap P5: the song's tempo where it starts, its count-in too
         if (render_out.cued()) { // a render starts with the first frame played
             if (bounce_song != song_mode || count_left) render_out.cancel();
