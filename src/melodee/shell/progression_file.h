@@ -16,10 +16,11 @@ bool write_progression(const std::string& path, const Progression& prog);
 
 // Where Melodee keeps the ones made on the MPC: <card>/Melodee/Progressions.
 std::string own_progression_folder(const std::string& card);
-// Every .progression on the card, sorted by name in each folder: Melodee's own folder first, then <card>/Progressions,
-// then the expansions' (<card>/Melodee/Samples/Expansions, and <card>/Samples/Expansions where older builds
-// installed them, four folders deep at most). At most `limit`.
-std::vector<std::string> list_progressions(const std::string& card, size_t limit = 512);
+// Every .progression on the card, sorted by name in each folder, a folder's files before its subfolders: Melodee's
+// own folder first, then <card>/Progressions, then the expansions' (<card>/Melodee/Samples/Expansions, and
+// <card>/Samples/Expansions where older builds installed them), each four folders deep at most (genre folders, issue
+// 65). At most `limit`.
+std::vector<std::string> list_progressions(const std::string& card, size_t limit = 2048);
 // A file's name without its folder and .progression.
 std::string progression_stem(const std::string& path);
 

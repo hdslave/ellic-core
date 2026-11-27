@@ -128,8 +128,8 @@ std::string own_progression_folder(const std::string& card) { return card.empty(
 std::vector<std::string> list_progressions(const std::string& card, size_t limit) {
     std::vector<std::string> out;
     if (card.empty()) return out;
-    collect(own_progression_folder(card), 0, out, limit);
-    collect(fs::path(card) / "Progressions", 2, out, limit);
+    collect(own_progression_folder(card), 4, out, limit);
+    collect(fs::path(card) / "Progressions", 4, out, limit);
     collect(fs::path(samples_folder(card)) / "Expansions", 4, out, limit);
     collect(fs::path(old_samples_folder(card)) / "Expansions", 4, out, limit); // where older builds installed them
     return out;
