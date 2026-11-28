@@ -54,6 +54,7 @@ void print_project(Project& project, PatternBank& bank, unsigned track, unsigned
     tr = project.tracks[t];
     const Track plain {};
     tr.set_name("");
+    tr.colour = plain.colour; // issue 69: the colour it shows is not part of its sound (a pick never prints it again)
     tr.mix = print_mix(project.tracks[t]); // unity and centred
     tr.strip = Strip {}; // the mixer's strip stays live on a frozen track (docs/MIXER_PLAN.md decision 1): never printed
     tr.pattern = uint8_t(p);

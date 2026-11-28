@@ -794,8 +794,16 @@ void arrange() {
         host->render(block.data(), 128, 1);
         // Issue 60: played from past the loop's end, the song runs to its end and stops (the loop never comes round).
         host->send({Command::Type::Play, 0, 0, 6, 1}); // from bar 7 of 8
+        host->render(block.data(), 128, 1);
+        // Issue 40: a mute, a solo and a pad's mute waiting for a step the song never reaches are set when it ends by
+        // itself, as Stop sets them (not left waiting, the pad blinking, until the next Play).
+        Command waits[] {{Command::Type::Mute, 0, 0, 0, 1}, {Command::Type::Solo, 1, 0, 0, 1}, {Command::Type::PadMute, 0, 0, 3, 1}};
+        for (auto& w : waits) { w.position = 16 * project->bar_ticks(); host->send(w); }
+        host->render(block.data(), 128, 1);
+        CHECK(host->mutes_waiting() == 3 && host->pad_mutes_waiting(0, 0) == 8u);
         for (unsigned n = 0; n < 2000; ++n) host->render(block.data(), 128, 1); // past bar 8's end
         CHECK(!host->playing());
+        CHECK(host->mutes_waiting() == 0 && host->pad_mutes_waiting(0, 0) == 0);
     }
     // A clip changed for another pattern in its place while it plays: the new pattern from the next bar, where the
     // clip has it by then (the old one played on to the clip's end).
@@ -8298,6 +8306,7 @@ void prints_f2a() {
     }
     CHECK(!changed([](Project& p, PatternBank&) { p.tracks[0].mix.mute = true; p.tracks[1].mix.solo = true; }));
     CHECK(!changed([](Project& p, PatternBank&) { p.tracks[0].set_name("Drums"); p.tracks[0].last_pad = 7; p.name[0] = 'X'; }));
+    CHECK(!changed([](Project& p, PatternBank&) { p.tracks[0].colour = 5; })); // issue 69: a track colour picked
     CHECK(!changed([](Project&, PatternBank& b) { put(b.at[1][0], 1, uint8_t(sampler_first_note), 50); }));     // another track's notes
     CHECK(!changed([](Project&, PatternBank& b) { put(b.at[0][0], 5, uint8_t(sampler_first_note), 50); }));     // another pattern
     CHECK(!changed([](Project& p, PatternBank&) { p.buses[0].fx.slots[0].params[0] = 10; p.master.slots[0] = {uint8_t(EffectKind::Drive), false, {}}; }));

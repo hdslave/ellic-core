@@ -1163,6 +1163,7 @@ void EngineHost::apply(const Command& c) {
                 running = false; // past the song's end, as mtc_place() and bar_start() end it
                 heard_turn();
                 drop_punches();
+                mutes_due(); // issue 40: what waits for its step is set, as Stop sets it
             } else {
                 clips_at_bar(true);
             }
@@ -2298,6 +2299,7 @@ void EngineHost::bar_start() {
         if (rendering) render_out.tail(); // on until the mix falls silent
         for (auto& s : slots) { for (auto& off : s.offs) if (off.key >= 0) { engine_note_off(s, off.key); off.key = -1; } s.held = {}; }
         drop_punches(); // no tick comes to end them
+        mutes_due(); // issue 40: nor the step a mute or solo waits for: set now, as Stop sets them
         return;
     }
     clips_at_bar(false);
@@ -2419,6 +2421,7 @@ void EngineHost::mtc_place(double seconds, bool round) {
             heard_turn();
             for (auto& s : slots) { for (auto& off : s.offs) if (off.key >= 0) { engine_note_off(s, off.key); off.key = -1; } s.held = {}; }
             drop_punches();
+            mutes_due(); // issue 40: what waits for its step is set, as Stop sets it
         } else {
             song_bar_now = b;
             clips_at_bar(true);
