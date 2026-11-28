@@ -281,6 +281,12 @@ public:
     // Roadmap P5: how many follow actions have come on a track, and the tracks a STOP left silent (a bit each).
     uint32_t follows_of(unsigned track) const { return follows_now[track % track_count].load(std::memory_order_relaxed); }
     uint32_t stopped_tracks() const { return stopped_now.load(std::memory_order_relaxed); }
+    // Issue 40: the tracks whose mute or solo waits for its step (Rec quantize's Q, a bit each), and a kit track's
+    // pads whose mute waits (a bit each, 64 to a word).
+    uint32_t mutes_waiting() const { return mute_waits_now.load(std::memory_order_relaxed); }
+    uint64_t pad_mutes_waiting(unsigned track, unsigned word) const {
+        return pad_waits_now[track % track_count][word % pad_wait_words].load(std::memory_order_relaxed);
+    }
     bool punching() const { return punch_on.load(std::memory_order_relaxed); }
     EffectKind pad_fx_kind(unsigned track, unsigned pad, unsigned slot) const { // for tests
         return (*pad_fx)[track % track_count][pad % sampler_pads][slot % pad_slots].kind();
@@ -671,6 +677,20 @@ private:
     uint16_t scene_tempo = 0; // a scene's tempo waiting for the bar its patterns launch on (0 none)
     uint16_t scene_mute_set = 0, scene_mute_on = 0; // a scene's mutes waiting for that bar: the tracks, those muted
     void scene_mutes_now(); // and now
+    // Issue 40: mutes pressed while playing with Rec quantize on wait for the next step of the track's Q (the
+    // command's position, in ticks): tracks' mutes and solos (the tracks, and on or off) and kit pads' mutes (a bit a
+    // pad), each track's due on one tick (wait_due), set there (mutes_due()) or on Stop.
+    static constexpr unsigned pad_wait_words = (sampler_pads + 63) / 64;
+    uint16_t mute_wait_set = 0, mute_wait_on = 0, solo_wait_set = 0, solo_wait_on = 0;
+    std::array<std::array<uint64_t, pad_wait_words>, track_count> pad_wait_set {}, pad_wait_on {};
+    std::array<uint32_t, track_count> wait_due {}, wait_grid {};
+    uint16_t pad_waits = 0; // the tracks with a pad's mute waiting
+    bool waits_on(unsigned t) const { return ((mute_wait_set | solo_wait_set | pad_waits) >> (t % track_count)) & 1; }
+    bool mute_waits(uint32_t grid) const { return running && grid != 0; }
+    void wait_for(unsigned t, uint32_t grid);   // the track's waits due on the next multiple of `grid`
+    void mutes_due(int track = -1);             // what waits on the track (-1: every track), now
+    void publish_mute_waits();
+    void pad_mute_now(Slot& slot, unsigned pad, bool on); // a kit pad's mute as set, at once
     // Roadmap P5: the song's tempo lane where the song plays now (0: none, or not the song), worked out each tick.
     uint16_t lane_tempo = 0;
     void follow_lane();
@@ -1212,6 +1232,8 @@ private:
     std::atomic<unsigned> kept_on {0}; // pad-fx C
     std::array<std::atomic<uint32_t>, track_count> follows_now {}; // roadmap P5
     std::atomic<uint32_t> stopped_now {0};
+    std::atomic<uint32_t> mute_waits_now {0};
+    std::array<std::array<std::atomic<uint64_t>, pad_wait_words>, track_count> pad_waits_now {};
 };
 
 } // namespace melodee

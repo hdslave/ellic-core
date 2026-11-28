@@ -4,6 +4,7 @@
 #include "melodee/model/chop_slices.h"
 #include <cstdint>
 #include <string>
+#include <vector>
 
 // A sample's slices kept in its WAV file, as the MPC 3 (and the stock MPC Sample) keep them: the "atem" chunk, JSON,
 // "value0" holding "defaultSlice", "Num slices" and "Slice 0", "Slice 1" ... each with its own Start and End (frames
@@ -23,5 +24,11 @@ SampleChop read_mpc_slices(const std::string& path);
 // JUNK chunk), else after the audio, the old ones made JUNK. Otherwise (a copy for an export) the file is written
 // beside, the chunks before the audio as the MPC writes them, and renamed over.
 bool write_mpc_slices(const std::string& path, const SampleChop& chop, bool in_place = true);
+
+// The file's slices as the "atem" chunk numbers them ("Slice 0" first), each its start and end in the file's own
+// frames (the end past its last frame), as an MPC 3 program's layer picks one by its sliceIndex (issue 62: a drum
+// kit's samples chained in one WAV). `frames`: the file's length. Empty when it has none or is not a WAV.
+struct FileSlice { uint64_t start = 0, end = 0; };
+std::vector<FileSlice> mpc_file_slices(const std::string& path, uint64_t* frames = nullptr);
 
 } // namespace melodee

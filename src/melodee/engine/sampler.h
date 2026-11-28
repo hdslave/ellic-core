@@ -90,7 +90,10 @@ public:
     bool pad_muted(unsigned pad) const { return pad < sampler_pads && ((muted[pad / 64] >> (pad % 64)) & 1); }
     // A region of a sample on no pad, for Chop's audition (plays one shot). With kit pad `pad` holding the sample, at
     // that pad's speed and pitch (Warp, Semi, Fine) as its slice's pad plays it; -1 as the file is.
+    // set_accent() before it is the audition's level (the browser's preview level).
     void audition(uint16_t sample, uint32_t start, uint32_t end, int velocity, int pad = -1, bool reverse = false);
+    // The audition sounding now glides to `gain` (the browser's preview level moved); nothing else of it changes.
+    void audition_level(float gain);
     // A sample is about to change: whatever plays it stops now.
     void sample_gone(uint16_t sample);
     // A kit pad shifted by `semitones`, its filter at `cutoff` (0..100; -1 its
@@ -130,8 +133,21 @@ public:
     // (a stretched voice its pitch only), gliding there as any change does. New hits start bent.
     static constexpr float bend_range = 2.0f;
     void set_bend(float amount) override;
-    // The sustain pedal (CC 64 at 64 or more): a note let go while it is down goes on until it comes up.
+    // The sustain pedal (CC 64 at 64 or more): a note let go while it is down goes on until it comes up. Every
+    // controller's value is kept (issue 66): a pad's CC layers and an instrument's CC regions are picked by it.
     void control(int cc, int value) override;
+    void set_wheel(float amount) override; // the mod wheel, kept as CC 1 for the same
+    // A controller's value as last heard, or `start` (an SFZ's set_cc, else 0) while none has come.
+    int cc_value(unsigned cc, int start = 0) const {
+        cc &= 127;
+        return (cc_heard[cc / 64] >> (cc % 64)) & 1 ? cc_values[cc] : start;
+    }
+    // A zone with a controller's range (SFZ locc / hicc): whether its controller is in it now.
+    bool zone_cc_open(const SampleZone& z) const {
+        if (z.cc < 0) return true;
+        const int v = cc_value(unsigned(z.cc), z.cc_start);
+        return v >= z.cc_low && v <= z.cc_high;
+    }
     void silence() override;
     void set_param(int id, int value) override;
     void render(float* out, unsigned frames) override; // mono fold, for callers that want one channel
@@ -395,8 +411,11 @@ private:
     std::array<int, sampler::Count> p {};
     uint32_t clock = 0;
     float accent = 1; // the sequencer's, for the voices started next (set_accent)
+    PadSound auditioned; // the audition voice's sound (audition()), which audition_level() aims it from
     float bend = 0;   // semitones, set_bend
     bool pedal = false;
+    std::array<uint8_t, 128> cc_values {};  // issue 66: each controller as last heard
+    std::array<uint64_t, 2> cc_heard {};    // and which have been
     bool keyed = false; // set_keyed()
     int keyed_root = 60; // set_keyed_root()
     int keyed_note(int key) const;

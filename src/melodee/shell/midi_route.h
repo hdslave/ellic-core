@@ -33,10 +33,10 @@ uint16_t note_tracks(const MidiConfig& config, const std::array<uint8_t, track_c
 bool track_hears(TrackMidiIn in, const std::string& driver, bool surface);
 
 // Remote (MIDI Config's Remote rows): what a CC does. Track: select `index`; Pattern: launch `index` on the selected
-// track; Scene: launch scene `index`. None: not a remote CC (it goes on to the tracks), or a value past the end
-// (Ignored: taken, nothing done).
+// track; Scene: launch scene `index`; Play: play, or stop while playing; Record: as Seq Record. None: not a remote CC
+// (it goes on to the tracks), or a value past the end or a transport CC let go (Ignored: taken, nothing done).
 struct RemoteJob {
-    enum class Kind : uint8_t { None, Ignored, Track, Pattern, Scene } kind = Kind::None;
+    enum class Kind : uint8_t { None, Ignored, Track, Pattern, Scene, Play, Record } kind = Kind::None;
     unsigned index = 0;
 };
 RemoteJob remote_cc(const MidiConfig& config, unsigned channel, unsigned cc, unsigned value);
@@ -55,6 +55,30 @@ int levels_key(const Track& track, int key, bool instrument, int root = 0);
 // The channel a track's notes go out on (its own, else MIDI Config's Out) and
 // when (PadMidiOut), for Command::MidiTrack.
 inline unsigned out_channel_of(const MidiConfig& config, const Track& track) { return track.midi_channel ? track.midi_channel : config.out_channel; }
+
+// MIDI clock in: the tempo it sets, held through the follower's wobble. A clock's own jitter moves the reading a
+// tenth or two either way now and then (an SMK-37 at 120: 120.0, now and then 119.9 or 119.8), which made the tempo,
+// and the header's BPM with every chip after it, shake. A reading less than `jump` tenths away is taken only once the
+// readings have stayed on that side for steady_pulses (four beats), so a slow ramp still follows; one `jump` or more
+// away at once. take() a pulse: the tempo in tenths (0: none yet).
+class TempoSteady {
+public:
+    static constexpr unsigned steady_pulses = 96;
+    static constexpr int jump = 5; // half a BPM
+    unsigned take(unsigned tenths) {
+        if (!tenths) return held;
+        const int off = int(tenths) - int(held);
+        if (!held || off >= jump || off <= -jump) { held = tenths; waiting = 0; side = 0; return held; }
+        if (!off) { waiting = 0; side = 0; return held; }
+        if ((off > 0 ? 1 : -1) != side) { side = off > 0 ? 1 : -1; waiting = 0; }
+        if (++waiting >= steady_pulses) { held = tenths; waiting = 0; side = 0; }
+        return held;
+    }
+    void reset() { held = waiting = 0; side = 0; }
+private:
+    unsigned held = 0, waiting = 0;
+    int side = 0;
+};
 
 // MIDI clock in: the tempo from the last pulses' kernel stamps. A pause of a
 // quarter second or more starts it over.

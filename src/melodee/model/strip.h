@@ -104,6 +104,10 @@ constexpr StripPart strip_lane_parts[] {StripPart::Trim, StripPart::Width, Strip
 constexpr unsigned motion_strip_base = motion_mix_end;
 constexpr unsigned motion_strip_count = sizeof(strip_lane_parts) / sizeof(strip_lane_parts[0]);
 static_assert(motion_strip_base + motion_strip_count <= motion_bend, "the strip's lanes fit below the pitch bend's");
+// Issue 66: a kit's or keygroup's MIDI controller as MIDI in moved it with Seq Record on (MotionPoint::pad: the CC
+// number), played back to the track's sound, so CC layers (a hi-hat's openness) and an SFZ's CC regions follow it.
+constexpr unsigned motion_cc = 253;
+static_assert(motion_strip_base + motion_strip_count <= motion_cc && motion_cc < motion_bend, "the CC lane fits below the pitch bend's");
 constexpr bool is_strip_lane(unsigned param) { return param >= motion_strip_base && param < motion_strip_base + motion_strip_count; }
 constexpr StripPart strip_lane_part(unsigned param) { return strip_lane_parts[(param - motion_strip_base) % motion_strip_count]; }
 // The lane of `part`, or -1 (a switch, the key).

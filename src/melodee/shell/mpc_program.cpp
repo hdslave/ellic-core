@@ -4,8 +4,12 @@
 #include "melodee/engine/dsp.h"
 #include "melodee/engine/engine_info.h"
 #include "melodee/model/scales.h"
+#include "melodee/shell/mpc_wav_slices.h"
 #include <juce_core/juce_core.h>
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <map>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -141,15 +145,47 @@ std::string parse_mpc_program(const std::string& whole, KeygroupProgram& program
     return {};
 }
 
+// Issue 62: a layer that plays one slice of its file (an MPC 3 kit's samples chained in one WAV, its sliceIndex):
+// its region that slice, from the file's own slices, unless the program gives one inside the file.
+static void slice_layers(const std::string& path, KeygroupProgram& program) {
+    const fs::path folder = fs::path(path).parent_path();
+    std::map<std::string, std::pair<std::vector<FileSlice>, uint64_t>> files; // read once a file
+    for (auto& instrument : program.instruments)
+        for (auto& layer : instrument.layers) {
+            auto index = layer.find("SliceIndex");
+            auto name = layer.find("SampleName");
+            if (index == layer.end() || name == layer.end()) continue;
+            const long n = std::lround(std::atof(index->second.c_str()));
+            if (n < 0) continue;
+            auto known = files.find(name->second);
+            if (known == files.end()) {
+                auto found = found_beside(folder, name->second);
+                uint64_t frames = 0;
+                auto slices = found.empty() ? std::vector<FileSlice> {} : mpc_file_slices(found.string(), &frames);
+                known = files.emplace(name->second, std::make_pair(std::move(slices), frames)).first;
+            }
+            const auto& [slices, frames] = known->second;
+            if (size_t(n) >= slices.size() || slices[size_t(n)].end <= slices[size_t(n)].start) continue;
+            const double start = std::atof(layer["SliceStart"].c_str()), end = std::atof(layer["SliceEnd"].c_str());
+            const bool whole = start <= 0 && (end <= 0 || end + 1 >= double(frames)); // the program's region: the whole file
+            if (!whole) continue;
+            layer["SliceStart"] = std::to_string(double(slices[size_t(n)].start));
+            layer["SliceEnd"] = std::to_string(double(slices[size_t(n)].end));
+        }
+}
+
 std::string read_program(const std::string& path, const std::string& bytes, KeygroupProgram& program) {
-    if (bytes.size() >= 2 && uint8_t(bytes[0]) == 0x1f && uint8_t(bytes[1]) == 0x8b) // the MPC 3's: gzip around JSON
-        return read_mpc_json_program(std::vector<uint8_t>(bytes.begin(), bytes.end()), path, program);
+    if (bytes.size() >= 2 && uint8_t(bytes[0]) == 0x1f && uint8_t(bytes[1]) == 0x8b) { // the MPC 3's: gzip around JSON
+        auto error = read_mpc_json_program(std::vector<uint8_t>(bytes.begin(), bytes.end()), path, program);
+        if (error.empty()) slice_layers(path, program);
+        return error;
+    }
     return parse_mpc_program(bytes, program);
 }
 
 bool is_mpc_program(const std::string& path) {
     auto kind = lowered(fs::path(path).extension().string());
-    return kind == ".xpm" || kind == ".xty";
+    return kind == ".xpm" || kind == ".xty" || kind == ".xtd"; // .xtd: an MPC 3 drum kit (issue 62), JSON as an .xty
 }
 
 bool is_drum_program(const std::string& path) {
@@ -159,7 +195,8 @@ bool is_drum_program(const std::string& path) {
     if (head.size() >= 2 && uint8_t(head[0]) == 0x1f && uint8_t(head[1]) == 0x8b) { // JSON: read whole (an .xty is a few hundred KB)
         std::string whole;
         KeygroupProgram program;
-        return read_bytes(path, whole, 8u << 20) && read_program(path, whole, program).empty() && program.type == "Drum";
+        return read_bytes(path, whole, 8u << 20) && read_mpc_json_program(std::vector<uint8_t>(whole.begin(), whole.end()), path, program).empty() &&
+               program.type == "Drum"; // the type alone: its layers' slices are not looked for
     }
     return head.find("<Program type=\"Drum\"") != std::string::npos;
 }
@@ -285,7 +322,7 @@ bool split_program_pad(const std::string& path, std::string& file, std::string& 
     file = path.substr(0, mark);
     which = path.substr(mark + 1);
     auto kind = lowered(fs::path(file).extension().string());
-    return kind == ".xpm" || kind == ".xpj" || kind == ".xty";
+    return kind == ".xpm" || kind == ".xpj" || kind == ".xty" || kind == ".xtd";
 }
 
 std::map<std::string, KeygroupInstrument> program_pads(const std::string& file, std::string& error) {

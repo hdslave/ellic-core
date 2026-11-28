@@ -70,18 +70,21 @@ inline float volume_gain(int level) { return level <= 0 ? 0.0f : std::pow(10.0f,
 // first repeat picked until the pad is let go. Every other value of the pad
 // (envelope, filter, play, loop, warp) is the pad's and goes over each.
 constexpr unsigned pad_layers = 4;
-enum class LayerPlay : uint8_t { Velocity, Cycle, Random, CycleHold, RandomHold, Count }; // saved: append only
+// Cc (issue 66): the layers whose ranges hold the value a MIDI controller (PadSound::layer_cc, CC 4 first, a hi-hat
+// pedal's) has now play, as Velocity's hold the hit's velocity; 0 counts as 1. Older builds read it as Random hold.
+enum class LayerPlay : uint8_t { Velocity, Cycle, Random, CycleHold, RandomHold, Cc, Count }; // saved: append only
 inline const char* layer_play_name(LayerPlay l) {
-    static const char* const names[] {"VELOCITY", "CYCLE", "RANDOM", "CYCLE HOLD", "RANDOM HOLD"};
+    static const char* const names[] {"VELOCITY", "CYCLE", "RANDOM", "CYCLE HOLD", "RANDOM HOLD", "CC"};
     return names[unsigned(l) % unsigned(LayerPlay::Count)];
 }
+constexpr uint8_t layer_cc_first = 4; // a hi-hat pedal's CC (Foot Controller)
 struct PadLayer {
     uint16_t sample = no_sample;  // index into Project::samples
     uint32_t start = 0, end = 0;  // 44.1 kHz frames; end 0 means the sample's end
     int8_t pitch = 0, fine = 0;   // semitones and cents over the pad's
     int16_t gain = 0;             // hundredths of a dB over the pad's
     int8_t pan = 0;               // over the pad's, -50..50
-    uint8_t low = 1, high = 127;  // the velocities it plays under Velocity
+    uint8_t low = 1, high = 127;  // the velocities it plays under Velocity, the controller's values under Cc
     bool used() const { return sample != no_sample; }
 };
 
@@ -116,6 +119,7 @@ struct PadSound {
     std::array<PadLayer, pad_layers - 1> layers {};
     uint8_t low_velocity = 1, high_velocity = 127;
     LayerPlay layer_play = LayerPlay::Velocity;
+    uint8_t layer_cc = layer_cc_first; // Cc's controller, 1-127 (LYCC)
     // Roadmap P3: a loop's seam crossfaded over this many milliseconds (0 none), the same time at any rate (PXFD).
     uint8_t loop_xfade = 0;
     // The colour the pad lights and is drawn in, 0xRRGGBB; 0: the track's. Stage's COLOUR sets it, an MPC kit brings
@@ -161,8 +165,42 @@ struct PadSound {
         return false;
     }
     // Whether the layer and play values are as a new pad has them (LAYR need not hold this pad).
-    bool plain_layers() const { return !layered() && low_velocity == 1 && high_velocity == 127 && layer_play == LayerPlay::Velocity; }
+    bool plain_layers() const {
+        return !layered() && low_velocity == 1 && high_velocity == 127 && layer_play == LayerPlay::Velocity && layer_cc == layer_cc_first;
+    }
 };
+// LAYERS' PLAY card (issue 66): the five ways a hit picks, then CC 1 to CC 127 (Cc on that controller). Picking CC
+// first, with every used layer still on the whole range, splits the range evenly between them in order (closed,
+// quarter, half, open for a hi-hat's four), CC 0 on the first.
+constexpr int layer_play_choices = int(LayerPlay::Cc) + 127;
+inline int layer_play_choice(const PadSound& p) {
+    return p.layer_play == LayerPlay::Cc ? int(LayerPlay::Cc) + std::clamp(int(p.layer_cc), 1, 127) - 1 : int(p.layer_play);
+}
+inline void spread_layer_ranges(PadSound& p) {
+    std::array<unsigned, pad_layers> used {};
+    unsigned count = 0;
+    for (unsigned n = 0; n < pad_layers; ++n) {
+        const PadLayer l = p.layer(n);
+        if (!l.used()) continue;
+        if (l.low != 1 || l.high != 127) return; // ranges of their own: kept
+        used[count++] = n;
+    }
+    if (count < 2) return;
+    for (unsigned k = 0; k < count; ++k) {
+        const uint8_t low = uint8_t(std::max(1u, k * 128 / count)), high = uint8_t((k + 1) * 128 / count - 1);
+        if (used[k]) { p.layers[used[k] - 1].low = low; p.layers[used[k] - 1].high = high; }
+        else { p.low_velocity = low; p.high_velocity = high; }
+    }
+}
+inline void set_layer_play_choice(PadSound& p, int choice) {
+    choice = std::clamp(choice, 0, layer_play_choices - 1);
+    if (choice < int(LayerPlay::Cc)) { p.layer_play = LayerPlay(choice); return; }
+    const bool was = p.layer_play == LayerPlay::Cc;
+    p.layer_play = LayerPlay::Cc;
+    p.layer_cc = uint8_t(choice - int(LayerPlay::Cc) + 1);
+    if (!was) spread_layer_ranges(p);
+}
+
 // Pad `sound` as layer n of it plays: that layer's sample and region, its offsets over the pad's.
 inline PadSound layer_sound(const PadSound& sound, unsigned n) {
     if (!n) return sound;
@@ -306,9 +344,9 @@ struct SampleRef {
         };
         const char* end = path + std::strlen(path);
         if (const char* mark = std::strrchr(path, '#'); mark && mark + 1 < end)
-            if (kind(path, mark, "xpm") || kind(path, mark, "xty") || kind(path, mark, "xpj") || kind(path, mark, "sf2")) return true;
+            if (kind(path, mark, "xpm") || kind(path, mark, "xty") || kind(path, mark, "xtd") || kind(path, mark, "xpj") || kind(path, mark, "sf2")) return true;
         if (dspreset()) return true;
-        return kind(path, end, "sfz") || kind(path, end, "xpm") || kind(path, end, "xty") || kind(path, end, "exs");
+        return kind(path, end, "sfz") || kind(path, end, "xpm") || kind(path, end, "xty") || kind(path, end, "xtd") || kind(path, end, "exs");
     }
     // A DecentSampler preset (roadmap P3).
     bool dspreset() const {

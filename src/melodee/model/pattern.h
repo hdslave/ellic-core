@@ -346,6 +346,10 @@ Pattern played_pattern(const Pattern& p, unsigned speed);
 // Roadmap P1, the feel: the pattern as the audio thread plays it (its notes moved and their velocities scaled as its
 // Feel says; the same pattern when plain), and a groove taken from a pattern's notes (none when it has none).
 Pattern feel_pattern(const Pattern& p);
+// Time Correct's APPLY (issue 55): the notes moved and their velocities set as feel_pattern() plays them, and the
+// feel back to plain, so the pattern sounds the same and Roll and Step Edit show the notes where they play. Notes
+// hidden past the pattern's end (or their kit lane's own) stay as written. Motion and note lengths are not moved.
+void apply_feel(Pattern& p);
 void groove_of(const Pattern& source, Feel& feel);
 
 // The events starting in step `step` of a pattern's Q: events[first, first + count) (Step Edit lists them).

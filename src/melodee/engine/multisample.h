@@ -60,6 +60,10 @@ struct SampleZone {
     bool key_power = true, vel_power = true;
     // A keyswitch's (sw_last): it plays while that key was the last of the instrument's keyswitches pressed; -1 always.
     int16_t switch_key = -1;
+    // Issue 66: a controller's range (SFZ locc / hicc, the first controller but the sustain pedal's): it plays while
+    // that controller is in it, the controller at `cc_start` until one comes (set_cc); cc -1 always.
+    int8_t cc = -1;
+    uint8_t cc_low = 0, cc_high = 127, cc_start = 0;
 };
 
 // How loud a zone's crossfades leave it at `key` and `velocity`, 0..1.

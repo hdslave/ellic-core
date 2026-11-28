@@ -510,6 +510,7 @@ void SamplerEngine::zones_on(Multisample& multi, const PadSound& sound, int pad,
         const auto& z = multi.zones[n];
         if (key < z.low_key || key > z.high_key || vel < z.low_velocity || vel > z.high_velocity) continue;
         if (z.on_release || (z.switch_key >= 0 && z.switch_key != articulation) || zone_crossfade(z, key, vel) <= 0) continue;
+        if (!zone_cc_open(z)) continue; // issue 66: its controller's range (SFZ locc / hicc)
         uint32_t turn = multi.turns[n]++;
         if (z.sequence_length > 1 && turn % z.sequence_length != z.sequence - 1) continue;
         if (dice < z.low_random || (dice >= z.high_random && z.high_random < 1.0f)) continue;
@@ -627,8 +628,8 @@ void SamplerEngine::layers_on(const PadSound& sound, int pad, int velocity, int 
         seed = seed * 1664525u + 1013904223u;
         picked[chosen++] = used[(seed >> 16) % count];
         break;
-    default: {
-        const int vel = std::clamp(velocity, 1, 127);
+    default: { // Velocity, or Cc (issue 66): the controller's value now, 0 as 1
+        const int vel = sound.layer_play == LayerPlay::Cc ? std::max(cc_value(sound.layer_cc), 1) : std::clamp(velocity, 1, 127);
         for (unsigned k = 0; k < count; ++k) {
             const PadLayer l = sound.layer(used[k]);
             if (vel >= l.low && vel <= l.high) picked[chosen++] = used[k];
@@ -753,6 +754,10 @@ void SamplerEngine::set_bend(float amount) {
 }
 
 void SamplerEngine::control(int cc, int value) {
+    if (cc >= 0 && cc < 128) { // issue 66: kept for the CC layers and regions
+        cc_values[size_t(cc)] = uint8_t(std::clamp(value, 0, 127));
+        cc_heard[size_t(cc) / 64] |= uint64_t(1) << (cc % 64);
+    }
     if (cc != 64) return;
     const bool down = value >= 64;
     if (down == pedal) return;
@@ -762,6 +767,8 @@ void SamplerEngine::control(int cc, int value) {
     pedal_count = 0;
     for (unsigned n = 0; n < count; ++n) release_key(pedal_offs[n]);
 }
+
+void SamplerEngine::set_wheel(float amount) { control(1, int(std::lround(std::clamp(amount, 0.0f, 1.0f) * 127))); }
 
 void SamplerEngine::note_off(int key) { release_key(keyed ? keyed_note(key) : key); }
 
@@ -821,7 +828,7 @@ void SamplerEngine::release_zones(int pad, int semitones) {
     for (size_t n = 0; n < multi->zones.size(); ++n) {
         const auto& z = multi->zones[n];
         if (!z.on_release || key < z.low_key || key > z.high_key || vel < z.low_velocity || vel > z.high_velocity) continue;
-        if ((z.switch_key >= 0 && z.switch_key != articulation) || zone_crossfade(z, key, vel) <= 0) continue;
+        if ((z.switch_key >= 0 && z.switch_key != articulation) || zone_crossfade(z, key, vel) <= 0 || !zone_cc_open(z)) continue;
         uint32_t turn = multi->turns[n]++;
         if (z.sequence_length > 1 && turn % z.sequence_length != z.sequence - 1) continue;
         if (dice < z.low_random || (dice >= z.high_random && z.high_random < 1.0f)) continue;
@@ -846,11 +853,25 @@ void SamplerEngine::audition(uint16_t sample, uint32_t from, uint32_t to, int ve
     sound.reverse = reverse; // a reversed slice heard on Chop with no kit pad to play it
     for (auto& v : voices) if (v.pad == int(sampler_pads)) v.choked = true; // one audition at a time
     if (sample == no_sample) return; // only that: the audition stops
+    auditioned = sound;
     Voice& v = free_voice();
     start(v, sound, int(sampler_pads), velocity);
     // At the pad's speed with its pitch kept (Warp by Beats or Tones): stretched, as the pad's voice is. An audition
     // as the file is never stretches (the kit's Tune under PITCH Stretch moves it as tape does, as before).
     if (as_pad && v.pad >= 0 && !v.stretch && std::fabs(v.step - v.advance) > 1e-6) begin_stretch(v, false);
+}
+
+void SamplerEngine::audition_level(float gain) {
+    glide_setup();
+    for (auto& v : voices) {
+        if (v.pad != int(sampler_pads) || v.choked) continue;
+        Voice probe = v; // aimed again at the new level; only its gain is taken, so its pitch and stretch stay
+        probe.accent = gain;
+        aim(probe, auditioned, nullptr, nullptr, v.key);
+        v.accent = gain;
+        v.aim.gain = probe.aim.gain;
+        v.gliding = glide_frames;
+    }
 }
 
 void SamplerEngine::sample_gone(uint16_t slot) {

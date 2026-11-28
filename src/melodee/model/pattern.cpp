@@ -232,6 +232,15 @@ double humanize_draw(const Event& e, unsigned salt) {
 }
 } // namespace
 
+void apply_feel(Pattern& p) {
+    if (p.feel.plain()) { p.feel = Feel {}; return; }
+    Pattern heard = feel_pattern(p);
+    for (const auto& e : p.events)
+        if (e.tick >= p.lane_length(e.key)) heard.add(e); // hidden: kept as written, for a longer pattern to show
+    p.events = std::move(heard.events);
+    p.feel = Feel {};
+}
+
 Pattern feel_pattern(const Pattern& p) {
     if (p.feel.plain()) return p;
     Pattern out = p;

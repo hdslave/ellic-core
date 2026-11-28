@@ -53,6 +53,9 @@ RemoteJob remote_cc(const MidiConfig& config, unsigned channel, unsigned cc, uns
     if (cc == config.track_cc) return value < track_count ? RemoteJob {K::Track, value} : RemoteJob {K::Ignored, 0};
     if (cc == config.pattern_cc) return value < pattern_count ? RemoteJob {K::Pattern, value} : RemoteJob {K::Ignored, 0};
     if (cc == config.scene_cc) return value < pattern_count ? RemoteJob {K::Scene, value} : RemoteJob {K::Ignored, 0};
+    // The transport's (issue 7): a press, 64 or more; its let go (below 64) taken and nothing done.
+    if (cc == config.play_cc) return value >= 64 ? RemoteJob {K::Play, 0} : RemoteJob {K::Ignored, 0};
+    if (cc == config.record_cc) return value >= 64 ? RemoteJob {K::Record, 0} : RemoteJob {K::Ignored, 0};
     return {};
 }
 

@@ -205,10 +205,16 @@ const juce::var& sounding_layer(const juce::var& instrument) {
     return nothing;
 }
 
+// A layer that names a file: an unused one names none, or (an MPC 3 kit, issue 62) only its folder, "../Samples/".
+bool names_file(const juce::var& layer) {
+    const auto file = layer["sampleFile"].toString();
+    return file.isNotEmpty() && !file.endsWithChar('/') && !file.endsWithChar('\\');
+}
+
 unsigned sounding_layers(const juce::var& instrument) {
     unsigned count = 0;
     if (const auto* layers = instrument["layersv"].getArray())
-        for (const auto& layer : *layers) count += flag(layer, "active", true) && !flag(layer, "mute") && layer["sampleFile"].toString().isNotEmpty();
+        for (const auto& layer : *layers) count += flag(layer, "active", true) && !flag(layer, "mute") && names_file(layer);
     return count;
 }
 
@@ -220,7 +226,14 @@ KeygroupTags layer_tags(const juce::var& layer, const std::string& data_folder) 
     KeygroupTags tags;
     tags["Active"] = flag(layer, "active", true) ? "True" : "False";
     tags["Mute"] = flag(layer, "mute") ? "True" : "False";
-    tags["SampleName"] = data_folder + "/" + fs::path(layer["sampleFile"].toString().toStdString()).filename().string();
+    // Its file in the data folder; one up from it ("../Samples/Snares.wav", an MPC 3 kit's shared samples, issue 62):
+    // from the program's own folder.
+    std::string file = layer["sampleFile"].toString().replaceCharacter('\\', '/').toStdString();
+    if (file.rfind("../", 0) == 0) tags["SampleName"] = fs::path(file.substr(3)).lexically_normal().generic_string();
+    else tags["SampleName"] = data_folder + "/" + fs::path(file).filename().string();
+    // The slice of its file it plays (a kit's samples chained in one WAV): mpc_program.cpp sets its region from the
+    // file's slices once the file is found, unless the program gives a region of its own.
+    if (layer.hasProperty("sliceIndex")) tags["SliceIndex"] = text(integer(layer, "sliceIndex"));
     tags["VelStart"] = text(integer(layer, "velocityStart"));
     tags["VelEnd"] = text(integer(layer, "velocityEnd", 127));
     tags["TuneCoarse"] = text(integer(layer, "coarseTune"));
@@ -279,7 +292,7 @@ KeygroupInstrument instrument_tags(const juce::var& instrument, int number_of, c
     t["FilterRelease"] = text(number(filter_env["Release"], "value0"));
     if (const auto* layers = instrument["layersv"].getArray())
         for (const auto& layer : *layers)
-            if (layer["sampleFile"].toString().isNotEmpty()) made.layers.push_back(layer_tags(layer, data_folder));
+            if (names_file(layer)) made.layers.push_back(layer_tags(layer, data_folder));
     return made;
 }
 

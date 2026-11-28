@@ -13,6 +13,7 @@ inline int lane_own(const Project& project, unsigned t, unsigned param, unsigned
     const auto& track = project.tracks[t % track_count];
     if (param == motion_wheel) return track.wheel;
     if (param == motion_bend) return track.bend;
+    if (param == motion_cc) return 0; // issue 66: a controller has no value of its own in the project
     if (is_strip_lane(param)) return strip_get(track.strip, strip_lane_part(param)); // the mixer
     if (is_mix_lane(param)) {
         if (param == motion_level) return track.mix.level;
